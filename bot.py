@@ -1,62 +1,161 @@
 import os
 import uuid
+from pathlib import Path
+
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from formatter_service import format_docx
 
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
+TEMP_DIR = Path("bot_storage")
+TEMP_DIR.mkdir(exist_ok=True)
 
-TEMP_DIR = "bot_storage"
-os.makedirs(TEMP_DIR, exist_ok=True)
+MENU_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["Контакт", "Какие методички поддерживаются?"],
+    ],
+    resize_keyboard=True,
+)
 
-async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+METHOD_GUIDE_BASENAME = "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ"
+ASSETS_DIR = Path("assets")
+
+
+def find_method_file() -> Path | None:
+    for ext in [".docx", ".pdf"]:
+        candidate = ASSETS_DIR / f"{METHOD_GUIDE_BASENAME}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "Здравствуйте! Это бот для форматирования курсовых работ КФУ.\n\n"
+        "Что он делает:\n"
+        "— принимает файл .docx;\n"
+        "— приводит оформление к нужному виду;\n"
+        "— возвращает исправленный документ.\n\n"
+        "Можно сразу отправить файл на обработку.\n"
+        "Также ниже доступны кнопки с контактом и поддерживаемой методичкой."
+    )
+    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+
+
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "Контакт разработчика:\n"
+        "@aelart\n\n"
+        "Бот разработан @aelart."
+    )
+    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+
+
+async def method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "Сейчас поддерживается методичка:\n"
+        "«Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ»"
+    )
+    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+
+    method_file = find_method_file()
+    if method_file is not None:
+        await update.message.reply_document(document=method_file.open("rb"))
+    else:
+        await update.message.reply_text(
+            "Файл методички пока не найден в папке assets.",
+            reply_markup=MENU_KEYBOARD,
+        )
+
+
+async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+
+    if text == "Контакт":
+        await contact_handler(update, context)
+        return
+
+    if text == "Какие методички поддерживаются?":
+        await method_handler(update, context)
+        return
+
+    await update.message.reply_text(
+        "Можно отправить .docx-файл на обработку или воспользоваться кнопками ниже.",
+        reply_markup=MENU_KEYBOARD,
+    )
+
+
+async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.document:
+        return
 
     file = update.message.document
 
-    if not file.file_name.endswith(".docx"):
-        await update.message.reply_text("Отправьте файл .docx")
+    if not file.file_name or not file.file_name.lower().endswith(".docx"):
+        await update.message.reply_text("Пожалуйста, отправьте файл в формате .docx", reply_markup=MENU_KEYBOARD)
         return
 
-    await update.message.reply_text("Файл получен. Форматирую...")
+    await update.message.reply_text("Файл получен. Форматирую...", reply_markup=MENU_KEYBOARD)
 
-    file_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    original_name = Path(file.file_name)
+    safe_name = f"{original_name.stem}_safe.docx"
 
-    input_path = f"{TEMP_DIR}/{file_id}_input.docx"
-    output_path = f"{TEMP_DIR}/{file_id}_output.docx"
+    input_path = TEMP_DIR / f"{job_id}_input.docx"
+    output_path = TEMP_DIR / safe_name
 
     telegram_file = await file.get_file()
-    await telegram_file.download_to_drive(input_path)
+    await telegram_file.download_to_drive(str(input_path))
 
     try:
-        format_docx(input_path, output_path)
+        format_docx(str(input_path), str(output_path))
 
-        await update.message.reply_document(
-            document=open(output_path, "rb"),
-            filename="formatted.docx"
-        )
+        with output_path.open("rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=safe_name,
+                reply_markup=MENU_KEYBOARD,
+            )
 
     except Exception as e:
-        await update.message.reply_text(f"Ошибка обработки: {e}")
+        await update.message.reply_text(
+            f"Ошибка обработки: {e}",
+            reply_markup=MENU_KEYBOARD,
+        )
 
     finally:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        if input_path.exists():
+            input_path.unlink()
+        if output_path.exists():
+            output_path.unlink()
 
 
-def main():
+def main() -> None:
+    if not TOKEN:
+        raise RuntimeError("Переменная BOT_TOKEN не задана")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("contact", contact_handler))
+    app.add_handler(CommandHandler("method", method_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))
 
     print("Бот запущен")
-
     app.run_polling()
 
 
