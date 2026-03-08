@@ -1,7 +1,21 @@
 import os
 import uuid
+<<<<<<< HEAD
 from datetime import datetime
 from pathlib import Path
+=======
+from pathlib import Path
+
+from dotenv import load_dotenv
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
 
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup
@@ -23,13 +37,17 @@ import models  # noqa: F401
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
+<<<<<<< HEAD
 ADMIN_TELEGRAM_ID = 5279414391
+=======
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
 TEMP_DIR = Path("bot_storage")
 TEMP_DIR.mkdir(exist_ok=True)
 
 MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["Контакт", "Какие методички поддерживаются?"],
+<<<<<<< HEAD
         ["Моя ссылка", "Баланс"],
     ],
     resize_keyboard=True,
@@ -37,6 +55,15 @@ MENU_KEYBOARD = ReplyKeyboardMarkup(
 METHOD_GUIDE_BASENAME = "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ"
 ASSETS_DIR = Path("assets")
 
+=======
+    ],
+    resize_keyboard=True,
+)
+
+METHOD_GUIDE_BASENAME = "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ"
+ASSETS_DIR = Path("assets")
+
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
 
 def find_method_file() -> Path | None:
     for ext in [".docx", ".pdf"]:
@@ -46,6 +73,7 @@ def find_method_file() -> Path | None:
     return None
 
 
+<<<<<<< HEAD
 def generate_referral_code() -> str:
     return uuid.uuid4().hex[:10]
 
@@ -532,6 +560,36 @@ async def method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "«Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ»",
         reply_markup=MENU_KEYBOARD,
     )
+=======
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "Здравствуйте! Это бот для форматирования курсовых работ КФУ.\n\n"
+        "Что он делает:\n"
+        "— принимает файл .docx;\n"
+        "— приводит оформление к нужному виду;\n"
+        "— возвращает исправленный документ.\n\n"
+        "Можно сразу отправить файл на обработку.\n"
+        "Также ниже доступны кнопки с контактом и поддерживаемой методичкой."
+    )
+    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+
+
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "Контакт разработчика:\n"
+        "@aelart\n\n"
+        "Бот разработан @aelart."
+    )
+    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+
+
+async def method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "Сейчас поддерживается методичка:\n"
+        "«Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ»"
+    )
+    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
 
     method_file = find_method_file()
     if method_file is not None:
@@ -557,6 +615,7 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await method_handler(update, context)
         return
 
+<<<<<<< HEAD
     if text == "Моя ссылка":
         await referral_handler(update, context)
         return
@@ -565,6 +624,8 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await balance_handler(update, context)
         return
 
+=======
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
     await update.message.reply_text(
         "Можно отправить .docx-файл на обработку или воспользоваться кнопками ниже.",
         reply_markup=MENU_KEYBOARD,
@@ -572,12 +633,17 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+<<<<<<< HEAD
     if not update.message or not update.message.document or not update.effective_user:
+=======
+    if not update.message or not update.message.document:
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
         return
 
     file = update.message.document
 
     if not file.file_name or not file.file_name.lower().endswith(".docx"):
+<<<<<<< HEAD
         await update.message.reply_text(
             "Пожалуйста, отправьте файл в формате .docx",
             reply_markup=MENU_KEYBOARD,
@@ -617,6 +683,32 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "Файл получен. Форматирую...",
             reply_markup=MENU_KEYBOARD,
         )
+=======
+        await update.message.reply_text("Пожалуйста, отправьте файл в формате .docx", reply_markup=MENU_KEYBOARD)
+        return
+
+    await update.message.reply_text("Файл получен. Форматирую...", reply_markup=MENU_KEYBOARD)
+
+    job_id = str(uuid.uuid4())
+    original_name = Path(file.file_name)
+    safe_name = f"{original_name.stem}_safe.docx"
+
+    input_path = TEMP_DIR / f"{job_id}_input.docx"
+    output_path = TEMP_DIR / safe_name
+
+    telegram_file = await file.get_file()
+    await telegram_file.download_to_drive(str(input_path))
+
+    try:
+        format_docx(str(input_path), str(output_path))
+
+        with output_path.open("rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=safe_name,
+                reply_markup=MENU_KEYBOARD,
+            )
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
 
         job_id = str(uuid.uuid4())
         original_name = Path(file.file_name)
@@ -684,6 +776,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await send_referral_message(update, context, user)
 
     except Exception as e:
+<<<<<<< HEAD
         db.rollback()
 
         if formatting_request_id is not None:
@@ -692,34 +785,48 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if formatting_request_id is not None and user_id is not None:
             refund_one_credit_in_new_session(user_id, str(formatting_request_id))
 
+=======
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
         await update.message.reply_text(
             f"Ошибка обработки: {e}",
             reply_markup=MENU_KEYBOARD,
         )
 
     finally:
+<<<<<<< HEAD
         db.close()
 
         if input_path and input_path.exists():
             input_path.unlink()
         if output_path and output_path.exists():
+=======
+        if input_path.exists():
+            input_path.unlink()
+        if output_path.exists():
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
             output_path.unlink()
 
 
 def main() -> None:
     if not TOKEN:
         raise RuntimeError("Переменная BOT_TOKEN не задана")
+<<<<<<< HEAD
 
     Base.metadata.create_all(bind=engine)
+=======
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_handler))
+<<<<<<< HEAD
     app.add_handler(CommandHandler("referral", referral_handler))
     app.add_handler(CommandHandler("balance", balance_handler))
     app.add_handler(CommandHandler("userinfo", userinfo_handler))
     app.add_handler(CommandHandler("givecredits", givecredits_handler))
     app.add_handler(CommandHandler("markpaid", markpaid_handler))
+=======
+>>>>>>> fb5eef5 (project cleanup and move formatter to guides)
     app.add_handler(CommandHandler("contact", contact_handler))
     app.add_handler(CommandHandler("method", method_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
