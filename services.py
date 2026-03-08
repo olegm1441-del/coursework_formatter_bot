@@ -408,26 +408,6 @@ def find_method_file(guide_code: str) -> Path | None:
 
     return None
 
-    # 1. Сначала ищем точное совпадение имени файла без расширения
-    for path in ASSETS_DIR.iterdir():
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in {".docx", ".pdf"}:
-            continue
-        if path.stem.strip().lower() == basename:
-            return path
-
-    # 2. Потом ищем частичное совпадение, чтобы пережить мелкие расхождения в имени
-    for path in ASSETS_DIR.iterdir():
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in {".docx", ".pdf"}:
-            continue
-        if basename in path.stem.strip().lower():
-            return path
-
-    return None
-
 
 def build_guide_selection_text(user: User) -> str:
     current_code = get_user_selected_guide_code(user)
