@@ -152,7 +152,7 @@ def enforce_single_blank_after_structural_headings(doc, body_start_idx=0):
 
 from pathlib import Path
 import re
-
+from copy import deepcopy
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
