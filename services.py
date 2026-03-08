@@ -8,7 +8,15 @@ from dotenv import load_dotenv
 from sqlalchemy.exc import IntegrityError
 
 from db import SessionLocal
-from models import CreditLedger, Document, FormattingRequest, Referral, User
+from models import (
+    User,
+    Referral,
+    Payment,
+    CreditLedger,
+    Document,
+    FormattingRequest,
+    AnalyticsEvent,
+)
 from guides.coursework_kfu_2025.formatter_service import format_docx
 
 
@@ -347,7 +355,22 @@ def apply_successful_payment(db, paid_user_id: int, credits: int, provider: str 
 
     grant_referral_payment_bonus_if_needed(db, paid_user_id)
 
-
+def track_event(
+    db,
+    event_name: str,
+    user_id: int | None = None,
+    source: str | None = None,
+    payload_json: str | None = None,
+) -> None:
+    event = AnalyticsEvent(
+        user_id=user_id,
+        event_name=event_name,
+        source=source,
+        payload_json=payload_json,
+    )
+    db.add(event)
+    db.commit()
+    
 # =========================
 # Методички
 # =========================
