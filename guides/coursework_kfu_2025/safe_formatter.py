@@ -1142,10 +1142,9 @@ def ensure_section_break_before_introduction(document, body_start):
 
 def ensure_front_matter_layout(document, body_start):
     """
-    Нормализует первые страницы:
-    - если есть СОДЕРЖАНИЕ до ВВЕДЕНИЯ, оно должно начинаться с новой страницы;
-    - ВВЕДЕНИЕ должно начинаться с новой секции и с новой страницы;
-    - если СОДЕРЖАНИЯ нет, ВВЕДЕНИЕ просто идет после титула на новой странице.
+    Приводит первые страницы к стабильной модели секций:
+    - если есть содержание: [титул] [содержание] [введение+основная часть]
+    - если содержания нет: [титул] [введение+основная часть]
     """
     if body_start is None or body_start <= 0:
         return
@@ -1153,19 +1152,22 @@ def ensure_front_matter_layout(document, body_start):
     paragraphs = document.paragraphs
     intro_p = paragraphs[body_start]
 
-        # Чистим старые page-break артефакты ДО ВВЕДЕНИЯ
-    for i in range(body_start):
-        p = paragraphs[i]
+    # 1. Убрать старые page-break артефакты и paragraph-level sectPr.
+    for i, p in enumerate(paragraphs):
         p.paragraph_format.page_break_before = False
-
         for run in p.runs:
             r = run._element
             for br in list(r.findall(qn("w:br"))):
                 br_type = br.get(qn("w:type"))
                 if br_type in (None, "page"):
                     r.remove(br)
+        pPr = p._element.pPr
+        if pPr is not None:
+            sectPr = pPr.find(qn("w:sectPr"))
+            if sectPr is not None:
+                pPr.remove(sectPr)
 
-    # 1) Ищем СОДЕРЖАНИЕ до ВВЕДЕНИЯ
+    # 2. Найти содержание до введения.
     contents_idx = None
     for i in range(body_start):
         t = clean_spaces(paragraphs[i].text).upper()
@@ -1173,48 +1175,38 @@ def ensure_front_matter_layout(document, body_start):
             contents_idx = i
             break
 
-    # 2) Чистим старые page_break_before до ВВЕДЕНИЯ,
-    # чтобы не копились артефакты
-    for i in range(body_start):
-        paragraphs[i].paragraph_format.page_break_before = False
+    body = document._body._element
+    body_sectPr = body.sectPr
+    if body_sectPr is None:
+        return
 
-    # 3) Если СОДЕРЖАНИЕ найдено — оно должно начинаться с новой страницы
-    if contents_idx is not None:
-        paragraphs[contents_idx].paragraph_format.page_break_before = True
-
-    # 4) Перед ВВЕДЕНИЕМ не нужен обычный page break,
-    # потому что там будет section break
-    intro_p.paragraph_format.page_break_before = False
-
-    # 5) Удаляем sectPr у абзацев ДО ВВЕДЕНИЯ, кроме последнего перед ВВЕДЕНИЕМ
-    for i in range(body_start - 1):
-        pPr = paragraphs[i]._element.pPr
-        if pPr is None:
-            continue
-        sectPr = pPr.find(qn("w:sectPr"))
-        if sectPr is not None:
-            pPr.remove(sectPr)
-
-    # 6) Ставим ровно один разрыв секции перед ВВЕДЕНИЕМ
-    prev_p = paragraphs[body_start - 1]
-    prev_pPr = prev_p._element.get_or_add_pPr()
-
-    existing_sectPr = prev_pPr.find(qn("w:sectPr"))
-    if existing_sectPr is None:
-        body = document._body._element
-        body_sectPr = body.sectPr
-        if body_sectPr is None:
+    def append_next_page_sectpr(after_paragraph):
+        pPr = after_paragraph._element.get_or_add_pPr()
+        if pPr.find(qn("w:sectPr")) is not None:
             return
-
         new_sectPr = deepcopy(body_sectPr)
-
         type_el = new_sectPr.find(qn("w:type"))
         if type_el is None:
             type_el = OxmlElement("w:type")
             new_sectPr.insert(0, type_el)
         type_el.set(qn("w:val"), "nextPage")
+        # numbering from previous docs must not leak into inserted front sections
+        pg = new_sectPr.find(qn("w:pgNumType"))
+        if pg is not None:
+            new_sectPr.remove(pg)
+        for ref in list(new_sectPr.findall(qn("w:footerReference"))):
+            new_sectPr.remove(ref)
+        for ref in list(new_sectPr.findall(qn("w:headerReference"))):
+            new_sectPr.remove(ref)
+        pPr.append(new_sectPr)
 
-        prev_pPr.append(new_sectPr)
+    # 3. Разрыв перед содержанием (если оно есть) => отдельная секция для содержания.
+    if contents_idx is not None and contents_idx > 0:
+        append_next_page_sectpr(paragraphs[contents_idx - 1])
+
+    # 4. Разрыв перед введением => отдельная секция для основной части.
+    append_next_page_sectpr(paragraphs[body_start - 1])
+
 
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
