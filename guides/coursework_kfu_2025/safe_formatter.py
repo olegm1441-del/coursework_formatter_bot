@@ -1169,7 +1169,7 @@ def ensure_front_matter_layout(document, body_start):
     contents_idx = None
     for i in range(body_start):
         t = clean_spaces(paragraphs[i].text).upper()
-        if t == "СОДЕРЖАНИЕ":
+        if "СОДЕРЖАН" in t:
             contents_idx = i
             break
 
