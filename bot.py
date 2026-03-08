@@ -12,6 +12,9 @@ from telegram.ext import (
     filters,
 )
 
+from db import Base, engine
+import models
+
 from formatter_service import format_docx
 
 load_dotenv()
