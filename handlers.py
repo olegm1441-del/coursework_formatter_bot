@@ -74,10 +74,17 @@ def _ensure_current_user(
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     db = SessionLocal()
     try:
-        referral_code = _extract_referral_code_from_start(update.message.text if update.message else "")
-        user, is_new = _ensure_current_user(db, update, referral_code_from_start=referral_code)
+        referral_code = _extract_referral_code_from_start(update.message.text)
+        user, is_new = _ensure_current_user(
+            db,
+            update,
+            referral_code_from_start=referral_code,
+        )
 
         balance = services.get_user_credit_balance(db, user.id)
         guide_code = services.get_user_selected_guide_code(user)
@@ -98,6 +105,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     db = SessionLocal()
     try:
         user, _ = _ensure_current_user(db, update)
@@ -110,24 +120,36 @@ async def balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             bot_username=bot_username,
         )
 
-        await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text(
+            text,
+            reply_markup=get_main_menu_keyboard(),
+        )
     finally:
         db.close()
 
 
 async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     db = SessionLocal()
     try:
         user, _ = _ensure_current_user(db, update)
         bot_username = _get_bot_username(context)
         text = services.build_referral_text(bot_username, user)
 
-        await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text(
+            text,
+            reply_markup=get_main_menu_keyboard(),
+        )
     finally:
         db.close()
 
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     await update.message.reply_text(
         services.get_contact_text(),
         reply_markup=get_main_menu_keyboard(),
@@ -135,6 +157,9 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def choose_guide_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     db = SessionLocal()
     try:
         user, _ = _ensure_current_user(db, update)
@@ -150,13 +175,16 @@ async def choose_guide_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    if not query:
+        return
 
+    await query.answer()
     data = query.data or ""
 
     if data == CB_BACK_TO_MENU:
         await query.edit_message_text(
-            "Главное меню открыто. Можно выбрать действие с обычной клавиатуры ниже."
+            "Главное меню открыто. Можно выбрать действие с обычной клавиатуры ниже.",
+            reply_markup=get_back_to_menu_inline_keyboard(),
         )
         return
 
@@ -165,7 +193,10 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             user = services.get_user_by_telegram_id(db, query.from_user.id)
             if not user:
-                await query.edit_message_text("Пользователь не найден. Нажмите /start.")
+                await query.edit_message_text(
+                    "Пользователь не найден. Нажмите /start.",
+                    reply_markup=get_back_to_menu_inline_keyboard(),
+                )
                 return
 
             services.set_user_selected_guide_code(db, user, "kfu_coursework_2025")
@@ -226,20 +257,39 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user, _ = _ensure_current_user(db, update)
         balance = services.get_user_credit_balance(db, user.id)
 
-        logger.info("docx_received user_id=%s filename=%s balance=%s", user.id, filename, balance)
+        logger.info(
+            "docx_received user_id=%s filename=%s balance=%s",
+            user.id,
+            filename,
+            balance,
+        )
 
         if balance <= 0:
             text = services.build_no_credits_text(user, _get_bot_username(context))
-            await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+            await update.message.reply_text(
+                text,
+                reply_markup=get_main_menu_keyboard(),
+            )
             return
 
         guide_code = services.get_user_selected_guide_code(user)
         _, input_path, output_path = services.build_processing_paths(filename)
 
-        logger.info("download_start user_id=%s filename=%s input_path=%s", user.id, filename, input_path)
+        logger.info(
+            "download_start user_id=%s filename=%s input_path=%s",
+            user.id,
+            filename,
+            input_path,
+        )
+
         tg_file = await document.get_file()
         await tg_file.download_to_drive(custom_path=str(input_path))
-        logger.info("download_done user_id=%s filename=%s", user.id, filename)
+
+        logger.info(
+            "download_done user_id=%s filename=%s",
+            user.id,
+            filename,
+        )
 
         doc_record = services.create_document_record(
             db,
@@ -255,19 +305,40 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             guide_code=guide_code,
         )
 
-        logger.info("request_created request_id=%s user_id=%s guide=%s", request.id, user.id, guide_code)
+        logger.info(
+            "request_created request_id=%s user_id=%s guide=%s",
+            request.id,
+            user.id,
+            guide_code,
+        )
 
-        debited = services.debit_one_credit(db, user.id, source_id=str(request.id))
+        debited = services.debit_one_credit(
+            db,
+            user.id,
+            source_id=str(request.id),
+        )
+
         if not debited:
             text = services.build_no_credits_text(user, _get_bot_username(context))
-            await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+            await update.message.reply_text(
+                text,
+                reply_markup=get_main_menu_keyboard(),
+            )
             return
 
-        logger.info("credit_debited request_id=%s user_id=%s", request.id, user.id)
+        logger.info(
+            "credit_debited request_id=%s user_id=%s",
+            request.id,
+            user.id,
+        )
 
         await update.message.reply_text("Документ принят. Выполняю оформление...")
 
-        logger.info("formatting_start request_id=%s filename=%s", request.id, filename)
+        logger.info(
+            "formatting_start request_id=%s filename=%s",
+            request.id,
+            filename,
+        )
 
         await asyncio.wait_for(
             asyncio.to_thread(
@@ -279,7 +350,11 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             timeout=FORMAT_TIMEOUT_SECONDS,
         )
 
-        logger.info("formatting_done request_id=%s output_path=%s", request.id, output_path)
+        logger.info(
+            "formatting_done request_id=%s output_path=%s",
+            request.id,
+            output_path,
+        )
 
         services.mark_formatting_done(
             db,
@@ -296,46 +371,90 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 caption="Документ оформлен.",
             )
 
+        logger.info(
+            "response_sent request_id=%s filename=%s",
+            request.id,
+            output_path.name,
+        )
+
     except asyncio.TimeoutError:
-        logger.warning("formatting_timeout request_id=%s filename=%s", getattr(request, "id", None), filename)
+        logger.warning(
+            "formatting_timeout request_id=%s filename=%s timeout=%s",
+            getattr(request, "id", None),
+            filename,
+            FORMAT_TIMEOUT_SECONDS,
+        )
 
         if request is not None and user is not None:
-            services.mark_formatting_failed_in_new_session(request.id, "Formatting timeout")
-            services.refund_one_credit_in_new_session(user.id, str(request.id))
+            services.mark_formatting_failed_in_new_session(
+                request.id,
+                f"Formatting timeout after {FORMAT_TIMEOUT_SECONDS} seconds",
+            )
+            services.refund_one_credit_in_new_session(
+                user.id,
+                str(request.id),
+            )
 
-        await update.message.reply_text(
-            "Обработка заняла слишком много времени и была остановлена. Кредит возвращён.",
-            reply_markup=get_main_menu_keyboard(),
-        )
+        if update.message:
+            await update.message.reply_text(
+                "Обработка заняла слишком много времени и была остановлена. Кредит возвращён.",
+                reply_markup=get_main_menu_keyboard(),
+            )
 
     except Exception as e:
-        logger.exception("formatting_failed request_id=%s filename=%s", getattr(request, "id", None), filename)
-
-        if request is not None and user is not None:
-            services.mark_formatting_failed_in_new_session(request.id, str(e))
-            services.refund_one_credit_in_new_session(user.id, str(request.id))
-
-        await update.message.reply_text(
-            f"Ошибка форматирования документа: {str(e)[:300]}",
-            reply_markup=get_main_menu_keyboard(),
+        logger.exception(
+            "formatting_failed request_id=%s filename=%s",
+            getattr(request, "id", None),
+            filename,
         )
 
+        if request is not None and user is not None:
+            services.mark_formatting_failed_in_new_session(
+                request.id,
+                str(e),
+            )
+            services.refund_one_credit_in_new_session(
+                user.id,
+                str(request.id),
+            )
+
+        if update.message:
+            await update.message.reply_text(
+                f"Ошибка форматирования документа: {str(e)[:300]}",
+                reply_markup=get_main_menu_keyboard(),
+            )
+
     finally:
+        logger.info(
+            "cleanup_start request_id=%s input_path=%s output_path=%s",
+            getattr(request, "id", None),
+            input_path,
+            output_path,
+        )
         services.cleanup_temp_files(input_path, output_path)
         db.close()
 
 
 async def userinfo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     db = SessionLocal()
     try:
         user, _ = _ensure_current_user(db, update)
         text = services.get_userinfo_text(db, user)
-        await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text(
+            text,
+            reply_markup=get_main_menu_keyboard(),
+        )
     finally:
         db.close()
 
 
 async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     if len(context.args) != 2:
         await update.message.reply_text("Формат: /givecredits user_id amount")
         return
@@ -355,12 +474,17 @@ async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             amount=amount,
             admin_source_id=str(update.effective_user.id),
         )
-        await update.message.reply_text(f"Готово. Баланс пользователя {target_user_id}: {balance}")
+        await update.message.reply_text(
+            f"Готово. Баланс пользователя {target_user_id}: {balance}"
+        )
     finally:
         db.close()
 
 
 async def markpaid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     if len(context.args) != 2:
         await update.message.reply_text("Формат: /markpaid user_id credits")
         return
@@ -422,6 +546,11 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("give_credits", give_credits_handler))
     app.add_handler(CommandHandler("markpaid", markpaid_handler))
 
-    app.add_handler(CallbackQueryHandler(guide_callback_handler, pattern=r"^(guide:|guide_file:|menu:back)"))
+    app.add_handler(
+        CallbackQueryHandler(
+            guide_callback_handler,
+            pattern=r"^(guide:|guide_file:|menu:back)",
+        )
+    )
     app.add_handler(MessageHandler(filters.Document.FileExtension("docx"), docx_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))
