@@ -197,6 +197,19 @@ from .classifier import (
 )
 from .page_numbering import apply_page_numbering_policy
 from .page_breaks import apply_page_breaks
+MAX_NORMALIZATION_PASSES = 50
+def run_with_pass_limit(step_name, func, document, body_start):
+    for _ in range(MAX_NORMALIZATION_PASSES):
+        before = len(document.paragraphs)
+        snapshot = [p.text for p in document.paragraphs]
+        func(document, body_start)
+        after = len(document.paragraphs)
+        snapshot_after = [p.text for p in document.paragraphs]
+
+        if before == after and snapshot == snapshot_after:
+            return
+
+    raise RuntimeError(f"Formatter step stuck: {step_name}")
 
 
 TABLE_NUM_RE = re.compile(r"^\s*таблица\s*(\d+(?:\.\d+){1,2})\.?\s*(.*?)\s*$", re.IGNORECASE)
