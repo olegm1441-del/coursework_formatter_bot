@@ -1123,14 +1123,20 @@ def process_document(input_path: Path, output_path: Path):
                 kind = "heading1"
 
         if kind != "table_continuation" and (
-            kind == "heading2" or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind) or is_likely_numbered_heading2_candidate(
+            kind == "heading2"
+            or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)
+            or is_likely_numbered_heading2_candidate(
                 paragraph,
                 current_chapter_num,
                 next_paragraph_num,
                 prev_kind=prev_kind,
             )
         ):
-            normalized_text = normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_num)
+            normalized_text = normalize_heading2_numbering(
+                paragraph,
+                current_chapter_num,
+                next_paragraph_num,
+            )
             if normalized_text:
                 kind = "heading2"
                 parsed_h2 = parse_heading2(clean_spaces(paragraph.text))
@@ -1139,7 +1145,11 @@ def process_document(input_path: Path, output_path: Path):
                     next_paragraph_num = parsed_h2["paragraph_num"] + 1
 
         if kind == "broken_heading2":
-            repaired = smart_repair_broken_heading2(paragraph, current_chapter_num, next_paragraph_num)
+            repaired = smart_repair_broken_heading2(
+                paragraph,
+                current_chapter_num,
+                next_paragraph_num,
+            )
             if repaired:
                 kind = "heading2"
                 next_paragraph_num = (next_paragraph_num or 0) + 1
@@ -1153,7 +1163,10 @@ def process_document(input_path: Path, output_path: Path):
         if kind == "heading1":
             remove_paragraph_numbering(paragraph)
             format_heading1(paragraph)
-        elif kind != "table_continuation" and (kind == "heading2" or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)):
+        elif kind != "table_continuation" and (
+            kind == "heading2"
+            or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)
+        ):
             remove_paragraph_numbering(paragraph)
             format_heading2(paragraph)
         elif kind == "table_caption":
@@ -1174,8 +1187,6 @@ def process_document(input_path: Path, output_path: Path):
         prev_kind = kind
 
     format_tables(doc)
-    convert_reference_numbering_to_plain_text(doc, body_start)
-        format_tables(doc)
     convert_reference_numbering_to_plain_text(doc, body_start)
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
@@ -1237,8 +1248,6 @@ def process_document(input_path: Path, output_path: Path):
     remove_all_italic(doc)
 
     doc.save(str(output_path))
-
-
 def remove_all_italic(doc):
     """
     Убирает курсив из всего документа
