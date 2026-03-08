@@ -87,6 +87,18 @@ def looks_like_heading2_title(text: str) -> bool:
 
 def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
     text = clean_spaces(paragraph.text)
+        low = text.lower()
+
+    if low.startswith("таблица "):
+        return None
+    if low.startswith("рисунок "):
+        return None
+    if low.startswith("рис. "):
+        return None
+    if low.startswith("продолжение таблицы"):
+        return None
+    if low.startswith("продолжение табл."):
+        return None
 
     if not text:
         return None
@@ -197,7 +209,9 @@ from .classifier import (
 )
 from .page_numbering import apply_page_numbering_policy
 from .page_breaks import apply_page_breaks
-MAX_NORMALIZATION_PASSES = 50
+
+MAX_NORMALIZATION_PASSES = 35
+
 def run_with_pass_limit(step_name, func, document, body_start):
     for _ in range(MAX_NORMALIZATION_PASSES):
         before = len(document.paragraphs)
@@ -212,9 +226,9 @@ def run_with_pass_limit(step_name, func, document, body_start):
     raise RuntimeError(f"Formatter step stuck: {step_name}")
 
 
-TABLE_NUM_RE = re.compile(r"^\s*таблица\s*(\d+(?:\.\d+){1,2})\.?\s*(.*?)\s*$", re.IGNORECASE)
+TABLE_NUM_RE = re.compile(r"^\s*таблица\s*(\d+(?:\.\d+){0,2})\.?\s*(.*?)\s*$", re.IGNORECASE)
 DASH_LINE_RE = re.compile(r"^\s*[—–\-•]\s*.+$")
-FIG_RE = re.compile(r"^\s*(рисунок|рис\.)\s*(\d+(?:\.\d+){1,2})\s*\.?\s*(.+?)\s*$", re.IGNORECASE)
+FIG_RE = re.compile(r"^\s*(рисунок|рис\.)\s*(\d+(?:\.\d+){0,2})\s*[.\-—–]?\s*(.+?)\s*$", re.IGNORECASE)
 HEADING2_ARTIFACT_RE = re.compile(r"^\s*[•·▪■◆►→\-–—]*\s*(\d+\.\d+\.?)\s*[•·▪■◆►→\-–—]*\s*(.+?)\s*$")
 
 TABLE_CONTINUATION_RE = re.compile(r"^\s*продолжение\s+табл(?:ицы)?\.?\s*\d+(?:\.\d+){1,2}\.?\s*$", re.IGNORECASE)
@@ -595,13 +609,24 @@ def smart_repair_broken_heading2(paragraph, current_chapter_num, next_paragraph_
 
 def looks_like_heading2_title(text: str) -> bool:
     t = clean_spaces(text)
+        low = t.lower()
+
+    if low.startswith("таблица "):
+        return False
+    if low.startswith("рисунок "):
+        return False
+    if low.startswith("рис. "):
+        return False
+    if low.startswith("продолжение таблицы"):
+        return False
+    if low.startswith("продолжение табл."):
+        return False
     if not t:
         return False
 
     if is_table_continuation_text(t):
         return False
 
-    low = t.lower()
     if low in REFERENCE_SUBHEADINGS_CANON:
         return False
     if parse_heading1(t) or parse_heading2(t) or parse_broken_heading2(t):
@@ -1176,16 +1201,59 @@ def process_document(input_path: Path, output_path: Path):
     format_tables(doc)
     convert_reference_numbering_to_plain_text(doc, body_start)
 
-    collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
-    run_with_pass_limit("ensure_empty_between_heading1_and_heading2", ensure_empty_between_heading1_and_heading2, doc, body_start)
-run_with_pass_limit("ensure_compact_heading2_spacing", ensure_compact_heading2_spacing, doc, body_start)
-run_with_pass_limit("ensure_empty_before_table_caption", ensure_empty_before_table_caption, doc, body_start)
-run_with_pass_limit("remove_extra_empty_after_service_lines", remove_extra_empty_after_service_lines, doc, body_start)
-run_with_pass_limit("ensure_empty_after_source_and_note", ensure_empty_after_source_and_note, doc, body_start)
-run_with_pass_limit("cleanup_reference_subheadings_layout", cleanup_reference_subheadings_layout, doc, body_start)
+collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
+
+run_with_pass_limit(
+    "ensure_empty_between_heading1_and_heading2",
+    ensure_empty_between_heading1_and_heading2,
+    doc,
+    body_start,
+)
+
+run_with_pass_limit(
+    "ensure_compact_heading2_spacing",
+    ensure_compact_heading2_spacing,
+    doc,
+    body_start,
+)
+
+run_with_pass_limit(
+    "ensure_empty_before_table_caption",
+    ensure_empty_before_table_caption,
+    doc,
+    body_start,
+)
+
+run_with_pass_limit(
+    "remove_extra_empty_after_service_lines",
+    remove_extra_empty_after_service_lines,
+    doc,
+    body_start,
+)
+
+run_with_pass_limit(
+    "ensure_empty_after_source_and_note",
+    ensure_empty_after_source_and_note,
+    doc,
+    body_start,
+)
+
+run_with_pass_limit(
+    "cleanup_reference_subheadings_layout",
+    cleanup_reference_subheadings_layout,
+    doc,
+    body_start,
+)
+
 collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
 format_empty_paragraphs_in_body(doc, body_start)
-run_with_pass_limit("normalize_structural_heading_spacing_v2", normalize_structural_heading_spacing_v2, doc, body_start)
+
+run_with_pass_limit(
+    "normalize_structural_heading_spacing_v2",
+    normalize_structural_heading_spacing_v2,
+    doc,
+    body_start,
+)
 
     apply_page_breaks(doc, body_start)
     apply_page_numbering_policy(doc)
