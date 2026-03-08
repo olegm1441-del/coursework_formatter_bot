@@ -1,7 +1,8 @@
 import os
 import uuid
 from pathlib import Path
-
+from db import Base, engine, SessionLocal
+from repositories import get_user_by_telegram_id, get_user_by_referral_code, create_user
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
