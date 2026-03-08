@@ -132,6 +132,14 @@ def debit_one_credit(db, user_id: int, source_id: str) -> bool:
     if balance <= 0:
         return False
 
+    existing = (
+        db.query(CreditLedger)
+        .filter(CreditLedger.idempotency_key == f"format_debit_{source_id}")
+        .first()
+    )
+    if existing:
+        return True
+
     entry = CreditLedger(
         user_id=user_id,
         operation_type="format_debit",
@@ -143,6 +151,35 @@ def debit_one_credit(db, user_id: int, source_id: str) -> bool:
     db.add(entry)
     db.commit()
     return True
+
+
+def refund_one_credit_if_needed(db, user_id: int, source_id: str) -> None:
+    existing_refund = (
+        db.query(CreditLedger)
+        .filter(CreditLedger.idempotency_key == f"format_refund_{source_id}")
+        .first()
+    )
+    if existing_refund:
+        return
+
+    debit_exists = (
+        db.query(CreditLedger)
+        .filter(CreditLedger.idempotency_key == f"format_debit_{source_id}")
+        .first()
+    )
+    if not debit_exists:
+        return
+
+    refund = CreditLedger(
+        user_id=user_id,
+        operation_type="format_refund",
+        amount=1,
+        source_type="formatting_request",
+        source_id=source_id,
+        idempotency_key=f"format_refund_{source_id}",
+    )
+    db.add(refund)
+    db.commit()
 
 
 def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
@@ -178,13 +215,16 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
 
 
 async def send_referral_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user: User) -> None:
+    if not update.message:
+        return
+
     bot_username = (await context.bot.get_me()).username
     referral_link = get_referral_link(bot_username, user.referral_code)
 
     await update.message.reply_text(
         "Твоя реферальная ссылка:\n"
         f"{referral_link}\n\n"
-        "Если новый пользователь впервые загрузит по ней документ, ты получишь +1 оформление.\n"
+        "Если новый пользователь впервые успешно оформит документ по этой ссылке, ты получишь +1 оформление.\n"
         "Если он впервые оплатит, ты тоже получишь +1 оформление.",
         reply_markup=MENU_KEYBOARD,
     )
@@ -255,6 +295,9 @@ async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     text = (
         "Контакт разработчика:\n"
         "@aelart\n\n"
@@ -264,6 +307,9 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
     text = (
         "Сейчас поддерживается методичка:\n"
         "«Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ»"
@@ -320,6 +366,8 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     db = SessionLocal()
     input_path = None
     output_path = None
+    formatting_request = None
+    user = None
 
     try:
         user, _ = get_or_create_user(
@@ -370,7 +418,8 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             status="processing",
         )
         db.add(formatting_request)
-        db.flush()
+        db.commit()
+        db.refresh(formatting_request)
 
         if not debit_one_credit(db, user.id, str(formatting_request.id)):
             formatting_request.status = "failed"
@@ -403,6 +452,19 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     except Exception as e:
         db.rollback()
+
+        if formatting_request is not None:
+            formatting_request = db.query(FormattingRequest).filter(
+                FormattingRequest.id == formatting_request.id
+            ).first()
+
+            if formatting_request is not None:
+                formatting_request.status = "failed"
+                formatting_request.error_message = str(e)
+                db.commit()
+
+                refund_one_credit_if_needed(db, user.id, str(formatting_request.id))
+
         await update.message.reply_text(
             f"Ошибка обработки: {e}",
             reply_markup=MENU_KEYBOARD,
