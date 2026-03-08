@@ -153,33 +153,53 @@ def debit_one_credit(db, user_id: int, source_id: str) -> bool:
     return True
 
 
-def refund_one_credit_if_needed(db, user_id: int, source_id: str) -> None:
-    existing_refund = (
-        db.query(CreditLedger)
-        .filter(CreditLedger.idempotency_key == f"format_refund_{source_id}")
-        .first()
-    )
-    if existing_refund:
-        return
+def refund_one_credit_in_new_session(user_id: int, source_id: str) -> None:
+    db = SessionLocal()
+    try:
+        existing_refund = (
+            db.query(CreditLedger)
+            .filter(CreditLedger.idempotency_key == f"format_refund_{source_id}")
+            .first()
+        )
+        if existing_refund:
+            return
 
-    debit_exists = (
-        db.query(CreditLedger)
-        .filter(CreditLedger.idempotency_key == f"format_debit_{source_id}")
-        .first()
-    )
-    if not debit_exists:
-        return
+        debit_exists = (
+            db.query(CreditLedger)
+            .filter(CreditLedger.idempotency_key == f"format_debit_{source_id}")
+            .first()
+        )
+        if not debit_exists:
+            return
 
-    refund = CreditLedger(
-        user_id=user_id,
-        operation_type="format_refund",
-        amount=1,
-        source_type="formatting_request",
-        source_id=source_id,
-        idempotency_key=f"format_refund_{source_id}",
-    )
-    db.add(refund)
-    db.commit()
+        refund = CreditLedger(
+            user_id=user_id,
+            operation_type="format_refund",
+            amount=1,
+            source_type="formatting_request",
+            source_id=source_id,
+            idempotency_key=f"format_refund_{source_id}",
+        )
+        db.add(refund)
+        db.commit()
+    finally:
+        db.close()
+
+
+def mark_formatting_failed_in_new_session(request_id: int, error_text: str) -> None:
+    db = SessionLocal()
+    try:
+        formatting_request = (
+            db.query(FormattingRequest)
+            .filter(FormattingRequest.id == request_id)
+            .first()
+        )
+        if formatting_request:
+            formatting_request.status = "failed"
+            formatting_request.error_message = error_text[:1000]
+            db.commit()
+    finally:
+        db.close()
 
 
 def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
@@ -230,6 +250,31 @@ async def send_referral_message(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+def build_start_text(balance: int, is_new: bool) -> str:
+    if balance > 0:
+        if is_new:
+            return (
+                "Здравствуйте! Это бот для форматирования курсовых работ КФУ.\n\n"
+                "У вас уже есть 1 бесплатное оформление.\n"
+                f"Сейчас доступно оформлений: {balance}\n\n"
+                "Можно сразу отправить .docx-файл на обработку."
+            )
+        return (
+            "С возвращением!\n"
+            f"Сейчас доступно оформлений: {balance}\n\n"
+            "Можно сразу отправить .docx-файл на обработку."
+        )
+
+    return (
+        "С возвращением!\n"
+        f"Сейчас доступно оформлений: {balance}\n\n"
+        "Чтобы получить ещё оформления:\n"
+        "• 1 оформление — 149 ₽\n"
+        "• 3 оформления — 349 ₽\n\n"
+        "Также можно получить бонус по реферальной ссылке."
+    )
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
@@ -254,23 +299,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
         balance = get_user_credit_balance(db, user.id)
-
-        if is_new:
-            text = (
-                "Здравствуйте! Это бот для форматирования курсовых работ КФУ.\n\n"
-                "У вас уже есть 1 бесплатное оформление.\n"
-                f"Сейчас доступно оформлений: {balance}\n\n"
-                "Можно сразу отправить .docx-файл на обработку."
-            )
-        else:
-            text = (
-                "С возвращением!\n"
-                f"Сейчас доступно оформлений: {balance}\n\n"
-                "Можно сразу отправить .docx-файл на обработку."
-            )
-
-        await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
-
+        await update.message.reply_text(
+            build_start_text(balance, is_new),
+            reply_markup=MENU_KEYBOARD,
+        )
     finally:
         db.close()
 
@@ -298,23 +330,21 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message:
         return
 
-    text = (
-        "Контакт разработчика:\n"
-        "@aelart\n\n"
-        "Бот разработан @aelart."
+    await update.message.reply_text(
+        "Контакт разработчика:\n@aelart",
+        reply_markup=MENU_KEYBOARD,
     )
-    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
 
 
 async def method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
-    text = (
+    await update.message.reply_text(
         "Сейчас поддерживается методичка:\n"
-        "«Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ»"
+        "«Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ»",
+        reply_markup=MENU_KEYBOARD,
     )
-    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
 
     method_file = find_method_file()
     if method_file is not None:
@@ -366,8 +396,8 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     db = SessionLocal()
     input_path = None
     output_path = None
-    formatting_request = None
-    user = None
+    formatting_request_id = None
+    user_id = None
 
     try:
         user, _ = get_or_create_user(
@@ -378,17 +408,24 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             last_name=update.effective_user.last_name,
             referral_code_from_start=None,
         )
+        user_id = user.id
 
         balance = get_user_credit_balance(db, user.id)
         if balance <= 0:
             await update.message.reply_text(
-                "У вас нет доступных оформлений.\n"
-                "Используйте свою реферальную ссылку или купите пакет позже.",
+                "У вас нет доступных оформлений.\n\n"
+                "Тарифы:\n"
+                "• 1 оформление — 149 ₽\n"
+                "• 3 оформления — 349 ₽\n\n"
+                "Также можно использовать реферальную ссылку.",
                 reply_markup=MENU_KEYBOARD,
             )
             return
 
-        await update.message.reply_text("Файл получен. Форматирую...", reply_markup=MENU_KEYBOARD)
+        await update.message.reply_text(
+            "Файл получен. Форматирую...",
+            reply_markup=MENU_KEYBOARD,
+        )
 
         job_id = str(uuid.uuid4())
         original_name = Path(file.file_name)
@@ -421,10 +458,10 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         db.commit()
         db.refresh(formatting_request)
 
+        formatting_request_id = formatting_request.id
+
         if not debit_one_credit(db, user.id, str(formatting_request.id)):
-            formatting_request.status = "failed"
-            formatting_request.error_message = "Недостаточно кредитов"
-            db.commit()
+            mark_formatting_failed_in_new_session(formatting_request.id, "Недостаточно кредитов")
             await update.message.reply_text(
                 "Недостаточно доступных оформлений.",
                 reply_markup=MENU_KEYBOARD,
@@ -433,6 +470,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         format_docx(str(input_path), str(output_path))
 
+        formatting_request = (
+            db.query(FormattingRequest)
+            .filter(FormattingRequest.id == formatting_request.id)
+            .first()
+        )
         formatting_request.status = "done"
         formatting_request.result_file_path = str(output_path)
         formatting_request.completed_at = datetime.utcnow()
@@ -453,17 +495,11 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         db.rollback()
 
-        if formatting_request is not None:
-            formatting_request = db.query(FormattingRequest).filter(
-                FormattingRequest.id == formatting_request.id
-            ).first()
+        if formatting_request_id is not None:
+            mark_formatting_failed_in_new_session(formatting_request_id, str(e))
 
-            if formatting_request is not None:
-                formatting_request.status = "failed"
-                formatting_request.error_message = str(e)
-                db.commit()
-
-                refund_one_credit_if_needed(db, user.id, str(formatting_request.id))
+        if formatting_request_id is not None and user_id is not None:
+            refund_one_credit_in_new_session(user_id, str(formatting_request_id))
 
         await update.message.reply_text(
             f"Ошибка обработки: {e}",
@@ -472,6 +508,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     finally:
         db.close()
+
         if input_path and input_path.exists():
             input_path.unlink()
         if output_path and output_path.exists():
