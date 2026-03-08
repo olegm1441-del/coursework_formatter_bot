@@ -582,7 +582,10 @@ def smart_repair_broken_heading2(paragraph, current_chapter_num, next_paragraph_
 
 def looks_like_heading2_title(text: str) -> bool:
     t = clean_spaces(text)
-        low = t.lower()
+    if not t:
+        return False
+
+    low = t.lower()
 
     if low.startswith("таблица "):
         return False
@@ -593,8 +596,6 @@ def looks_like_heading2_title(text: str) -> bool:
     if low.startswith("продолжение таблицы"):
         return False
     if low.startswith("продолжение табл."):
-        return False
-    if not t:
         return False
 
     if is_table_continuation_text(t):
@@ -612,6 +613,7 @@ def looks_like_heading2_title(text: str) -> bool:
         return False
     if len(t) > 220:
         return False
+
     return True
 
 
