@@ -4,7 +4,6 @@ from .classifier import clean_spaces, parse_heading1, parse_heading2
 
 
 EXACT_PAGEBREAK_HEADINGS = {
-    "введение",
     "заключение",
     "список использованных источников",
     "список использованной литературы",
