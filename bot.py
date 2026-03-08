@@ -30,11 +30,10 @@ TEMP_DIR.mkdir(exist_ok=True)
 MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["Контакт", "Какие методички поддерживаются?"],
-        ["Моя ссылка"],
+        ["Моя ссылка", "Баланс"],
     ],
     resize_keyboard=True,
 )
-
 METHOD_GUIDE_BASENAME = "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ"
 ASSETS_DIR = Path("assets")
 
@@ -234,6 +233,50 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
     referral.qualified_upload_at = datetime.utcnow()
     db.commit()
 
+def grant_referral_payment_bonus_if_needed(db, invited_user_id: int) -> None:
+    referral = (
+        db.query(Referral)
+        .filter(Referral.invited_user_id == invited_user_id)
+        .filter(Referral.first_payment_at.is_(None))
+        .first()
+    )
+
+    if not referral:
+        return
+
+    existing_bonus = (
+        db.query(CreditLedger)
+        .filter(CreditLedger.idempotency_key == f"referral_payment_bonus_{referral.id}")
+        .first()
+    )
+    if existing_bonus:
+        return
+
+    bonus = CreditLedger(
+        user_id=referral.inviter_user_id,
+        operation_type="referral_payment_bonus",
+        amount=1,
+        source_type="referral",
+        source_id=str(referral.id),
+        idempotency_key=f"referral_payment_bonus_{referral.id}",
+    )
+    db.add(bonus)
+    referral.first_payment_at = datetime.utcnow()
+    db.commit()
+
+def apply_successful_payment(db, paid_user_id: int, credits: int, provider: str = "manual") -> None:
+    payment_entry = CreditLedger(
+        user_id=paid_user_id,
+        operation_type="payment_bonus",
+        amount=credits,
+        source_type=provider,
+        source_id=str(paid_user_id),
+        idempotency_key=f"payment_bonus_{paid_user_id}_{credits}_{uuid.uuid4().hex[:8]}",
+    )
+    db.add(payment_entry)
+    db.commit()
+
+    grant_referral_payment_bonus_if_needed(db, paid_user_id)
 
 async def send_referral_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user: User) -> None:
     if not update.message:
@@ -376,6 +419,49 @@ async def givecredits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     finally:
         db.close()
 
+
+async def markpaid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "Использование: /markpaid <user_id> <credits>"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        credits = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text(
+            "Использование: /markpaid <user_id> <credits>"
+        )
+        return
+
+    db = SessionLocal()
+    try:
+        existing_user = db.query(User).filter(User.id == target_user_id).first()
+        if not existing_user:
+            await update.message.reply_text("Пользователь не найден.")
+            return
+
+        apply_successful_payment(db, target_user_id, credits, provider="manual")
+
+        new_balance = get_user_credit_balance(db, target_user_id)
+
+        await update.message.reply_text(
+            f"Оплата отмечена для user_id={target_user_id}.\n"
+            f"Начислено кредитов: {credits}\n"
+            f"Новый баланс: {new_balance}"
+        )
+    finally:
+        db.close()
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
@@ -473,6 +559,10 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if text == "Моя ссылка":
         await referral_handler(update, context)
+        return
+
+    if text == "Баланс":
+        await balance_handler(update, context)
         return
 
     await update.message.reply_text(
@@ -629,6 +719,7 @@ def main() -> None:
     app.add_handler(CommandHandler("balance", balance_handler))
     app.add_handler(CommandHandler("userinfo", userinfo_handler))
     app.add_handler(CommandHandler("givecredits", givecredits_handler))
+    app.add_handler(CommandHandler("markpaid", markpaid_handler))
     app.add_handler(CommandHandler("contact", contact_handler))
     app.add_handler(CommandHandler("method", method_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
