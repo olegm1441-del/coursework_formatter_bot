@@ -376,12 +376,28 @@ def get_guide(guide_code: str) -> dict:
 
 def find_method_file(guide_code: str) -> Path | None:
     guide = get_guide(guide_code)
-    basename = guide["method_basename"]
+    basename = guide["method_basename"].strip().lower()
 
-    for ext in (".docx", ".pdf"):
-        candidate = ASSETS_DIR / f"{basename}{ext}"
-        if candidate.exists():
-            return candidate
+    if not ASSETS_DIR.exists():
+        return None
+
+    # 1. Сначала ищем точное совпадение имени файла без расширения
+    for path in ASSETS_DIR.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".docx", ".pdf"}:
+            continue
+        if path.stem.strip().lower() == basename:
+            return path
+
+    # 2. Потом ищем частичное совпадение, чтобы пережить мелкие расхождения в имени
+    for path in ASSETS_DIR.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".docx", ".pdf"}:
+            continue
+        if basename in path.stem.strip().lower():
+            return path
 
     return None
 
