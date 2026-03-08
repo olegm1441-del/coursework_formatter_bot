@@ -492,6 +492,8 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("referral", referral_handler))
     app.add_handler(CommandHandler("userinfo", userinfo_handler))
     app.add_handler(CommandHandler("user_info", userinfo_handler))
+    app.add_handler(CommandHandler("contact", contact_handler))
+    app.add_handler(CommandHandler("method", choose_guide_handler))
     app.add_handler(CommandHandler("givecredits", give_credits_handler))
     app.add_handler(CommandHandler("give_credits", give_credits_handler))
     app.add_handler(CommandHandler("markpaid", markpaid_handler))
