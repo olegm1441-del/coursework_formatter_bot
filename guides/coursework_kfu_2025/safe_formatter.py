@@ -1140,6 +1140,70 @@ def ensure_section_break_before_introduction(document, body_start):
 
     prev_pPr.append(new_sectPr)
 
+def ensure_front_matter_layout(document, body_start):
+    """
+    Нормализует первые страницы:
+    - если есть СОДЕРЖАНИЕ до ВВЕДЕНИЯ, оно должно начинаться с новой страницы;
+    - ВВЕДЕНИЕ должно начинаться с новой секции и с новой страницы;
+    - если СОДЕРЖАНИЯ нет, ВВЕДЕНИЕ просто идет после титула на новой странице.
+    """
+    if body_start is None or body_start <= 0:
+        return
+
+    paragraphs = document.paragraphs
+    intro_p = paragraphs[body_start]
+
+    # 1) Ищем СОДЕРЖАНИЕ до ВВЕДЕНИЯ
+    contents_idx = None
+    for i in range(body_start):
+        t = clean_spaces(paragraphs[i].text).upper()
+        if t == "СОДЕРЖАНИЕ":
+            contents_idx = i
+            break
+
+    # 2) Чистим старые page_break_before до ВВЕДЕНИЯ,
+    # чтобы не копились артефакты
+    for i in range(body_start):
+        paragraphs[i].paragraph_format.page_break_before = False
+
+    # 3) Если СОДЕРЖАНИЕ найдено — оно должно начинаться с новой страницы
+    if contents_idx is not None:
+        paragraphs[contents_idx].paragraph_format.page_break_before = True
+
+    # 4) Перед ВВЕДЕНИЕМ не нужен обычный page break,
+    # потому что там будет section break
+    intro_p.paragraph_format.page_break_before = False
+
+    # 5) Удаляем sectPr у абзацев ДО ВВЕДЕНИЯ, кроме последнего перед ВВЕДЕНИЕМ
+    for i in range(body_start - 1):
+        pPr = paragraphs[i]._element.pPr
+        if pPr is None:
+            continue
+        sectPr = pPr.find(qn("w:sectPr"))
+        if sectPr is not None:
+            pPr.remove(sectPr)
+
+    # 6) Ставим ровно один разрыв секции перед ВВЕДЕНИЕМ
+    prev_p = paragraphs[body_start - 1]
+    prev_pPr = prev_p._element.get_or_add_pPr()
+
+    existing_sectPr = prev_pPr.find(qn("w:sectPr"))
+    if existing_sectPr is None:
+        body = document._body._element
+        body_sectPr = body.sectPr
+        if body_sectPr is None:
+            return
+
+        new_sectPr = deepcopy(body_sectPr)
+
+        type_el = new_sectPr.find(qn("w:type"))
+        if type_el is None:
+            type_el = OxmlElement("w:type")
+            new_sectPr.insert(0, type_el)
+        type_el.set(qn("w:val"), "nextPage")
+
+        prev_pPr.append(new_sectPr)
+
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
 
@@ -1310,8 +1374,10 @@ def process_document(input_path: Path, output_path: Path):
     apply_page_breaks(doc, body_start)
     normalize_sections(doc)
     ensure_section_break_before_introduction(doc, body_start)
+    ensure_front_matter_layout(doc, body_start)
     apply_page_numbering_policy(doc)
     remove_all_italic(doc)
+    
 
     doc.save(str(output_path))
 def remove_all_italic(doc):
