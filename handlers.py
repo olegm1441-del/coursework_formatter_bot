@@ -237,8 +237,8 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message or not update.message.document:
         return
 
-    document = update.message.document
-    filename = document.file_name or ""
+    telegram_document = update.message.document
+    filename = telegram_document.file_name or ""
 
     if not filename.lower().endswith(".docx"):
         await update.message.reply_text(
@@ -249,7 +249,6 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     db = SessionLocal()
     input_path = None
-    output_path = None
     request = None
     user = None
 
@@ -273,7 +272,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         guide_code = services.get_user_selected_guide_code(user)
-        _, input_path, output_path = services.build_processing_paths(filename)
+        _, input_path, _ = services.build_processing_paths(filename)
 
         logger.info(
             "download_start user_id=%s filename=%s input_path=%s",
@@ -282,7 +281,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             input_path,
         )
 
-        tg_file = await document.get_file()
+        tg_file = await telegram_document.get_file()
         await tg_file.download_to_drive(custom_path=str(input_path))
 
         logger.info(
@@ -306,7 +305,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
         logger.info(
-            "request_created request_id=%s user_id=%s guide=%s",
+            "request_queued request_id=%s user_id=%s guide=%s",
             request.id,
             user.id,
             guide_code,
@@ -319,6 +318,11 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
         if not debited:
+            services.mark_formatting_failed_in_new_session(
+                request.id,
+                "enqueue failed: not enough credits",
+            )
+
             text = services.build_no_credits_text(user, _get_bot_username(context))
             await update.message.reply_text(
                 text,
@@ -332,87 +336,29 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user.id,
         )
 
-        await update.message.reply_text("Документ принят. Выполняю оформление...")
-
-        logger.info(
-            "formatting_start request_id=%s filename=%s",
-            request.id,
-            filename,
-        )
-
-        await asyncio.wait_for(
-            asyncio.to_thread(
-                services.format_document_by_guide,
-                guide_code=guide_code,
-                input_path=str(input_path),
-                output_path=str(output_path),
+        await update.message.reply_text(
+            (
+                "Документ принят в очередь на оформление.\n"
+                f"Номер заявки: {request.id}\n\n"
+                "Когда обработка завершится, результат будет отправлен автоматически."
             ),
-            timeout=FORMAT_TIMEOUT_SECONDS,
+            reply_markup=get_main_menu_keyboard(),
         )
-
-        logger.info(
-            "formatting_done request_id=%s output_path=%s",
-            request.id,
-            output_path,
-        )
-
-        services.mark_formatting_done(
-            db,
-            request_id=request.id,
-            result_file_path=str(output_path),
-        )
-
-        services.grant_referral_upload_bonus_if_needed(db, user.id)
-
-        with open(output_path, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                filename=output_path.name,
-                caption="Документ оформлен.",
-            )
-
-        logger.info(
-            "response_sent request_id=%s filename=%s",
-            request.id,
-            output_path.name,
-        )
-
-    except asyncio.TimeoutError:
-        logger.warning(
-            "formatting_timeout request_id=%s filename=%s timeout=%s",
-            getattr(request, "id", None),
-            filename,
-            FORMAT_TIMEOUT_SECONDS,
-        )
-
-        if request is not None and user is not None:
-            services.mark_formatting_failed_in_new_session(
-                request.id,
-                f"Formatting timeout after {FORMAT_TIMEOUT_SECONDS} seconds",
-            )
-            services.refund_one_credit_in_new_session(
-                user.id,
-                str(request.id),
-            )
-
-        if update.message:
-            await update.message.reply_text(
-                "Обработка заняла слишком много времени и была остановлена. Кредит возвращён.",
-                reply_markup=get_main_menu_keyboard(),
-            )
 
     except Exception as e:
         logger.exception(
-            "formatting_failed request_id=%s filename=%s",
+            "queue_enqueue_failed request_id=%s filename=%s",
             getattr(request, "id", None),
             filename,
         )
 
-        if request is not None and user is not None:
+        if request is not None:
             services.mark_formatting_failed_in_new_session(
                 request.id,
-                str(e),
+                f"enqueue failed: {str(e)}",
             )
+
+        if request is not None and user is not None:
             services.refund_one_credit_in_new_session(
                 user.id,
                 str(request.id),
@@ -420,18 +366,11 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         if update.message:
             await update.message.reply_text(
-                f"Ошибка форматирования документа: {str(e)[:300]}",
+                f"Не удалось поставить документ в очередь: {str(e)[:300]}",
                 reply_markup=get_main_menu_keyboard(),
             )
 
     finally:
-        logger.info(
-            "cleanup_start request_id=%s input_path=%s output_path=%s",
-            getattr(request, "id", None),
-            input_path,
-            output_path,
-        )
-        services.cleanup_temp_files(input_path, output_path)
         db.close()
 
 
