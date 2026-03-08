@@ -18,4 +18,8 @@ def apply_page_numbering_policy(document):
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         run = p.add_run()
+        from docx.shared import Pt
+
+        run.font.name = "Times New Roman"
+        run.font.size = Pt(12)
         fld = run._element
