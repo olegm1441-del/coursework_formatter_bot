@@ -81,7 +81,7 @@ def _add_page_field_to_paragraph(paragraph):
     fld_char_end.set(qn("w:fldCharType"), "end")
 
     run._element.append(fld_char_begin)
-    run._element.append(instrText)
+    run._element.append(instr_text)
     run._element.append(fld_char_end)
 
 
