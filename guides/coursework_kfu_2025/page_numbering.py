@@ -19,11 +19,12 @@ def _clear_footer_obj(footer):
     except Exception:
         pass
 
-    for p in footer.paragraphs:
-        _clear_paragraph(p)
+    root = footer._element
+    for child in list(root):
+        root.remove(child)
 
-    if not footer.paragraphs:
-        footer.add_paragraph()
+    p = OxmlElement("w:p")
+    root.append(p)
 
 
 def _set_run_font(run):
@@ -87,8 +88,6 @@ def _add_page_field_to_paragraph(paragraph):
 
 def _get_footer_paragraph(footer):
     _clear_footer_obj(footer)
-    if not footer.paragraphs:
-        return footer.add_paragraph()
     return footer.paragraphs[0]
 
 
@@ -155,10 +154,9 @@ def _number_section(section, start_value=None):
 
 def apply_page_numbering_policy(document):
     """
-    Ожидаемая логика:
-    - стр. 1: Казань – 2026 г.
-    - стр. 2: пусто
-    - стр. 3: номер 3
+    Целевая логика:
+    - 3 секции: титул / содержание / основная часть
+    - 2 секции: титул / основная часть
     """
     sections = list(document.sections)
     if not sections:
@@ -166,33 +164,28 @@ def apply_page_numbering_policy(document):
 
     _reset_all_footer_state(document)
 
-    body_texts = [p.text.strip().upper() for p in document.paragraphs]
-    has_contents = any("СОДЕРЖАН" in t for t in body_texts)
+    if len(sections) >= 3:
+        first_section = sections[0]
+        first_section.different_first_page_header_footer = True
+        p1 = _get_footer_paragraph(first_section.first_page_footer)
+        _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
+        p2 = _get_footer_paragraph(first_section.footer)
+        _clear_paragraph(p2)
 
-    # Первая секция: титул
+        _blank_section(sections[1])
+        _number_section(sections[2], start_value=3)
+        for section in sections[3:]:
+            _number_section(section)
+        return
+
     first_section = sections[0]
     first_section.different_first_page_header_footer = True
-
     p1 = _get_footer_paragraph(first_section.first_page_footer)
     _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
-
     p2 = _get_footer_paragraph(first_section.footer)
     _clear_paragraph(p2)
 
-    # Если есть содержание и секций >= 3:
-    # section[1] = содержание (пусто)
-    # section[2] = введение (старт с 3)
-    if has_contents and len(sections) >= 3:
-        _blank_section(sections[1])
-        _number_section(sections[2], start_value=3)
-
-        for section in sections[3:]:
-            _number_section(section)
-
-    # Если содержания нет, но есть секция после титула:
-    # section[1] = введение (старт с 2)
-    elif len(sections) >= 2:
+    if len(sections) >= 2:
         _number_section(sections[1], start_value=2)
-
         for section in sections[2:]:
             _number_section(section)
