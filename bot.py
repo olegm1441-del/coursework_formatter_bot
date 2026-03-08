@@ -44,16 +44,42 @@ def find_method_file() -> Path | None:
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "Здравствуйте! Это бот для форматирования курсовых работ КФУ.\n\n"
-        "Что он делает:\n"
-        "— принимает файл .docx;\n"
-        "— приводит оформление к нужному виду;\n"
-        "— возвращает исправленный документ.\n\n"
-        "Можно сразу отправить файл на обработку.\n"
-        "Также ниже доступны кнопки с контактом и поддерживаемой методичкой."
-    )
-    await update.message.reply_text(text, reply_markup=MENU_KEYBOARD)
+    telegram_user = update.effective_user
+    if telegram_user is None:
+        return
+
+    referral_code = None
+    if context.args:
+        raw_arg = context.args[0]
+        if raw_arg.startswith("ref_"):
+            referral_code = raw_arg.replace("ref_", "", 1)
+
+    db = SessionLocal()
+    try:
+        user = get_user_by_telegram_id(db, telegram_user.id)
+
+        if not user:
+            referred_by_user_id = None
+
+            if referral_code:
+                inviter = get_user_by_referral_code(db, referral_code)
+                if inviter and inviter.telegram_id != telegram_user.id:
+                    referred_by_user_id = inviter.id
+
+            user = create_user(
+                db=db,
+                telegram_id=telegram_user.id,
+                username=telegram_user.username,
+                first_name=telegram_user.first_name,
+                last_name=telegram_user.last_name,
+                referred_by_user_id=referred_by_user_id,
+            )
+
+        await update.message.reply_text(
+            "Привет! Отправь .docx файл курсовой, и я оформлю его по методичке КФУ."
+        )
+    finally:
+        db.close()
 
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
