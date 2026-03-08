@@ -1120,9 +1120,9 @@ def ensure_section_break_before_introduction(document, body_start):
     if existing_sectPr is not None:
         return
 
-next_pPr = intro_p._element.pPr
-if next_pPr is not None and next_pPr.find(qn("w:sectPr")) is not None:
-    return
+    next_pPr = intro_p._element.pPr
+    if next_pPr is not None and next_pPr.find(qn("w:sectPr")) is not None:
+        return
 
     body = document._body._element
     body_sectPr = body.sectPr
