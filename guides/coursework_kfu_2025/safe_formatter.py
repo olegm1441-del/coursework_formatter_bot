@@ -1153,6 +1153,18 @@ def ensure_front_matter_layout(document, body_start):
     paragraphs = document.paragraphs
     intro_p = paragraphs[body_start]
 
+        # Чистим старые page-break артефакты ДО ВВЕДЕНИЯ
+    for i in range(body_start):
+        p = paragraphs[i]
+        p.paragraph_format.page_break_before = False
+
+        for run in p.runs:
+            r = run._element
+            for br in list(r.findall(qn("w:br"))):
+                br_type = br.get(qn("w:type"))
+                if br_type in (None, "page"):
+                    r.remove(br)
+
     # 1) Ищем СОДЕРЖАНИЕ до ВВЕДЕНИЯ
     contents_idx = None
     for i in range(body_start):
