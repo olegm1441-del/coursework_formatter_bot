@@ -81,7 +81,7 @@ def _add_page_field_to_paragraph(paragraph):
     fld_char_end.set(qn("w:fldCharType"), "end")
 
     run._element.append(fld_char_begin)
-    run._element.append(instr_text)
+    run._element.append(instrText)
     run._element.append(fld_char_end)
 
 
@@ -109,7 +109,6 @@ def _set_page_number_start(section, start_value):
 
 
 def _reset_all_footer_state(document):
-    # Жёстко выключаем odd/even, чтобы Word не тащил старые even-page footers
     try:
         document.settings.odd_and_even_pages_header_footer = False
     except Exception:
@@ -123,7 +122,6 @@ def _reset_all_footer_state(document):
         _clear_footer_obj(section.footer)
         _clear_footer_obj(section.first_page_footer)
 
-        # На некоторых версиях python-docx / Word это свойство есть
         try:
             _clear_footer_obj(section.even_page_footer)
         except Exception:
@@ -132,14 +130,9 @@ def _reset_all_footer_state(document):
 
 def apply_page_numbering_policy(document):
     """
-    Логика:
-    - если есть СОДЕРЖАНИЕ до ВВЕДЕНИЯ:
-        стр. 1 -> "Казань – 2026 г."
-        стр. 2 -> пусто
-        стр. 3 -> номер 3
-    - если СОДЕРЖАНИЯ нет:
-        стр. 1 -> "Казань – 2026 г."
-        стр. 2 -> номер 2
+    - стр. 1 -> "Казань – 2026 г."
+    - стр. 2 -> пусто
+    - стр. 3 -> номер 3 (если есть содержание)
     """
     sections = list(document.sections)
     if not sections:
@@ -150,7 +143,6 @@ def apply_page_numbering_policy(document):
     body_texts = [p.text.strip().upper() for p in document.paragraphs]
     has_contents = any("СОДЕРЖАН" in t for t in body_texts)
 
-    # Первая секция: титул + возможно содержание
     first_section = sections[0]
     first_section.different_first_page_header_footer = True
 
@@ -158,9 +150,8 @@ def apply_page_numbering_policy(document):
     _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
 
     p2 = _get_footer_paragraph(first_section.footer)
-    _clear_paragraph(p2)  # пусто на стр. 2
+    _clear_paragraph(p2)
 
-    # Следующие секции: номера
     start_num = 3 if has_contents else 2
 
     for idx, section in enumerate(sections[1:], start=1):
