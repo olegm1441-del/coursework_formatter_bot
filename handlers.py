@@ -1,302 +1,389 @@
-from aiogram import types, Router, F
-from aiogram.filters import CommandStart, Command
+from pathlib import Path
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from db import SessionLocal
-from keyboards import main_menu_keyboard, guides_keyboard
+from keyboards import (
+    BTN_BALANCE,
+    BTN_CONTACT,
+    BTN_SELECT_GUIDE,
+    CB_BACK_TO_MENU,
+    CB_SELECT_GUIDE_KFU_COURSEWORK_2025,
+    CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE,
+    get_back_to_menu_inline_keyboard,
+    get_guides_inline_keyboard,
+    get_main_menu_keyboard,
+)
 import services
 
-router = Router()
+
+def _extract_referral_code_from_start(text: str | None) -> str | None:
+    if not text:
+        return None
+
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+
+    payload = parts[1].strip()
+    if payload.startswith("ref_") and len(payload) > 4:
+        return payload.replace("ref_", "", 1)
+
+    return None
 
 
-# =========================
-# /start
-# =========================
+def _get_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
+    username = ""
+    if context.bot and context.bot.username:
+        username = context.bot.username
 
-@router.message(CommandStart())
-async def cmd_start(message: types.Message):
+    if not username:
+        username = services.get_bot_username_fallback()
 
-    start_payload = message.text.replace("/start", "").strip()
+    return username
 
-    referral_code = None
-    if start_payload.startswith("ref_"):
-        referral_code = start_payload.replace("ref_", "")
 
-    db = SessionLocal()
-
-    user, is_new = services.ensure_user(
+def _ensure_current_user(
+    db,
+    update: Update,
+    referral_code_from_start: str | None = None,
+):
+    tg_user = update.effective_user
+    return services.ensure_user(
         db=db,
-        telegram_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        referral_code_from_start=referral_code,
+        telegram_id=tg_user.id,
+        username=tg_user.username,
+        first_name=tg_user.first_name,
+        last_name=tg_user.last_name,
+        referral_code_from_start=referral_code_from_start,
     )
 
-    balance = services.get_user_credit_balance(db, user.id)
 
-    guide_code = services.get_user_selected_guide_code(user)
-    guide = services.get_guide(guide_code)
-
-    text = services.build_start_text(
-        balance=balance,
-        is_new=is_new,
-        active_guide_title=guide["title"],
-    )
-
-    await message.answer(
-        text,
-        reply_markup=main_menu_keyboard()
-    )
-
-    db.close()
-
-
-# =========================
-# Баланс
-# =========================
-
-@router.message(F.text == "Баланс")
-async def balance_handler(message: types.Message):
-
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = SessionLocal()
+    try:
+        referral_code = _extract_referral_code_from_start(update.message.text if update.message else "")
+        user, is_new = _ensure_current_user(db, update, referral_code_from_start=referral_code)
 
-    user = services.get_user_by_telegram_id(db, message.from_user.id)
+        balance = services.get_user_credit_balance(db, user.id)
+        guide_code = services.get_user_selected_guide_code(user)
+        guide = services.get_guide(guide_code)
 
-    if not user:
-        await message.answer("Ошибка пользователя")
-        return
-
-    balance = services.get_user_credit_balance(db, user.id)
-
-    bot_username = services.get_bot_username_fallback()
-
-    text = services.build_balance_text(
-        user=user,
-        balance=balance,
-        bot_username=bot_username
-    )
-
-    await message.answer(text)
-
-    db.close()
-
-
-# =========================
-# Контакт
-# =========================
-
-@router.message(F.text == "Контакт")
-async def contact_handler(message: types.Message):
-
-    await message.answer(
-        services.get_contact_text()
-    )
-
-
-# =========================
-# Выбор методички
-# =========================
-
-@router.message(F.text == "Выбрать методичку")
-async def choose_guide_handler(message: types.Message):
-
-    db = SessionLocal()
-
-    user = services.get_user_by_telegram_id(db, message.from_user.id)
-
-    text = services.build_guide_selection_text(user)
-
-    await message.answer(
-        text,
-        reply_markup=guides_keyboard()
-    )
-
-    db.close()
-
-
-@router.callback_query(F.data.startswith("guide:"))
-async def guide_selected(callback: types.CallbackQuery):
-
-    guide_code = callback.data.split(":")[1]
-
-    db = SessionLocal()
-
-    user = services.get_user_by_telegram_id(db, callback.from_user.id)
-
-    services.set_user_selected_guide_code(
-        db,
-        user,
-        guide_code
-    )
-
-    text = services.build_guide_selected_text(guide_code)
-
-    await callback.message.edit_text(text)
-
-    await callback.answer()
-
-    db.close()
-
-
-# =========================
-# DOCX обработка
-# =========================
-
-@router.message(F.document)
-async def docx_handler(message: types.Message):
-
-    document = message.document
-
-    if not document.file_name.endswith(".docx"):
-        await message.answer("Принимаются только .docx файлы")
-        return
-
-    db = SessionLocal()
-
-    user = services.get_user_by_telegram_id(db, message.from_user.id)
-
-    balance = services.get_user_credit_balance(db, user.id)
-
-    if balance <= 0:
-
-        text = services.build_no_credits_text(
-            user,
-            services.get_bot_username_fallback()
+        text = services.build_start_text(
+            balance=balance,
+            is_new=is_new,
+            active_guide_title=guide["title"],
         )
 
-        await message.answer(text)
-
+        await update.message.reply_text(
+            text,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    finally:
         db.close()
+
+
+async def balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = SessionLocal()
+    try:
+        user, _ = _ensure_current_user(db, update)
+        balance = services.get_user_credit_balance(db, user.id)
+        bot_username = _get_bot_username(context)
+
+        text = services.build_balance_text(
+            user=user,
+            balance=balance,
+            bot_username=bot_username,
+        )
+
+        await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+    finally:
+        db.close()
+
+
+async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = SessionLocal()
+    try:
+        user, _ = _ensure_current_user(db, update)
+        bot_username = _get_bot_username(context)
+        text = services.build_referral_text(bot_username, user)
+
+        await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+    finally:
+        db.close()
+
+
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        services.get_contact_text(),
+        reply_markup=get_main_menu_keyboard(),
+    )
+
+
+async def choose_guide_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = SessionLocal()
+    try:
+        user, _ = _ensure_current_user(db, update)
+        text = services.build_guide_selection_text(user)
+
+        await update.message.reply_text(
+            text,
+            reply_markup=get_guides_inline_keyboard(),
+        )
+    finally:
+        db.close()
+
+
+async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+
+    if data == CB_BACK_TO_MENU:
+        await query.edit_message_text(
+            "Главное меню открыто. Можно выбрать действие с обычной клавиатуры ниже."
+        )
         return
 
-    guide_code = services.get_user_selected_guide_code(user)
+    if data == CB_SELECT_GUIDE_KFU_COURSEWORK_2025:
+        db = SessionLocal()
+        try:
+            user = services.get_user_by_telegram_id(db, query.from_user.id)
+            if not user:
+                await query.edit_message_text("Пользователь не найден. Нажмите /start.")
+                return
 
-    safe_name, input_path, output_path = services.build_processing_paths(
-        document.file_name
-    )
+            services.set_user_selected_guide_code(db, user, "kfu_coursework_2025")
+            text = services.build_guide_selected_text("kfu_coursework_2025")
 
-    file = await message.bot.get_file(document.file_id)
+            await query.edit_message_text(
+                text,
+                reply_markup=get_back_to_menu_inline_keyboard(),
+            )
+        finally:
+            db.close()
+        return
 
-    await message.bot.download_file(
-        file.file_path,
-        input_path
-    )
+    if data == CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE:
+        method_file = services.find_method_file("kfu_coursework_2025")
+        if not method_file:
+            await query.edit_message_text(
+                services.build_method_file_missing_text("kfu_coursework_2025"),
+                reply_markup=get_back_to_menu_inline_keyboard(),
+            )
+            return
 
-    doc = services.create_document_record(
-        db,
-        user_id=user.id,
-        original_filename=document.file_name,
-        storage_path=str(input_path)
-    )
+        with open(method_file, "rb") as f:
+            await query.message.reply_document(
+                document=f,
+                filename=Path(method_file).name,
+                caption="Файл методички",
+            )
 
-    request = services.create_formatting_request(
-        db,
-        user_id=user.id,
-        document_id=doc.id,
-        guide_code=guide_code
-    )
+        await query.edit_message_text(
+            "Файл методички отправлен.",
+            reply_markup=get_back_to_menu_inline_keyboard(),
+        )
+        return
 
-    services.debit_one_credit(
-        db,
-        user.id,
-        source_id=str(request.id)
-    )
+
+async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.document:
+        return
+
+    document = update.message.document
+    filename = document.file_name or ""
+
+    if not filename.lower().endswith(".docx"):
+        await update.message.reply_text(
+            "Принимаются только .docx файлы.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    db = SessionLocal()
+    input_path = None
+    output_path = None
 
     try:
+        user, _ = _ensure_current_user(db, update)
+        balance = services.get_user_credit_balance(db, user.id)
+
+        if balance <= 0:
+            text = services.build_no_credits_text(user, _get_bot_username(context))
+            await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+            return
+
+        guide_code = services.get_user_selected_guide_code(user)
+        _, input_path, output_path = services.build_processing_paths(filename)
+
+        tg_file = await document.get_file()
+        await tg_file.download_to_drive(custom_path=str(input_path))
+
+        doc_record = services.create_document_record(
+            db,
+            user_id=user.id,
+            original_filename=filename,
+            storage_path=str(input_path),
+        )
+
+        request = services.create_formatting_request(
+            db,
+            user_id=user.id,
+            document_id=doc_record.id,
+            guide_code=guide_code,
+        )
+
+        debited = services.debit_one_credit(db, user.id, source_id=str(request.id))
+        if not debited:
+            text = services.build_no_credits_text(user, _get_bot_username(context))
+            await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+            return
+
+        await update.message.reply_text("Документ принят. Выполняю оформление...")
 
         services.format_document_by_guide(
-            guide_code,
-            str(input_path),
-            str(output_path)
+            guide_code=guide_code,
+            input_path=str(input_path),
+            output_path=str(output_path),
         )
 
         services.mark_formatting_done(
             db,
-            request.id,
-            str(output_path)
+            request_id=request.id,
+            result_file_path=str(output_path),
         )
 
-        services.grant_referral_upload_bonus_if_needed(
-            db,
-            user.id
-        )
+        services.grant_referral_upload_bonus_if_needed(db, user.id)
 
-        await message.answer_document(
-            types.FSInputFile(output_path),
-            caption="Документ оформлен"
-        )
+        with open(output_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=output_path.name,
+                caption="Документ оформлен.",
+            )
 
     except Exception as e:
+        if "request" in locals():
+            services.mark_formatting_failed_in_new_session(request.id, str(e))
+            services.refund_one_credit_in_new_session(user.id, str(request.id))
 
-        services.mark_formatting_failed_in_new_session(
-            request.id,
-            str(e)
-        )
-
-        services.refund_one_credit_in_new_session(
-            user.id,
-            str(request.id)
-        )
-
-        await message.answer(
-            "Ошибка форматирования документа"
+        await update.message.reply_text(
+            f"Ошибка форматирования документа: {str(e)[:300]}",
+            reply_markup=get_main_menu_keyboard(),
         )
 
     finally:
-
-        services.cleanup_temp_files(
-            input_path,
-            output_path
-        )
-
+        services.cleanup_temp_files(input_path, output_path)
         db.close()
 
 
-# =========================
-# ADMIN команды
-# =========================
-
-@router.message(Command("user_info"))
-async def user_info(message: types.Message):
-
+async def userinfo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = SessionLocal()
-
-    user = services.get_user_by_telegram_id(
-        db,
-        message.from_user.id
-    )
-
-    text = services.get_userinfo_text(db, user)
-
-    await message.answer(text)
-
-    db.close()
+    try:
+        user, _ = _ensure_current_user(db, update)
+        text = services.get_userinfo_text(db, user)
+        await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
+    finally:
+        db.close()
 
 
-@router.message(Command("give_credits"))
-async def give_credits(message: types.Message):
+async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 2:
+        await update.message.reply_text("Формат: /givecredits user_id amount")
+        return
 
     try:
-        _, user_id, amount = message.text.split()
-
-        user_id = int(user_id)
-        amount = int(amount)
-
-    except:
-        await message.answer("Формат: /give_credits user_id amount")
+        target_user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Формат: /givecredits user_id amount")
         return
 
     db = SessionLocal()
+    try:
+        balance = services.grant_admin_bonus(
+            db,
+            target_user_id=target_user_id,
+            amount=amount,
+            admin_source_id=str(update.effective_user.id),
+        )
+        await update.message.reply_text(f"Готово. Баланс пользователя {target_user_id}: {balance}")
+    finally:
+        db.close()
 
-    balance = services.grant_admin_bonus(
-        db,
-        user_id,
-        amount,
-        admin_source_id=str(message.from_user.id)
+
+async def markpaid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 2:
+        await update.message.reply_text("Формат: /markpaid user_id credits")
+        return
+
+    try:
+        paid_user_id = int(context.args[0])
+        credits = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Формат: /markpaid user_id credits")
+        return
+
+    db = SessionLocal()
+    try:
+        services.apply_successful_payment(
+            db,
+            paid_user_id=paid_user_id,
+            credits=credits,
+            provider="manual",
+        )
+        balance = services.get_user_credit_balance(db, paid_user_id)
+        await update.message.reply_text(
+            f"Оплата отмечена. Баланс пользователя {paid_user_id}: {balance}"
+        )
+    finally:
+        db.close()
+
+
+async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+
+    if text == BTN_BALANCE:
+        await balance_handler(update, context)
+        return
+
+    if text == BTN_SELECT_GUIDE:
+        await choose_guide_handler(update, context)
+        return
+
+    if text == BTN_CONTACT:
+        await contact_handler(update, context)
+        return
+
+    await update.message.reply_text(
+        "Можно нажать кнопку в меню или отправить .docx-файл на обработку.",
+        reply_markup=get_main_menu_keyboard(),
     )
 
-    await message.answer(
-        f"Баланс пользователя {user_id}: {balance}"
-    )
 
-    db.close()
+def register_handlers(app: Application) -> None:
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("balance", balance_handler))
+    app.add_handler(CommandHandler("referral", referral_handler))
+    app.add_handler(CommandHandler("userinfo", userinfo_handler))
+    app.add_handler(CommandHandler("user_info", userinfo_handler))
+    app.add_handler(CommandHandler("givecredits", give_credits_handler))
+    app.add_handler(CommandHandler("give_credits", give_credits_handler))
+    app.add_handler(CommandHandler("markpaid", markpaid_handler))
+
+    app.add_handler(CallbackQueryHandler(guide_callback_handler, pattern=r"^(guide:|guide_file:|menu:back)"))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("docx"), docx_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))
