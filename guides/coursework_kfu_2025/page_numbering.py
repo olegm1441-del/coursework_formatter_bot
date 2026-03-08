@@ -75,62 +75,51 @@ def _add_page_field_to_paragraph(paragraph):
     run._element.append(fld_char_end)
 
 
+def _prepare_footer(section, use_first_page=False):
+    footer = section.first_page_footer if use_first_page else section.footer
+    footer.is_linked_to_previous = False
+    _clear_footer(footer)
+
+    if not footer.paragraphs:
+        p = footer.add_paragraph()
+    else:
+        p = footer.paragraphs[0]
+    _clear_paragraph(p)
+    return footer, p
+
+
 def apply_page_numbering_policy(document):
     """
     Логика:
-    - 1 страница: в футере по центру "Казань – 2026 г."
-    - 2 страница: пусто
-    - с 3 страницы: номер страницы по центру внизу
+    - секция 1:
+        1-я страница -> "Казань – 2026 г."
+        остальные страницы секции -> пусто
+    - секция 2 и далее:
+        первая страница секции -> номер страницы
+        остальные страницы секции -> номер страницы
     """
-
     if not document.sections:
         return
 
-    first_section = document.sections[0]
+    sections = list(document.sections)
 
-    # Разные колонтитулы для первой страницы секции
+    # --- Первая секция: титул + содержание ---
+    first_section = sections[0]
     first_section.different_first_page_header_footer = True
 
-    # Отвязываем футеры от возможных предыдущих секций
-    first_section.footer.is_linked_to_previous = False
-    first_section.first_page_footer.is_linked_to_previous = False
-
-    # Полностью очищаем футеры
-    _clear_footer(first_section.first_page_footer)
-    _clear_footer(first_section.footer)
-
-    # --- 1-я страница ---
-    # Титул: "Казань – 2026 г."
-    first_page_footer = first_section.first_page_footer
-    if not first_page_footer.paragraphs:
-        p1 = first_page_footer.add_paragraph()
-    else:
-        p1 = first_page_footer.paragraphs[0]
-    _clear_paragraph(p1)
+    _, p1 = _prepare_footer(first_section, use_first_page=True)
     _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
 
-    # --- 2-я и далее страницы этой секции ---
-    # По умолчанию обычный footer применяется ко 2-й, 3-й и т.д. странице.
-    # Чтобы 2-я была пустой, а с 3-й началась нумерация,
-    # вставляем сначала пустой абзац, а затем PAGE.
-    default_footer = first_section.footer
-    if not default_footer.paragraphs:
-        p2 = default_footer.add_paragraph()
-    else:
-        p2 = default_footer.paragraphs[0]
-    _clear_paragraph(p2)
+    _, p2 = _prepare_footer(first_section, use_first_page=False)
     p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # специально ничего не пишем -> страница содержания пустая внизу
 
-    # Если есть ещё старые абзацы — очищаем и их тоже
-    for extra_p in default_footer.paragraphs[1:]:
-        _clear_paragraph(extra_p)
+    # --- Все следующие секции: обычная нумерация ---
+    for section in sections[1:]:
+        section.different_first_page_header_footer = True
 
-    # Создаём отдельный абзац с полем PAGE
-    page_paragraph = default_footer.add_paragraph()
-    _clear_paragraph(page_paragraph)
-    _add_page_field_to_paragraph(page_paragraph)
+        _, fp = _prepare_footer(section, use_first_page=True)
+        _add_page_field_to_paragraph(fp)
 
-    # Важный момент:
-    # Word сам не умеет по одному футеру показать пусто только на 2-й странице
-    # и номер с 3-й без секционного разрыва.
-    # Поэтому для железобетонной логики нужен разрыв секции перед "ВВЕДЕНИЕ".
+        _, dp = _prepare_footer(section, use_first_page=False)
+        _add_page_field_to_paragraph(dp)
