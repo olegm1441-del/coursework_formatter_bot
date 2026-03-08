@@ -16,9 +16,18 @@ NORMALIZED_H1_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
 H2_RE = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.+?)\s*$")
 BROKEN_H2_RE = re.compile(r"^\s*\.\s+(.+?)\s*$")
 
-TABLE_CAPTION_RE = re.compile(r"^\s*таблица\s+\d+(\.\d+){1,2}\.?\s*$", re.IGNORECASE)
-TABLE_CONTINUATION_RE = re.compile(r"^\s*продолжение\s+(табл\.|таблицы)\s+\d+(\.\d+){1,2}\.?\s*$", re.IGNORECASE)
-FIGURE_CAPTION_RE = re.compile(r"^\s*(рис\.|рисунок)\s*\d+(\.\d+){1,2}\.?\s+.+$", re.IGNORECASE)
+TABLE_CAPTION_RE = re.compile(
+    r"^\s*таблица\s+\d+(?:\.\d+){0,2}\.?\s*(?:[-—–].*)?$",
+    re.IGNORECASE,
+)
+TABLE_CONTINUATION_RE = re.compile(
+    r"^\s*продолжение\s+таблицы",
+    re.IGNORECASE,
+)
+FIGURE_CAPTION_RE = re.compile(
+    r"^\s*(рис\.|рисунок)\s*\d+(?:\.\d+){0,2}\s*[.\-—–]?\s+.+$",
+    re.IGNORECASE,
+)
 SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:\s*.+$", re.IGNORECASE)
 
 
