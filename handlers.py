@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from pathlib import Path
 
 from telegram import Update
@@ -23,6 +25,10 @@ from keyboards import (
     get_main_menu_keyboard,
 )
 import services
+
+
+logger = logging.getLogger(__name__)
+FORMAT_TIMEOUT_SECONDS = 60
 
 
 def _extract_referral_code_from_start(text: str | None) -> str | None:
@@ -213,10 +219,14 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     db = SessionLocal()
     input_path = None
     output_path = None
+    request = None
+    user = None
 
     try:
         user, _ = _ensure_current_user(db, update)
         balance = services.get_user_credit_balance(db, user.id)
+
+        logger.info("docx_received user_id=%s filename=%s balance=%s", user.id, filename, balance)
 
         if balance <= 0:
             text = services.build_no_credits_text(user, _get_bot_username(context))
@@ -226,8 +236,10 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         guide_code = services.get_user_selected_guide_code(user)
         _, input_path, output_path = services.build_processing_paths(filename)
 
+        logger.info("download_start user_id=%s filename=%s input_path=%s", user.id, filename, input_path)
         tg_file = await document.get_file()
         await tg_file.download_to_drive(custom_path=str(input_path))
+        logger.info("download_done user_id=%s filename=%s", user.id, filename)
 
         doc_record = services.create_document_record(
             db,
@@ -243,19 +255,31 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             guide_code=guide_code,
         )
 
+        logger.info("request_created request_id=%s user_id=%s guide=%s", request.id, user.id, guide_code)
+
         debited = services.debit_one_credit(db, user.id, source_id=str(request.id))
         if not debited:
             text = services.build_no_credits_text(user, _get_bot_username(context))
             await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
             return
 
+        logger.info("credit_debited request_id=%s user_id=%s", request.id, user.id)
+
         await update.message.reply_text("Документ принят. Выполняю оформление...")
 
-        services.format_document_by_guide(
-            guide_code=guide_code,
-            input_path=str(input_path),
-            output_path=str(output_path),
+        logger.info("formatting_start request_id=%s filename=%s", request.id, filename)
+
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                services.format_document_by_guide,
+                guide_code=guide_code,
+                input_path=str(input_path),
+                output_path=str(output_path),
+            ),
+            timeout=FORMAT_TIMEOUT_SECONDS,
         )
+
+        logger.info("formatting_done request_id=%s output_path=%s", request.id, output_path)
 
         services.mark_formatting_done(
             db,
@@ -272,8 +296,22 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 caption="Документ оформлен.",
             )
 
+    except asyncio.TimeoutError:
+        logger.warning("formatting_timeout request_id=%s filename=%s", getattr(request, "id", None), filename)
+
+        if request is not None and user is not None:
+            services.mark_formatting_failed_in_new_session(request.id, "Formatting timeout")
+            services.refund_one_credit_in_new_session(user.id, str(request.id))
+
+        await update.message.reply_text(
+            "Обработка заняла слишком много времени и была остановлена. Кредит возвращён.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+
     except Exception as e:
-        if "request" in locals():
+        logger.exception("formatting_failed request_id=%s filename=%s", getattr(request, "id", None), filename)
+
+        if request is not None and user is not None:
             services.mark_formatting_failed_in_new_session(request.id, str(e))
             services.refund_one_credit_in_new_session(user.id, str(request.id))
 
