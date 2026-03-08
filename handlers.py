@@ -1,5 +1,6 @@
 from aiogram import types, Router, F
 from aiogram.filters import CommandStart, Command
+from aiogram import types, Router, F
 
 from db import SessionLocal
 from keyboards import main_menu_keyboard, guides_keyboard
