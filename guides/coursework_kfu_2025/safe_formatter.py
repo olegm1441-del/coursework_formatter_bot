@@ -1080,6 +1080,46 @@ def format_empty_paragraphs_in_body(document, body_start):
         if is_empty_paragraph(p):
             format_empty_paragraph(p)
 
+def ensure_section_break_before_introduction(document, body_start):
+    """
+    Ставит разрыв секции типа Next Page перед абзацем 'ВВЕДЕНИЕ'.
+    Это нужно, чтобы:
+    - 1-я страница имела свой футер,
+    - 2-я страница была пустой,
+    - с 3-й страницы можно было включить нумерацию отдельной секцией.
+    """
+    if body_start is None:
+        return
+
+    paragraphs = document.paragraphs
+    if body_start <= 0 or body_start >= len(paragraphs):
+        return
+
+    intro_p = paragraphs[body_start]
+    prev_p = paragraphs[body_start - 1]
+
+    prev_pPr = prev_p._element.get_or_add_pPr()
+
+    # Если секционный разрыв уже стоит — второй раз не добавляем
+    existing_sectPr = prev_pPr.find(qn("w:sectPr"))
+    if existing_sectPr is not None:
+        return
+
+    body = document._body._element
+    body_sectPr = body.sectPr
+    if body_sectPr is None:
+        return
+
+    new_sectPr = deepcopy(body_sectPr)
+
+    # Делаем разрыв секции "со следующей страницы"
+    type_el = new_sectPr.find(qn("w:type"))
+    if type_el is None:
+        type_el = OxmlElement("w:type")
+        new_sectPr.insert(0, type_el)
+    type_el.set(qn("w:val"), "nextPage")
+
+    prev_pPr.append(new_sectPr)
 
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
@@ -1249,6 +1289,7 @@ def process_document(input_path: Path, output_path: Path):
     )
 
     apply_page_breaks(doc, body_start)
+    ensure_section_break_before_introduction(doc, body_start)
     apply_page_numbering_policy(doc)
     remove_all_italic(doc)
 
