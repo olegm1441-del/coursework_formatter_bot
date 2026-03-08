@@ -175,7 +175,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, Cm, Mm, RGBColor, RGBColor
 from docx.text.paragraph import Paragraph
 
-from rules import (
+from .rules import (
     FONT_NAME,
     BODY_FONT_SIZE_PT,
     TABLE_FONT_SIZE_PT,
@@ -187,7 +187,7 @@ from rules import (
     TOP_MARGIN_MM,
     BOTTOM_MARGIN_MM,
 )
-from classifier import (
+from .classifier import (
     find_body_start_index,
     classify_paragraph,
     clean_spaces,
@@ -195,8 +195,8 @@ from classifier import (
     parse_heading2,
     parse_broken_heading2,
 )
-from page_numbering import apply_page_numbering_policy
-from page_breaks import apply_page_breaks
+from .page_numbering import apply_page_numbering_policy
+from .page_breaks import apply_page_breaks
 
 
 TABLE_NUM_RE = re.compile(r"^\s*таблица\s*(\d+(?:\.\d+){1,2})\.?\s*(.*?)\s*$", re.IGNORECASE)
