@@ -87,7 +87,8 @@ def looks_like_heading2_title(text: str) -> bool:
 
 def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
     text = clean_spaces(paragraph.text)
-        low = text.lower()
+
+    low = text.lower()
 
     if low.startswith("таблица "):
         return None
@@ -99,34 +100,6 @@ def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, pre
         return None
     if low.startswith("продолжение табл."):
         return None
-
-    if not text:
-        return None
-
-    if is_table_continuation_text(text):
-        return None
-
-    if current_chapter_num is None or next_paragraph_num is None:
-        return None
-
-    if parse_heading2(text):
-        return text
-
-    if paragraph_has_numbering(paragraph) and looks_like_heading2_title(text):
-        title = text.lstrip(". ").strip()
-        new_text = f"{current_chapter_num}.{next_paragraph_num}. {title}"
-        replace_paragraph_text(paragraph, new_text)
-        remove_paragraph_numbering(paragraph)
-        format_heading2(paragraph)
-        return new_text
-
-    if looks_like_heading2_title(text) and prev_kind in {"heading1", "empty_paragraph"}:
-        new_text = f"{current_chapter_num}.{next_paragraph_num}. {text}"
-        replace_paragraph_text(paragraph, new_text)
-        format_heading2(paragraph)
-        return new_text
-
-    return None
 
 # ===== END PATCH =====
 
