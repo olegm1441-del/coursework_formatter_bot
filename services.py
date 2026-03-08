@@ -536,6 +536,30 @@ def create_formatting_request(
     return formatting_request
 
 
+def mark_formatting_processing(db, request_id: int) -> bool:
+    formatting_request = (
+        db.query(FormattingRequest)
+        .filter(FormattingRequest.id == request_id)
+        .first()
+    )
+    if not formatting_request:
+        return False
+
+    if formatting_request.status != "queued":
+        return False
+
+    formatting_request.status = "processing"
+    db.commit()
+    return True
+
+def get_formatting_request_by_id(db, request_id: int) -> FormattingRequest | None:
+    return (
+        db.query(FormattingRequest)
+        .filter(FormattingRequest.id == request_id)
+        .first()
+    )
+
+
 def mark_formatting_done(db, request_id: int, result_file_path: str) -> None:
     formatting_request = (
         db.query(FormattingRequest)
