@@ -1080,6 +1080,21 @@ def format_empty_paragraphs_in_body(document, body_start):
         if is_empty_paragraph(p):
             format_empty_paragraph(p)
 
+def normalize_sections(document):
+    """
+    Удаляет секционные разрывы из абзацев внутри документа,
+    чтобы потом можно было заново поставить один правильный
+    разрыв секции перед ВВЕДЕНИЕМ.
+    """
+    for p in document.paragraphs:
+        pPr = p._element.pPr
+        if pPr is None:
+            continue
+
+        sectPr = pPr.find(qn("w:sectPr"))
+        if sectPr is not None:
+            pPr.remove(sectPr)
+
 def ensure_section_break_before_introduction(document, body_start):
     """
     Ставит разрыв секции типа Next Page перед абзацем 'ВВЕДЕНИЕ'.
@@ -1104,6 +1119,10 @@ def ensure_section_break_before_introduction(document, body_start):
     existing_sectPr = prev_pPr.find(qn("w:sectPr"))
     if existing_sectPr is not None:
         return
+
+next_pPr = intro_p._element.pPr
+if next_pPr is not None and next_pPr.find(qn("w:sectPr")) is not None:
+    return
 
     body = document._body._element
     body_sectPr = body.sectPr
@@ -1289,6 +1308,7 @@ def process_document(input_path: Path, output_path: Path):
     )
 
     apply_page_breaks(doc, body_start)
+    normalize_sections(doc)
     ensure_section_break_before_introduction(doc, body_start)
     apply_page_numbering_policy(doc)
     remove_all_italic(doc)
