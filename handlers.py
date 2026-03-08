@@ -83,6 +83,12 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             update,
             referral_code_from_start=referral_code,
         )
+        services.track_event(
+            db,
+            event_name="start_clicked",
+            user_id=user.id,
+            source="telegram_start",
+        )
 
         balance = services.get_user_credit_balance(db, user.id)
         guide_code = services.get_user_selected_guide_code(user)
