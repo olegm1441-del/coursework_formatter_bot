@@ -528,7 +528,7 @@ def create_formatting_request(
         university_code=guide["university_code"],
         document_type=guide["document_type"],
         guideline_version=guide["guideline_version"],
-        status="processing",
+        status="queued",
     )
     db.add(formatting_request)
     db.commit()
