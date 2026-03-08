@@ -1,6 +1,6 @@
 from docx.oxml.ns import qn
 
-from classifier import clean_spaces, parse_heading1, parse_heading2
+from .classifier import clean_spaces, parse_heading1, parse_heading2
 
 
 EXACT_PAGEBREAK_HEADINGS = {
