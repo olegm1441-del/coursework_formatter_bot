@@ -32,18 +32,26 @@ def setup_logging() -> None:
     )
 
 
-def get_bot() -> Bot:
+def get_bot_token() -> str:
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Переменная BOT_TOKEN не задана")
-    return Bot(token=token)
+    return token
 
 
-async def send_text(bot: Bot, chat_id: int, text: str) -> None:
+async def send_text(bot_token: str, chat_id: int, text: str) -> None:
+    bot = Bot(token=bot_token)
     await bot.send_message(chat_id=chat_id, text=text)
 
 
-async def send_document(bot: Bot, chat_id: int, path: Path, filename: str, caption: str) -> None:
+async def send_document(
+    bot_token: str,
+    chat_id: int,
+    path: Path,
+    filename: str,
+    caption: str,
+) -> None:
+    bot = Bot(token=bot_token)
     with open(path, "rb") as f:
         await bot.send_document(
             chat_id=chat_id,
@@ -53,25 +61,29 @@ async def send_document(bot: Bot, chat_id: int, path: Path, filename: str, capti
         )
 
 
-def _formatter_process_target(guide_code: str, input_path: str, output_path: str, queue: Queue) -> None:
+def _formatter_process_target(
+    guide_code: str,
+    input_path: str,
+    output_path: str,
+    queue: Queue,
+) -> None:
     try:
         result = services.format_document_by_guide(
             guide_code=guide_code,
             input_path=input_path,
             output_path=output_path,
         )
-        queue.put({
-            "ok": True,
-            "result": result,
-        })
+        queue.put({"ok": True, "result": result})
     except Exception:
-        queue.put({
-            "ok": False,
-            "error": traceback.format_exc(),
-        })
+        queue.put({"ok": False, "error": traceback.format_exc()})
 
 
-def run_format_with_timeout(guide_code: str, input_path: str, output_path: str, timeout_seconds: int) -> str:
+def run_format_with_timeout(
+    guide_code: str,
+    input_path: str,
+    output_path: str,
+    timeout_seconds: int,
+) -> str:
     queue: Queue = Queue()
     process = Process(
         target=_formatter_process_target,
@@ -105,11 +117,28 @@ def build_worker_output_path(request_id: int, original_filename: str) -> Path:
     return services.TEMP_DIR / f"{request_id}_{safe_name}"
 
 
+def notify_failure(bot_token: str, telegram_id: int) -> None:
+    try:
+        asyncio.run(
+            send_text(
+                bot_token,
+                telegram_id,
+                (
+                    "Не удалось обработать документ из-за технической ошибки.\n"
+                    "Кредит возвращён.\n"
+                    "Пожалуйста, перешлите этот файл разработчику для багфикса."
+                ),
+            )
+        )
+    except Exception:
+        logger.exception("failed_to_notify_user_about_failure telegram_id=%s", telegram_id)
+
+
 def fail_request(
     request_id: int,
     user_id: int,
     error_text: str,
-    bot: Bot | None = None,
+    bot_token: str | None = None,
     telegram_id: int | None = None,
 ) -> None:
     db = SessionLocal()
@@ -129,22 +158,11 @@ def fail_request(
 
     services.refund_one_credit_in_new_session(user_id, str(request_id))
 
-    if bot is not None and telegram_id is not None:
-        try:
-            asyncio.run(send_text(
-                bot,
-                telegram_id,
-                (
-                    "Не удалось обработать документ из-за технической ошибки.\n"
-                    "Кредит возвращён.\n"
-                    "Пожалуйста, перешлите этот файл разработчику для багфикса."
-                ),
-            ))
-        except Exception:
-            logger.exception("failed_to_notify_user_about_failure request_id=%s", request_id)
+    if bot_token and telegram_id:
+        notify_failure(bot_token, telegram_id)
 
 
-def reclaim_stale_processing_requests(bot: Bot) -> int:
+def reclaim_stale_processing_requests(bot_token: str) -> int:
     now = datetime.utcnow()
     stale_before = now - timedelta(seconds=STALE_PROCESSING_SECONDS)
 
@@ -159,8 +177,6 @@ def reclaim_stale_processing_requests(bot: Bot) -> int:
         )
 
         for request in processing_requests:
-            # В MVP используем completed_at как "время входа в processing".
-            # Если completed_at пустой (legacy-запись), используем created_at.
             processing_started_at = request.completed_at or request.created_at
 
             if not processing_started_at:
@@ -179,18 +195,7 @@ def reclaim_stale_processing_requests(bot: Bot) -> int:
             services.refund_one_credit_in_new_session(request.user_id, str(request.id))
 
             if user:
-                try:
-                    asyncio.run(send_text(
-                        bot,
-                        user.telegram_id,
-                        (
-                            "Не удалось обработать документ из-за технической ошибки.\n"
-                            "Кредит возвращён.\n"
-                            "Пожалуйста, перешлите этот файл разработчику для багфикса."
-                        ),
-                    ))
-                except Exception:
-                    logger.exception("failed_to_notify_stale_request_user request_id=%s", request.id)
+                notify_failure(bot_token, user.telegram_id)
 
             logger.warning(
                 "stale_request_failed request_id=%s user_id=%s started_at=%s",
@@ -222,10 +227,7 @@ def pick_next_queued_request_id() -> int | None:
 
         request.status = "processing"
         request.error_message = None
-
-        # В MVP временно используем completed_at как started_at для processing.
         request.completed_at = datetime.utcnow()
-
         db.commit()
         db.refresh(request)
 
@@ -245,9 +247,10 @@ def pick_next_queued_request_id() -> int | None:
         db.close()
 
 
-def process_one_request(request_id: int, bot: Bot) -> bool:
+def process_one_request(request_id: int, bot_token: str) -> bool:
     db = SessionLocal()
     output_path: Path | None = None
+    input_path: Path | None = None
 
     try:
         request = (
@@ -267,8 +270,6 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
                 request_id=request_id,
                 user_id=request.user_id,
                 error_text="User not found",
-                bot=None,
-                telegram_id=None,
             )
             return False
 
@@ -277,7 +278,7 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
                 request_id=request_id,
                 user_id=request.user_id,
                 error_text="Document not found",
-                bot=bot,
+                bot_token=bot_token,
                 telegram_id=user.telegram_id,
             )
             return False
@@ -288,7 +289,7 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
                 request_id=request_id,
                 user_id=request.user_id,
                 error_text=f"Input file not found: {input_path}",
-                bot=bot,
+                bot_token=bot_token,
                 telegram_id=user.telegram_id,
             )
             return False
@@ -317,12 +318,13 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
         request.error_message = None
         request.completed_at = datetime.utcnow()
         db.commit()
+
         services.track_event(
-          db,
-          event_name="processing_completed",
-          user_id=user.id,
-          source="worker",
-          payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
+            db,
+            event_name="processing_completed",
+            user_id=user.id,
+            source="worker",
+            payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
         )
 
         services.grant_referral_upload_bonus_if_needed(db, user.id)
@@ -334,27 +336,27 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
             output_path,
         )
 
-        try:
-            asyncio.run(send_document(
-                bot,
+        asyncio.run(
+            send_document(
+                bot_token,
                 user.telegram_id,
                 output_path,
                 output_path.name,
                 "Документ оформлен.",
-            ))
-            logger.info(
-                "document_sent request_id=%s user_id=%s filename=%s",
-                request.id,
-                user.id,
-                output_path.name,
             )
-        except Exception:
-            logger.exception(
-                "document_send_failed request_id=%s user_id=%s output_path=%s",
-                request.id,
-                user.id,
-                output_path,
-            )
+        )
+
+        logger.info(
+            "document_sent request_id=%s user_id=%s filename=%s",
+            request.id,
+            user.id,
+            output_path.name,
+        )
+
+        if input_path and input_path.exists():
+            services.cleanup_temp_files(input_path)
+        if output_path and output_path.exists():
+            services.cleanup_temp_files(output_path)
 
         return True
 
@@ -383,7 +385,7 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
                     request_id=request_id,
                     user_id=user_id,
                     error_text=str(e),
-                    bot=bot,
+                    bot_token=bot_token,
                     telegram_id=telegram_id,
                 )
         except Exception:
@@ -415,7 +417,7 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
                     request_id=request_id,
                     user_id=user_id,
                     error_text=str(e),
-                    bot=bot,
+                    bot_token=bot_token,
                     telegram_id=telegram_id,
                 )
         except Exception:
@@ -435,7 +437,7 @@ def main() -> None:
     setup_logging()
 
     Base.metadata.create_all(bind=engine)
-    bot = get_bot()
+    bot_token = get_bot_token()
 
     logger.info(
         "worker_started timeout=%s stale_timeout=%s poll_interval=%s",
@@ -448,7 +450,7 @@ def main() -> None:
 
     while True:
         try:
-            reclaimed = reclaim_stale_processing_requests(bot)
+            reclaimed = reclaim_stale_processing_requests(bot_token)
             if reclaimed:
                 logger.warning("stale_requests_reclaimed=%s", reclaimed)
 
@@ -464,7 +466,7 @@ def main() -> None:
                 continue
 
             empty_polls = 0
-            process_one_request(request_id, bot)
+            process_one_request(request_id, bot_token)
 
         except Exception:
             logger.exception("worker_loop_crashed")
