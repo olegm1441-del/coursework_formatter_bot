@@ -186,15 +186,53 @@ from .page_breaks import apply_page_breaks
 MAX_NORMALIZATION_PASSES = 35
 
 def run_with_pass_limit(step_name, func, document, body_start):
-    for _ in range(MAX_NORMALIZATION_PASSES):
-        before = len(document.paragraphs)
-        snapshot = [p.text for p in document.paragraphs]
-        func(document, body_start)
-        after = len(document.paragraphs)
-        snapshot_after = [p.text for p in document.paragraphs]
+    """
+    Re-run a normalization step until it stabilizes, but avoid full-text snapshots
+    of the whole document on every pass.
 
-        if before == after and snapshot == snapshot_after:
+    Preferred contract: a step may return:
+      - True / positive int  -> document changed, run another pass
+      - False / 0 / None     -> no changes, step is stable
+
+    Backward compatibility: if a step returns None, we fall back to a cheap
+    structural signature based on paragraph count and lengths.
+    """
+    previous_signature = None
+
+    for _ in range(MAX_NORMALIZATION_PASSES):
+        paragraphs = document.paragraphs
+        before_signature = (
+            len(paragraphs),
+            sum(len(p.text) for p in paragraphs),
+        )
+
+        result = func(document, body_start)
+
+        if isinstance(result, bool):
+            if not result:
+                return
+            previous_signature = None
+            continue
+
+        if isinstance(result, int):
+            if result <= 0:
+                return
+            previous_signature = None
+            continue
+
+        paragraphs_after = document.paragraphs
+        after_signature = (
+            len(paragraphs_after),
+            sum(len(p.text) for p in paragraphs_after),
+        )
+
+        if after_signature == before_signature:
             return
+
+        if after_signature == previous_signature:
+            raise RuntimeError(f"Formatter step stuck: {step_name}")
+
+        previous_signature = after_signature
 
     raise RuntimeError(f"Formatter step stuck: {step_name}")
 
@@ -889,38 +927,57 @@ def ensure_empty_between_heading1_and_heading2(document, body_start):
 
 
 def ensure_compact_heading2_spacing(document, body_start):
-    changed = True
-    while changed:
-        changed = False
-        paragraphs = document.paragraphs
-        prev_kind = None
+    """
+    Normalize spacing around heading2 in one pass.
 
-        for idx, p in enumerate(paragraphs):
-            if idx < body_start:
-                continue
+    Rules:
+      - no empty paragraph immediately before heading2;
+      - exactly one empty paragraph immediately after heading2.
 
-            kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
+    Returns True if any changes were made, otherwise False.
+    """
+    paragraphs = document.paragraphs
+    prev_kind = None
+    changed = False
+    idx = max(body_start, 0)
 
-            if kind == "heading2":
-                # Перед heading2 не должно быть пустой строки
-                if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                    remove_paragraph(paragraphs[idx - 1])
-                    changed = True
-                    break
+    while idx < len(paragraphs):
+        p = paragraphs[idx]
+        kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
 
-                # После heading2 должна быть ровно одна пустая строка
-                if idx + 1 < len(paragraphs):
-                    if not is_empty_paragraph(paragraphs[idx + 1]):
-                        new_p = OxmlElement("w:p")
-                        p._element.addnext(new_p)
-                        changed = True
-                        break
-                    if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-                        remove_paragraph(paragraphs[idx + 2])
-                        changed = True
-                        break
-
+        if kind != "heading2":
             prev_kind = kind
+            idx += 1
+            continue
+
+        # 1) Remove all consecutive empty paragraphs immediately before heading2.
+        while idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
+            remove_paragraph(paragraphs[idx - 1])
+            paragraphs = document.paragraphs
+            idx -= 1
+            changed = True
+
+        # 2) Ensure exactly one empty paragraph immediately after heading2.
+        if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
+            new_p = OxmlElement("w:p")
+            p._element.addnext(new_p)
+            paragraphs = document.paragraphs
+            changed = True
+
+        # 3) Remove extra empty paragraphs after heading2, keep only one.
+        while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+            remove_paragraph(paragraphs[idx + 2])
+            paragraphs = document.paragraphs
+            changed = True
+
+        # 4) Normalize the single empty paragraph after heading2.
+        if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+            hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
+
+        prev_kind = kind
+        idx += 1
+
+    return changed
 
 
 
@@ -1142,9 +1199,10 @@ def ensure_section_break_before_introduction(document, body_start):
 
 def ensure_front_matter_layout(document, body_start):
     """
-    Приводит первые страницы к стабильной модели секций:
-    - если есть содержание: [титул] [содержание] [введение+основная часть]
-    - если содержания нет: [титул] [введение+основная часть]
+    Нормализует первые страницы:
+    - если есть СОДЕРЖАНИЕ до ВВЕДЕНИЯ, оно должно начинаться с новой страницы;
+    - ВВЕДЕНИЕ должно начинаться с новой секции и с новой страницы;
+    - если СОДЕРЖАНИЯ нет, ВВЕДЕНИЕ просто идет после титула на новой странице.
     """
     if body_start is None or body_start <= 0:
         return
@@ -1152,22 +1210,19 @@ def ensure_front_matter_layout(document, body_start):
     paragraphs = document.paragraphs
     intro_p = paragraphs[body_start]
 
-    # 1. Убрать старые page-break артефакты и paragraph-level sectPr.
-    for i, p in enumerate(paragraphs):
+        # Чистим старые page-break артефакты ДО ВВЕДЕНИЯ
+    for i in range(body_start):
+        p = paragraphs[i]
         p.paragraph_format.page_break_before = False
+
         for run in p.runs:
             r = run._element
             for br in list(r.findall(qn("w:br"))):
                 br_type = br.get(qn("w:type"))
                 if br_type in (None, "page"):
                     r.remove(br)
-        pPr = p._element.pPr
-        if pPr is not None:
-            sectPr = pPr.find(qn("w:sectPr"))
-            if sectPr is not None:
-                pPr.remove(sectPr)
 
-    # 2. Найти содержание до введения.
+    # 1) Ищем СОДЕРЖАНИЕ до ВВЕДЕНИЯ
     contents_idx = None
     for i in range(body_start):
         t = clean_spaces(paragraphs[i].text).upper()
@@ -1175,38 +1230,48 @@ def ensure_front_matter_layout(document, body_start):
             contents_idx = i
             break
 
-    body = document._body._element
-    body_sectPr = body.sectPr
-    if body_sectPr is None:
-        return
+    # 2) Чистим старые page_break_before до ВВЕДЕНИЯ,
+    # чтобы не копились артефакты
+    for i in range(body_start):
+        paragraphs[i].paragraph_format.page_break_before = False
 
-    def append_next_page_sectpr(after_paragraph):
-        pPr = after_paragraph._element.get_or_add_pPr()
-        if pPr.find(qn("w:sectPr")) is not None:
+    # 3) Если СОДЕРЖАНИЕ найдено — оно должно начинаться с новой страницы
+    if contents_idx is not None:
+        paragraphs[contents_idx].paragraph_format.page_break_before = True
+
+    # 4) Перед ВВЕДЕНИЕМ не нужен обычный page break,
+    # потому что там будет section break
+    intro_p.paragraph_format.page_break_before = False
+
+    # 5) Удаляем sectPr у абзацев ДО ВВЕДЕНИЯ, кроме последнего перед ВВЕДЕНИЕМ
+    for i in range(body_start - 1):
+        pPr = paragraphs[i]._element.pPr
+        if pPr is None:
+            continue
+        sectPr = pPr.find(qn("w:sectPr"))
+        if sectPr is not None:
+            pPr.remove(sectPr)
+
+    # 6) Ставим ровно один разрыв секции перед ВВЕДЕНИЕМ
+    prev_p = paragraphs[body_start - 1]
+    prev_pPr = prev_p._element.get_or_add_pPr()
+
+    existing_sectPr = prev_pPr.find(qn("w:sectPr"))
+    if existing_sectPr is None:
+        body = document._body._element
+        body_sectPr = body.sectPr
+        if body_sectPr is None:
             return
+
         new_sectPr = deepcopy(body_sectPr)
+
         type_el = new_sectPr.find(qn("w:type"))
         if type_el is None:
             type_el = OxmlElement("w:type")
             new_sectPr.insert(0, type_el)
         type_el.set(qn("w:val"), "nextPage")
-        # numbering from previous docs must not leak into inserted front sections
-        pg = new_sectPr.find(qn("w:pgNumType"))
-        if pg is not None:
-            new_sectPr.remove(pg)
-        for ref in list(new_sectPr.findall(qn("w:footerReference"))):
-            new_sectPr.remove(ref)
-        for ref in list(new_sectPr.findall(qn("w:headerReference"))):
-            new_sectPr.remove(ref)
-        pPr.append(new_sectPr)
 
-    # 3. Разрыв перед содержанием (если оно есть) => отдельная секция для содержания.
-    if contents_idx is not None and contents_idx > 0:
-        append_next_page_sectpr(paragraphs[contents_idx - 1])
-
-    # 4. Разрыв перед введением => отдельная секция для основной части.
-    append_next_page_sectpr(paragraphs[body_start - 1])
-
+        prev_pPr.append(new_sectPr)
 
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
