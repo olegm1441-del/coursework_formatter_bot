@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from pathlib import Path
 
@@ -28,7 +27,6 @@ import services
 
 
 logger = logging.getLogger(__name__)
-FORMAT_TIMEOUT_SECONDS = 60
 
 
 def _extract_referral_code_from_start(text: str | None) -> str | None:
