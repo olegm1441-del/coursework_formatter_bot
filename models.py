@@ -76,7 +76,7 @@ class FormattingRequest(Base):
     university_code = Column(String(50), nullable=False, default="kfu")
     document_type = Column(String(50), nullable=False, default="coursework")
     guideline_version = Column(String(50), nullable=False, default="2025")
-   status = Column(String(50), nullable=False, default="queued", index=True)
+    status = Column(String(50), nullable=False, default="queued", index=True)
     result_file_path = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
