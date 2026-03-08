@@ -1373,7 +1373,6 @@ def process_document(input_path: Path, output_path: Path):
 
     apply_page_breaks(doc, body_start)
     normalize_sections(doc)
-    ensure_section_break_before_introduction(doc, body_start)
     ensure_front_matter_layout(doc, body_start)
     apply_page_numbering_policy(doc)
     remove_all_italic(doc)
