@@ -23,6 +23,7 @@ import models  # noqa: F401
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_TELEGRAM_ID = 5279414391
 TEMP_DIR = Path("bot_storage")
 TEMP_DIR.mkdir(exist_ok=True)
 
@@ -274,6 +275,106 @@ def build_start_text(balance: int, is_new: bool) -> str:
         "Также можно получить бонус по реферальной ссылке."
     )
 
+async def balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    db = SessionLocal()
+    try:
+        user, _ = get_or_create_user(
+            db=db,
+            telegram_id=update.effective_user.id,
+            username=update.effective_user.username,
+            first_name=update.effective_user.first_name,
+            last_name=update.effective_user.last_name,
+            referral_code_from_start=None,
+        )
+        balance = get_user_credit_balance(db, user.id)
+
+        await update.message.reply_text(
+            f"Ваш баланс оформлений: {balance}",
+            reply_markup=MENU_KEYBOARD,
+        )
+    finally:
+        db.close()
+
+
+async def userinfo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    db = SessionLocal()
+    try:
+        user, _ = get_or_create_user(
+            db=db,
+            telegram_id=update.effective_user.id,
+            username=update.effective_user.username,
+            first_name=update.effective_user.first_name,
+            last_name=update.effective_user.last_name,
+            referral_code_from_start=None,
+        )
+        balance = get_user_credit_balance(db, user.id)
+
+        await update.message.reply_text(
+            f"user_id: {user.id}\n"
+            f"telegram_id: {user.telegram_id}\n"
+            f"referral_code: {user.referral_code}\n"
+            f"balance: {balance}",
+            reply_markup=MENU_KEYBOARD,
+        )
+    finally:
+        db.close()
+
+
+async def givecredits_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "Использование: /givecredits <user_id> <amount>"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text(
+            "Использование: /givecredits <user_id> <amount>"
+        )
+        return
+
+    db = SessionLocal()
+    try:
+        existing_user = db.query(User).filter(User.id == target_user_id).first()
+        if not existing_user:
+            await update.message.reply_text("Пользователь не найден.")
+            return
+
+        entry = CreditLedger(
+            user_id=target_user_id,
+            operation_type="admin_bonus",
+            amount=amount,
+            source_type="admin",
+            source_id=str(update.effective_user.id),
+            idempotency_key=f"admin_bonus_{target_user_id}_{amount}_{uuid.uuid4().hex[:8]}",
+        )
+        db.add(entry)
+        db.commit()
+
+        new_balance = get_user_credit_balance(db, target_user_id)
+
+        await update.message.reply_text(
+            f"Начислено {amount} кредитов пользователю {target_user_id}.\n"
+            f"Новый баланс: {new_balance}"
+        )
+    finally:
+        db.close()
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
@@ -525,6 +626,9 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("referral", referral_handler))
+    app.add_handler(CommandHandler("balance", balance_handler))
+    app.add_handler(CommandHandler("userinfo", userinfo_handler))
+    app.add_handler(CommandHandler("givecredits", givecredits_handler))
     app.add_handler(CommandHandler("contact", contact_handler))
     app.add_handler(CommandHandler("method", method_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
