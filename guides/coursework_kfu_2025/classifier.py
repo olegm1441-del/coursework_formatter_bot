@@ -1,5 +1,5 @@
 import re
-from rules import INTRO_HEADING, REFERENCE_SUBHEADINGS
+from .rules import INTRO_HEADING, REFERENCE_SUBHEADINGS
 
 
 H1_EXACT = {
