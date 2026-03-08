@@ -150,6 +150,8 @@ def main() -> None:
     if not TOKEN:
         raise RuntimeError("Переменная BOT_TOKEN не задана")
 
+    Base.metadata.create_all(bind=engine)
+    
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_handler))
