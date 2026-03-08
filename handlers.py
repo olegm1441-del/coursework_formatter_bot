@@ -300,6 +300,13 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             original_filename=filename,
             storage_path=str(input_path),
         )
+        services.track_event(
+            db,
+            event_name="file_uploaded",
+            user_id=user.id,
+            source="telegram_docx",
+            payload_json=f'{{"document_id": {doc_record.id}, "filename": "{filename}"}}',
+        )
 
         request = services.create_formatting_request(
             db,
