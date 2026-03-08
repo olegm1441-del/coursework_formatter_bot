@@ -793,6 +793,11 @@ def convert_reference_numbering_to_plain_text(document, body_start):
             replace_paragraph_text(paragraph, canonical)
             remove_paragraph_numbering(paragraph)
             paragraph.paragraph_format.page_break_before = False
+            paragraph.paragraph_format.keep_with_next = False
+            paragraph.paragraph_format.keep_together = False
+            paragraph.paragraph_format.widow_control = False
+
+            format_body(paragraph)
             format_reference_subheading(paragraph)
             prev_kind = "reference_subheading"
             continue
