@@ -1,5 +1,6 @@
 import os
 import uuid
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -373,13 +374,39 @@ def get_guide(guide_code: str) -> dict:
         raise ValueError("Методичка недоступна")
     return guide
 
+def _normalize_filename_text(value: str) -> str:
+    value = unicodedata.normalize("NFC", value)
+    return value.strip().lower()
+
 
 def find_method_file(guide_code: str) -> Path | None:
     guide = get_guide(guide_code)
-    basename = guide["method_basename"].strip().lower()
+    basename = _normalize_filename_text(guide["method_basename"])
 
     if not ASSETS_DIR.exists():
         return None
+
+    candidates = []
+    for path in ASSETS_DIR.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".docx", ".pdf"}:
+            continue
+
+        stem_normalized = _normalize_filename_text(path.stem)
+        candidates.append((path, stem_normalized))
+
+    # 1. Точное совпадение
+    for path, stem_normalized in candidates:
+        if stem_normalized == basename:
+            return path
+
+    # 2. Частичное совпадение в обе стороны
+    for path, stem_normalized in candidates:
+        if basename in stem_normalized or stem_normalized in basename:
+            return path
+
+    return None
 
     # 1. Сначала ищем точное совпадение имени файла без расширения
     for path in ASSETS_DIR.iterdir():
