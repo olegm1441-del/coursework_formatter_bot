@@ -88,22 +88,41 @@ def _prepare_footer(section, use_first_page=False):
     return footer, p
 
 
+def _set_page_number_start(section, start_value=None):
+    sectPr = section._sectPr
+
+    pgNumType = sectPr.find(qn("w:pgNumType"))
+    if pgNumType is None:
+        pgNumType = OxmlElement("w:pgNumType")
+        sectPr.append(pgNumType)
+
+    if start_value is None:
+        if qn("w:start") in pgNumType.attrib:
+            del pgNumType.attrib[qn("w:start")]
+    else:
+        pgNumType.set(qn("w:start"), str(start_value))
+
+
 def apply_page_numbering_policy(document):
     """
     Логика:
-    - секция 1:
-        1-я страница -> "Казань – 2026 г."
-        остальные страницы секции -> пусто
-    - секция 2 и далее:
-        первая страница секции -> номер страницы
-        остальные страницы секции -> номер страницы
+    - если есть СОДЕРЖАНИЕ до ВВЕДЕНИЯ:
+        стр. 1 -> "Казань – 2026 г."
+        стр. 2 -> пусто
+        стр. 3 -> номер 3
+    - если СОДЕРЖАНИЯ нет:
+        стр. 1 -> "Казань – 2026 г."
+        стр. 2 -> номер 2
     """
-    if not document.sections:
+    sections = list(document.sections)
+    if not sections:
         return
 
-    sections = list(document.sections)
+    # 1) Определяем, есть ли СОДЕРЖАНИЕ до ВВЕДЕНИЯ
+    body_texts = [p.text.strip().upper() for p in document.paragraphs]
+    has_contents = "СОДЕРЖАНИЕ" in body_texts
 
-    # --- Первая секция: титул + содержание ---
+    # 2) Первая секция: титул + возможно содержание
     first_section = sections[0]
     first_section.different_first_page_header_footer = True
 
@@ -112,11 +131,16 @@ def apply_page_numbering_policy(document):
 
     _, p2 = _prepare_footer(first_section, use_first_page=False)
     p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    # специально ничего не пишем -> страница содержания пустая внизу
+    # пусто
 
-    # --- Все следующие секции: обычная нумерация ---
-    for section in sections[1:]:
+    # 3) Следующие секции: обычные номера
+    # Если содержание есть, введение должно начинаться с 3
+    # Если содержания нет, введение должно начинаться с 2
+    start_num = 3 if has_contents else 2
+
+    for idx, section in enumerate(sections[1:], start=1):
         section.different_first_page_header_footer = True
+        _set_page_number_start(section, start_num if idx == 1 else None)
 
         _, fp = _prepare_footer(section, use_first_page=True)
         _add_page_field_to_paragraph(fp)
