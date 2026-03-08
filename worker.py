@@ -317,6 +317,13 @@ def process_one_request(request_id: int, bot: Bot) -> bool:
         request.error_message = None
         request.completed_at = datetime.utcnow()
         db.commit()
+        services.track_event(
+          db,
+          event_name="processing_completed",
+          user_id=user.id,
+          source="worker",
+          payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
+        )
 
         services.grant_referral_upload_bonus_if_needed(db, user.id)
 
