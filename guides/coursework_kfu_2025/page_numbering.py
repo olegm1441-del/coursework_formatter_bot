@@ -24,7 +24,8 @@ def _set_run_font(run):
     run.font.color.rgb = RGBColor(0, 0, 0)
 
     rPr = run._element.get_or_add_rPr()
-    rFonts = rPr.rFonts
+
+    rFonts = rPr.find(qn("w:rFonts"))
     if rFonts is None:
         rFonts = OxmlElement("w:rFonts")
         rPr.append(rFonts)
@@ -33,6 +34,18 @@ def _set_run_font(run):
     rFonts.set(qn("w:hAnsi"), "Times New Roman")
     rFonts.set(qn("w:cs"), "Times New Roman")
     rFonts.set(qn("w:eastAsia"), "Times New Roman")
+
+    sz = rPr.find(qn("w:sz"))
+    if sz is None:
+        sz = OxmlElement("w:sz")
+        rPr.append(sz)
+    sz.set(qn("w:val"), "24")
+
+    szCs = rPr.find(qn("w:szCs"))
+    if szCs is None:
+        szCs = OxmlElement("w:szCs")
+        rPr.append(szCs)
+    szCs.set(qn("w:val"), "24")
 
 
 def _add_text_to_paragraph(paragraph, text):
