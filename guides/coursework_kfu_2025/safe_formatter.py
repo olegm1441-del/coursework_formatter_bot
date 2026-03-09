@@ -419,7 +419,18 @@ def canonical_reference_subheading_text(text: str):
 
     return REFERENCE_SUBHEADINGS_CANON.get(t.lower())
 
+def strip_leading_heading_garbage(text: str) -> str:
+    t = clean_spaces(text)
+    if not t:
+        return t
 
+    # Убираем ведущие маркеры/мусор, которые Word мог оставить как текст
+    t = re.sub(r'^\s*[•·▪■◆►→◦●○\-–—]+\s*', '', t)
+
+    # Убираем лишние пробелы после очистки
+    t = clean_spaces(t)
+    return t
+    
 def normalize_heading2_artifacts(paragraph):
     text = clean_spaces(paragraph.text)
     if not text:
@@ -652,7 +663,8 @@ def format_tables(document):
 
 
 def smart_repair_heading1(paragraph, text: str):
-    parsed = parse_heading1(text)
+    cleaned = strip_leading_heading_garbage(text)
+    parsed = parse_heading1(cleaned)
     if not parsed:
         return False
 
@@ -660,6 +672,12 @@ def smart_repair_heading1(paragraph, text: str):
         chapter_num = parsed["chapter_num"]
         title = parsed["title"].upper()
         replace_paragraph_text(paragraph, f"{chapter_num}. {title}")
+        remove_paragraph_numbering(paragraph)
+        format_heading1(paragraph)
+        return True
+
+    if parsed["kind"] == "heading1_exact":
+        replace_paragraph_text(paragraph, cleaned.upper())
         remove_paragraph_numbering(paragraph)
         format_heading1(paragraph)
         return True
@@ -748,7 +766,8 @@ def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_
     if current_chapter_num is None or next_paragraph_num is None:
         return None
 
-    text = clean_spaces(paragraph.text)
+    text = strip_leading_heading_garbage(paragraph.text)
+    text = clean_spaces(text)
     if not text:
         return None
 
@@ -1054,6 +1073,47 @@ def ensure_empty_after_source_and_note(document, body_start):
 
             prev_kind = kind
 
+def ensure_single_blank_after_headings(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        prev_kind = None
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+            kind = classify_paragraph(text, prev_kind=prev_kind)
+
+            if kind not in {"heading1", "heading2"}:
+                prev_kind = kind
+                continue
+
+            # После heading1/heading2 должна быть ровно одна пустая строка
+            if idx + 1 >= len(paragraphs):
+                new_p = insert_paragraph_after(p, "")
+                format_empty_paragraph(new_p)
+                changed = True
+                break
+
+            next_p = paragraphs[idx + 1]
+
+            if not is_empty_paragraph(next_p):
+                new_p = insert_paragraph_after(p, "")
+                format_empty_paragraph(new_p)
+                changed = True
+                break
+
+            # Если пустых строк больше одной — сжимаем до одной
+            if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+                remove_paragraph(paragraphs[idx + 2])
+                changed = True
+                break
+
+            format_empty_paragraph(next_p)
+            prev_kind = kind
 
 def ensure_empty_between_heading1_and_heading2(document, body_start):
     changed = True
@@ -1549,12 +1609,6 @@ def process_document(input_path: Path, output_path: Path):
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
 
-    run_with_pass_limit(
-        "ensure_empty_between_heading1_and_heading2",
-        ensure_empty_between_heading1_and_heading2,
-        doc,
-        body_start,
-    )
 
     run_with_pass_limit(
         "ensure_compact_heading2_spacing",
@@ -1593,18 +1647,17 @@ def process_document(input_path: Path, output_path: Path):
 
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
-    format_empty_paragraphs_in_body(doc, body_start)
 
     run_with_pass_limit(
-        "normalize_structural_heading_spacing_v2",
-        normalize_structural_heading_spacing_v2,
+        "ensure_single_blank_after_headings",
+        ensure_single_blank_after_headings,
         doc,
         body_start,
     )
-    
+
     run_with_pass_limit(
-        "compact_references_block",
-        compact_references_block,
+        "ensure_compact_heading2_spacing",
+        ensure_compact_heading2_spacing,
         doc,
         body_start,
     )
