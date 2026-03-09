@@ -1057,6 +1057,15 @@ def ensure_empty_after_source_and_note(document, body_start):
             kind = classify_paragraph(text, prev_kind=prev_kind)
 
             if kind == "source_line":
+
+                # если после источника идет примечание — строку не вставляем
+                if idx + 1 < len(paragraphs):
+                    next_text = clean_spaces(paragraphs[idx + 1].text).lower()
+                    if next_text.startswith("примечание"):
+                        prev_kind = kind
+                        continue
+
+                # иначе добавляем одну пустую строку
                 if idx + 1 < len(paragraphs) and not is_empty_paragraph(paragraphs[idx + 1]):
                     new_p = OxmlElement("w:p")
                     p._element.addnext(new_p)
