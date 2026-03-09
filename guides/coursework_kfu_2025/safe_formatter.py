@@ -1561,9 +1561,21 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 format_reference_subheading(p)
 
                 if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                    remove_paragraph(paragraphs[idx - 1])
-                    changed = True
-                    break
+                    # Если пустая строка стоит сразу после
+                    # "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+                    # её сохраняем — она нужна по шаблону.
+                    if idx - 2 >= body_start:
+                        prev_prev_text = clean_spaces(paragraphs[idx - 2].text)
+                        if is_references_heading_text(prev_prev_text):
+                            pass
+                        else:
+                            remove_paragraph(paragraphs[idx - 1])
+                            changed = True
+                            break
+                    else:
+                        remove_paragraph(paragraphs[idx - 1])
+                        changed = True
+                        break
 
                 if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
                     remove_paragraph(paragraphs[idx + 1])
