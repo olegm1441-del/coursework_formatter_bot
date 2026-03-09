@@ -1387,6 +1387,35 @@ def ensure_single_blank_after_headings(doc, body_start):
 
         # главы — ничего не делаем
 
+
+def ensure_one_empty_after(paragraphs, index):
+    """Ensure exactly one empty paragraph right after paragraphs[index]."""
+    if index >= len(paragraphs):
+        return False
+
+    changed = False
+    p = paragraphs[index]
+
+    if index + 1 >= len(paragraphs):
+        new_p = insert_paragraph_after(p, "")
+        format_empty_paragraph(new_p)
+        return True
+
+    next_p = paragraphs[index + 1]
+    if not is_empty_paragraph(next_p):
+        new_p = insert_paragraph_after(p, "")
+        format_empty_paragraph(new_p)
+        return True
+
+    format_empty_paragraph(next_p)
+
+    while index + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[index + 2]):
+        remove_paragraph(paragraphs[index + 2])
+        paragraphs = p._parent.paragraphs
+        changed = True
+
+    return changed
+
 def ensure_empty_between_heading1_and_heading2(document, body_start):
     changed = True
     while changed:
