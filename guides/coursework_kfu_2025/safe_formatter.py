@@ -1868,58 +1868,14 @@ def process_document(input_path: Path, output_path: Path):
         body_start,
     )
 
-    run_with_pass_limit(
-        "ensure_compact_heading2_spacing",
-        ensure_compact_heading2_spacing,
-        doc,
-        body_start,
-    )
-
     apply_page_breaks(doc, body_start)
     normalize_sections(doc)
     ensure_front_matter_layout(doc, body_start)
     apply_page_numbering_policy(doc)
     remove_all_italic(doc)
 
-    run_with_pass_limit(
-        "normalize_structural_heading_spacing_v2_final",
-        normalize_structural_heading_spacing_v2,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "ensure_single_blank_after_headings_final",
-        ensure_single_blank_after_headings,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "compact_references_block_final",
-        compact_references_block,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "cleanup_reference_subheadings_layout_final",
-        cleanup_reference_subheadings_layout,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "ensure_single_blank_after_references_heading_final",
-        ensure_single_blank_after_references_heading,
-        doc,
-        body_start,
-    )
-
-    collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
-
     doc.save(str(output_path))
-
+    
 def remove_all_italic(doc):
     """
     Убирает курсив из всего документа
