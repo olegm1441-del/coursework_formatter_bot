@@ -1512,7 +1512,7 @@ def process_document(input_path: Path, output_path: Path):
         body_start,
     )
 
-        run_with_pass_limit(
+    run_with_pass_limit(
         "cleanup_reference_subheadings_layout",
         cleanup_reference_subheadings_layout,
         doc,
