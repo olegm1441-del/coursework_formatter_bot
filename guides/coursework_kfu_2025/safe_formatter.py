@@ -491,6 +491,12 @@ def format_empty_paragraph(paragraph):
     run = ensure_empty_run(paragraph)
     set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
+def format_empty_paragraphs_in_body(document, body_start):
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        if is_empty_paragraph(paragraph):
+            format_empty_paragraph(paragraph)
 
 def format_body(paragraph):
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
