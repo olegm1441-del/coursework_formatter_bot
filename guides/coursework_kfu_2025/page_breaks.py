@@ -11,6 +11,16 @@ EXACT_PAGEBREAK_HEADINGS = {
     "приложение",
 }
 
+REFERENCES_HEADINGS = {
+    "список использованных источников",
+    "список использованной литературы",
+}
+
+APPENDIX_HEADINGS = {
+    "приложения",
+    "приложение",
+}
+
 
 def _remove_page_breaks_from_run(run):
     """
@@ -64,21 +74,42 @@ def apply_page_breaks(document, body_start):
     """
     Ставит page_break_before только перед:
     - ВВЕДЕНИЕ
-    - новой главой (heading1 chapter)
+    - новой главой
     - ЗАКЛЮЧЕНИЕ
     - СПИСКОМ ИСТОЧНИКОВ
     - ПРИЛОЖЕНИЯМИ
 
-    Не ставит разрыв страницы перед heading2.
+    ВНУТРИ списка источников разрывы страниц не ставит.
     """
     _cleanup_existing_page_break_artifacts(document, body_start)
+
+    in_references = False
 
     for idx, paragraph in enumerate(document.paragraphs):
         if idx < body_start:
             continue
 
         text = clean_spaces(paragraph.text)
-        if not _needs_page_break_before(text):
+        low = text.lower()
+
+        # Начало блока литературы
+        if low in REFERENCES_HEADINGS:
+            in_references = True
+            paragraph.paragraph_format.page_break_before = True
             continue
 
-        paragraph.paragraph_format.page_break_before = True
+        # Конец блока литературы
+        if in_references and low in APPENDIX_HEADINGS:
+            in_references = False
+            paragraph.paragraph_format.page_break_before = True
+            continue
+
+        # Внутри списка литературы НИЧЕГО не разрываем
+        if in_references:
+            paragraph.paragraph_format.page_break_before = False
+            continue
+
+        if _needs_page_break_before(text):
+            paragraph.paragraph_format.page_break_before = True
+        else:
+            paragraph.paragraph_format.page_break_before = False
