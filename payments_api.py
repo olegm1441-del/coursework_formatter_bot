@@ -108,6 +108,7 @@ async def tribute_webhook(request: Request):
 
 
 @app.post("/create-payment")
+@app.post("/create-payment")
 async def create_payment(user_id: int):
 
     async with httpx.AsyncClient() as client:
@@ -126,11 +127,16 @@ async def create_payment(user_id: int):
 
     data = response.json()
 
+    logger.info("tribute_response=%s", data)
+
     payment_url = data.get("paymentUrl")
 
     if not payment_url:
-        logger.info("tribute_error_response=%s", data)
-        raise HTTPException(status_code=400, detail="Tribute payment error")
+        return {
+            "error": "tribute_error",
+            "response": data
+        }
+
     tribute_id = data["uuid"]
 
     db: Session = SessionLocal()
@@ -146,7 +152,5 @@ async def create_payment(user_id: int):
 
     db.add(payment)
     db.commit()
-
-    logger.info("payment_created tribute_id=%s", tribute_id)
 
     return {"payment_url": payment_url}
