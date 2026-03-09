@@ -118,10 +118,7 @@ async def create_payment(user_id: int):
                 "Api-Key": TRIBUTE_API_KEY
             },
             json={
-                "amount": 14900,
-                "currency": "rub",
-                "title": "1 оформление курсовой",
-                "description": "Автоматическое оформление курсовой по методичке КФУ",
+                "productId": "1aafbe06-f3bc-45bf-8fd0-1e7cd138a68d",
                 "successUrl": SUCCESS_URL,
                 "failUrl": FAIL_URL
             }
@@ -129,7 +126,11 @@ async def create_payment(user_id: int):
 
     data = response.json()
 
-    payment_url = data["paymentUrl"]
+    payment_url = data.get("paymentUrl")
+
+    if not payment_url:
+        logger.info("tribute_error_response=%s", data)
+        raise HTTPException(status_code=400, detail="Tribute payment error")
     tribute_id = data["uuid"]
 
     db: Session = SessionLocal()
