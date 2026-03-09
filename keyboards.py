@@ -1,21 +1,17 @@
 from telegram import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 
-# Тексты кнопок главного меню
 BTN_TOP_UP_BALANCE = "Пополнить баланс"
 BTN_REFERRAL = "Реферальная ссылка"
 BTN_SELECT_GUIDE = "Выбрать методичку"
 BTN_CONTACT = "Контакт"
 
-# Тексты inline-кнопок методички
 BTN_GUIDE_KFU_COURSEWORK_2025 = "КФУ — курсовая 2025"
 BTN_SHOW_GUIDE_FILE = "Открыть файл методички"
 BTN_BACK_TO_MENU = "Назад"
 
-# Тексты inline-кнопок оплаты
 BTN_BUY_1 = "💳 1 оформление — 149 ₽"
 BTN_BUY_3 = "📦 3 оформления — 349 ₽"
 
-# Callback data
 CB_SELECT_GUIDE_KFU_COURSEWORK_2025 = "guide:kfu_coursework_2025"
 CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE = "guide_file:kfu_coursework_2025"
 CB_BACK_TO_MENU = "menu:back"
