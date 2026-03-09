@@ -25,14 +25,23 @@ def get_db():
         db.close()
 
 
+from fastapi.responses import JSONResponse
+
+
 @app.get("/payment-success")
 async def payment_success():
-    return {"status": "ok", "message": "Оплата прошла. Вернитесь в Telegram."}
+    return JSONResponse(
+        content={"status": "ok", "message": "Оплата прошла. Вернитесь в Telegram."},
+        media_type="application/json; charset=utf-8"
+    )
 
 
 @app.get("/payment-fail")
 async def payment_fail():
-    return {"status": "fail", "message": "Оплата не завершена. Попробуйте снова."}
+    return JSONResponse(
+        content={"status": "fail", "message": "Оплата не завершена. Попробуйте снова."},
+        media_type="application/json; charset=utf-8"
+    )
 
 
 @app.post("/tribute/webhook")
