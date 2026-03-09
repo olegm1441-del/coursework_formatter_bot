@@ -485,10 +485,32 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reply_markup=get_main_menu_keyboard(),
     )
 
+import httpx
+
+
+async def buy1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://courseworkformatterbot-production.up.railway.app/create-payment",
+            params={"user_id": user.id},
+        )
+
+    data = resp.json()
+    payment_url = data["payment_url"]
+
+    await update.message.reply_text(
+        "Оплатите оформление по ссылке:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Оплатить 149 ₽", url=payment_url)]
+        ])
+    )
 
 def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("balance", balance_handler))
+    app.add_handler(CommandHandler("buy1", buy1_handler))
     app.add_handler(CommandHandler("referral", referral_handler))
     app.add_handler(CommandHandler("userinfo", userinfo_handler))
     app.add_handler(CommandHandler("user_info", userinfo_handler))
@@ -497,6 +519,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("givecredits", give_credits_handler))
     app.add_handler(CommandHandler("give_credits", give_credits_handler))
     app.add_handler(CommandHandler("markpaid", markpaid_handler))
+    
 
     app.add_handler(
         CallbackQueryHandler(
