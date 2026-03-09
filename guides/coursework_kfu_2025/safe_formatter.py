@@ -493,8 +493,13 @@ def format_empty_paragraph(paragraph):
 
 
 def format_body(paragraph):
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
@@ -528,8 +533,13 @@ def format_table_title(paragraph):
 
 
 def format_source_line(paragraph):
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
@@ -887,64 +897,78 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
 def compact_references_block(document, body_start):
     in_references = False
-    changed = True
+    changes = 0
+    idx = 0
 
-    while changed:
-        changed = False
-        paragraphs = document.paragraphs
+    while idx < len(document.paragraphs):
+        p = document.paragraphs[idx]
 
-        for idx, p in enumerate(paragraphs):
-            if idx < body_start:
-                continue
+        if idx < body_start:
+            idx += 1
+            continue
 
-            text = clean_spaces(p.text)
-            low = text.lower()
-            canonical = canonical_reference_subheading_text(text)
+        text = clean_spaces(p.text)
+        low = text.lower()
+        canonical = canonical_reference_subheading_text(text)
 
-            if low in {
-                "список использованных источников",
-                "список использованной литературы",
-            }:
-                in_references = True
-                continue
+        if low in {
+            "список использованных источников",
+            "список использованной литературы",
+        }:
+            in_references = True
+            idx += 1
+            continue
 
-            if not in_references:
-                continue
+        if not in_references:
+            idx += 1
+            continue
 
-            if low in {"приложения", "приложение"}:
-                in_references = False
-                continue
+        if low in {"приложения", "приложение"}:
+            in_references = False
+            idx += 1
+            continue
 
-            # Любой абзац внутри списка источников сначала чистим от page-break мусора
-            remove_page_break_artifacts_from_paragraph(p)
-            remove_paragraph_numbering(p)
+        # Полностью убираем пустые абзацы внутри блока литературы
+        if is_empty_paragraph(p):
+            remove_paragraph(p)
+            changes += 1
+            continue
 
-            # 1) Полностью удаляем пустые абзацы внутри списка источников
-            #    Они и создают "разлёт" источников
-            if is_empty_paragraph(p):
-                remove_paragraph(p)
-                changed = True
-                break
+        # Снимаем page-break / list-мусор
+        remove_page_break_artifacts_from_paragraph(p)
+        remove_paragraph_numbering(p)
 
-            # 2) Подзаголовки типа "Официальные материалы"
-            if canonical:
-                replace_paragraph_text(p, canonical)
-                set_paragraph_style_safe(p, "Normal", "Обычный")
-                clear_paragraph_outline_level(p)
-                format_reference_subheading(p)
-
-                # после подзаголовка не должно быть пустой строки
-                if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-                    remove_paragraph(paragraphs[idx + 1])
-                    changed = True
-                    break
-
-                continue
-
-            # 3) Обычный источник — всегда обычный текст без заголовочной логики
+        # Подзаголовки внутри списка источников
+        if canonical:
+            replace_paragraph_text(p, canonical)
             set_paragraph_style_safe(p, "Normal", "Обычный")
             clear_paragraph_outline_level(p)
-            format_body(p)
+            format_reference_subheading(p)
+            idx += 1
+            continue
+
+        # Обычный источник
+        set_paragraph_style_safe(p, "Normal", "Обычный")
+        clear_paragraph_outline_level(p)
+
+        clean = clean_spaces(p.text)
+        m = re.match(r"^\s*(\d+)\.\s+(.+)$", clean)
+        if m:
+            number = int(m.group(1))
+            source_text = clean_spaces(m.group(2))
+            normalized = f"{number}. {source_text}"
+            if clean != normalized:
+                replace_paragraph_text(p, normalized)
+                changes += 1
+        else:
+            # Не навязываем новую нумерацию, если текст уже выглядит как нормальный источник
+            replace_paragraph_text(p, clean)
+            changes += 1
+
+        format_body(p)
+        idx += 1
+
+    return changes
 
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
     empty_count = 0
@@ -1217,13 +1241,17 @@ def cleanup_reference_subheadings_layout(document, body_start):
                     break
 
 
-def format_empty_paragraphs_in_body(document, body_start):
-    for idx, p in enumerate(document.paragraphs):
-        if idx < body_start:
-            continue
-        if is_empty_paragraph(p):
-            format_empty_paragraph(p)
+def format_empty_paragraph(paragraph):
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
 
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    run = ensure_empty_run(paragraph)
+    set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+    
 def normalize_sections(document):
     """
     Удаляет секционные разрывы из абзацев внутри документа,
