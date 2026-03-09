@@ -17,8 +17,7 @@ from models import (
     FormattingRequest,
     AnalyticsEvent,
 )
-def format_docx(input_path: str, output_path: str) -> str:
-    raise RuntimeError("formatter temporarily disabled for diagnostics")
+from guides.coursework_kfu_2025.formatter_service import format_docx
 
 
 load_dotenv()
