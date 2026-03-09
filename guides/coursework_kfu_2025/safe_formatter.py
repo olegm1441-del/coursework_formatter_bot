@@ -1096,6 +1096,47 @@ def compact_references_block(document, body_start):
             p.paragraph_format.keep_together = False
             p.paragraph_format.widow_control = False
 
+def ensure_single_blank_after_references_heading(document, body_start):
+    changed = True
+
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+            if not is_references_heading_text(text):
+                continue
+
+            # После "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ" должна быть ровно одна пустая строка
+            if idx + 1 >= len(paragraphs):
+                new_p = insert_paragraph_after(p, "")
+                format_empty_paragraph(new_p)
+                changed = True
+                break
+
+            next_p = paragraphs[idx + 1]
+
+            if not is_empty_paragraph(next_p):
+                new_p = insert_paragraph_after(p, "")
+                format_empty_paragraph(new_p)
+                changed = True
+                break
+
+            # Если пустых строк больше одной — оставляем только одну
+            if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+                remove_paragraph(paragraphs[idx + 2])
+                changed = True
+                break
+
+            format_empty_paragraph(next_p)
+            break
+
+    return
+    
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
     empty_count = 0
     for idx, p in enumerate(list(paragraphs)):
@@ -1773,6 +1814,13 @@ def process_document(input_path: Path, output_path: Path):
         doc,
         body_start,
     )
+    run_with_pass_limit(
+        "ensure_single_blank_after_references_heading",
+        ensure_single_blank_after_references_heading,
+        doc,
+        body_start,
+    )
+
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
 
