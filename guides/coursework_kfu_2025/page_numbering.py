@@ -7,24 +7,27 @@ from docx.oxml.ns import qn
 TITLE_FOOTER_TEXT = "Казань – 2026 г."
 
 
-def _clear_paragraph(paragraph):
-    p = paragraph._element
-    for child in list(p):
-        p.remove(child)
+def _clear_xml_children(el):
+    for child in list(el):
+        el.remove(child)
 
 
-def _clear_footer_obj(footer):
+def _reset_footer_part(footer):
     try:
         footer.is_linked_to_previous = False
     except Exception:
         pass
 
-    root = footer._element
-    for child in list(root):
-        root.remove(child)
+    ftr = footer._element
+    _clear_xml_children(ftr)
 
     p = OxmlElement("w:p")
-    root.append(p)
+    ftr.append(p)
+
+
+def _get_single_footer_paragraph(footer):
+    _reset_footer_part(footer)
+    return footer.paragraphs[0]
 
 
 def _set_run_font(run):
@@ -57,6 +60,11 @@ def _set_run_font(run):
     szCs.set(qn("w:val"), "24")
 
 
+def _clear_paragraph(paragraph):
+    p = paragraph._element
+    _clear_xml_children(p)
+
+
 def _add_text_to_paragraph(paragraph, text):
     _clear_paragraph(paragraph)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -86,11 +94,6 @@ def _add_page_field_to_paragraph(paragraph):
     run._element.append(fld_char_end)
 
 
-def _get_footer_paragraph(footer):
-    _clear_footer_obj(footer)
-    return footer.paragraphs[0]
-
-
 def _remove_pg_num_type(section):
     sectPr = section._sectPr
     pgNumType = sectPr.find(qn("w:pgNumType"))
@@ -107,6 +110,20 @@ def _set_page_number_start(section, start_value):
     pgNumType.set(qn("w:start"), str(start_value))
 
 
+def _reset_section_footer_state(section):
+    section.different_first_page_header_footer = True
+
+    _remove_pg_num_type(section)
+
+    _reset_footer_part(section.first_page_footer)
+    _reset_footer_part(section.footer)
+
+    try:
+        _reset_footer_part(section.even_page_footer)
+    except Exception:
+        pass
+
+
 def _reset_all_footer_state(document):
     try:
         document.settings.odd_and_even_pages_header_footer = False
@@ -114,78 +131,86 @@ def _reset_all_footer_state(document):
         pass
 
     for section in document.sections:
-        section.different_first_page_header_footer = True
-
-        _remove_pg_num_type(section)
-
-        _clear_footer_obj(section.footer)
-        _clear_footer_obj(section.first_page_footer)
-
-        try:
-            _clear_footer_obj(section.even_page_footer)
-        except Exception:
-            pass
+        _reset_section_footer_state(section)
 
 
 def _blank_section(section):
-    section.different_first_page_header_footer = True
+    _reset_section_footer_state(section)
 
-    p1 = _get_footer_paragraph(section.first_page_footer)
+    p1 = _get_single_footer_paragraph(section.first_page_footer)
     _clear_paragraph(p1)
 
-    p2 = _get_footer_paragraph(section.footer)
+    p2 = _get_single_footer_paragraph(section.footer)
     _clear_paragraph(p2)
+
+    try:
+        p3 = _get_single_footer_paragraph(section.even_page_footer)
+        _clear_paragraph(p3)
+    except Exception:
+        pass
+
+    _remove_pg_num_type(section)
+
+
+def _title_section(section):
+    _reset_section_footer_state(section)
+
+    p1 = _get_single_footer_paragraph(section.first_page_footer)
+    _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
+
+    p2 = _get_single_footer_paragraph(section.footer)
+    _clear_paragraph(p2)
+
+    try:
+        p3 = _get_single_footer_paragraph(section.even_page_footer)
+        _clear_paragraph(p3)
+    except Exception:
+        pass
 
     _remove_pg_num_type(section)
 
 
 def _number_section(section, start_value=None):
-    section.different_first_page_header_footer = True
+    _reset_section_footer_state(section)
 
     if start_value is not None:
         _set_page_number_start(section, start_value)
 
-    fp = _get_footer_paragraph(section.first_page_footer)
+    fp = _get_single_footer_paragraph(section.first_page_footer)
     _add_page_field_to_paragraph(fp)
 
-    dp = _get_footer_paragraph(section.footer)
+    dp = _get_single_footer_paragraph(section.footer)
     _add_page_field_to_paragraph(dp)
+
+    try:
+        ep = _get_single_footer_paragraph(section.even_page_footer)
+        _add_page_field_to_paragraph(ep)
+    except Exception:
+        pass
 
 
 def apply_page_numbering_policy(document):
-    """
-    Целевая логика:
-    - 3 секции: титул / содержание / основная часть
-    - 2 секции: титул / основная часть
-    """
     sections = list(document.sections)
     if not sections:
         return
 
     _reset_all_footer_state(document)
 
-    if len(sections) >= 3:
-        first_section = sections[0]
-        first_section.different_first_page_header_footer = True
-        p1 = _get_footer_paragraph(first_section.first_page_footer)
-        _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
-        p2 = _get_footer_paragraph(first_section.footer)
-        _clear_paragraph(p2)
+    body_texts = [p.text.strip().upper() for p in document.paragraphs]
+    has_contents = any("СОДЕРЖАН" in t for t in body_texts)
 
-        _blank_section(sections[1])
-        _number_section(sections[2], start_value=3)
+    # секция 1 = титул
+    _title_section(sections[0])
+
+    if has_contents:
+        if len(sections) >= 2:
+            _blank_section(sections[1])   # секция 2 = содержание
+        if len(sections) >= 3:
+            _number_section(sections[2], start_value=3)  # секция 3 = введение
         for section in sections[3:]:
             _number_section(section)
-        return
-
-    first_section = sections[0]
-    first_section.different_first_page_header_footer = True
-    p1 = _get_footer_paragraph(first_section.first_page_footer)
-    _add_text_to_paragraph(p1, TITLE_FOOTER_TEXT)
-    p2 = _get_footer_paragraph(first_section.footer)
-    _clear_paragraph(p2)
-
-    if len(sections) >= 2:
-        _number_section(sections[1], start_value=2)
+    else:
+        if len(sections) >= 2:
+            _number_section(sections[1], start_value=2)
         for section in sections[2:]:
             _number_section(section)
