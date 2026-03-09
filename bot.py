@@ -36,3 +36,14 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+import threading
+import uvicorn
+from payments_api import app
+
+
+def start_api():
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+threading.Thread(target=start_api).start()
