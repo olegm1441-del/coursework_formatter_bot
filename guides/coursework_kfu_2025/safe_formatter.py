@@ -858,7 +858,6 @@ def convert_reference_numbering_to_plain_text(document, body_start):
             remove_page_break_artifacts_from_paragraph(paragraph)
 
             format_reference_subheading(paragraph)
-            prev_kind = "reference_subheading"
             continue
 
         if is_empty_paragraph(paragraph):
@@ -866,13 +865,9 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
         # Любой обычный источник в блоке литературы
         remove_paragraph_numbering(paragraph)
+        remove_page_break_artifacts_from_paragraph(paragraph)
         set_paragraph_style_safe(paragraph, "Normal", "Обычный")
         clear_paragraph_outline_level(paragraph)
-
-        paragraph.paragraph_format.page_break_before = False
-        paragraph.paragraph_format.keep_with_next = False
-        paragraph.paragraph_format.keep_together = False
-        paragraph.paragraph_format.widow_control = False
 
         clean = clean_spaces(paragraph.text)
 
