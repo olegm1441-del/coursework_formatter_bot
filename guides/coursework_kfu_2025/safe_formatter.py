@@ -516,11 +516,19 @@ def format_source_line(paragraph):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
 def format_reference_subheading(paragraph):
+    # Обязательно делаем обычным абзацем, а не заголовком
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
     remove_paragraph_numbering(paragraph)
-    hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
+    paragraph.paragraph_format.left_indent = Cm(0)
+    paragraph.paragraph_format.right_indent = Cm(0)
+    paragraph.paragraph_format.page_break_before = False
+    paragraph.paragraph_format.keep_with_next = False
+    paragraph.paragraph_format.keep_together = False
+    paragraph.paragraph_format.widow_control = False
 
     for run in paragraph.runs:
         set_run_font(
