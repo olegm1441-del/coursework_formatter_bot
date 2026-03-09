@@ -10,6 +10,20 @@ from db import Base, engine
 import models  # noqa: F401
 from handlers import register_handlers
 from payments_api import app as payments_app
+from telegram.error import Conflict
+import logging
+
+logger = logging.getLogger(__name__)
+
+async def on_error(update, context):
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.error("Polling conflict (another instance is running). Waiting...")
+        # Просто ждём — Updater сам продолжит/переподключится
+        return
+    logger.exception("Unhandled error in telegram app", exc_info=err)
+
+telegram_app.add_error_handler(on_error)
 
 
 def setup_logging() -> None:
@@ -40,7 +54,18 @@ def main() -> None:
     register_handlers(telegram_app)
 
     print("Бот запущен")
-    telegram_app.run_polling()
+import time
+from telegram.error import Conflict
+
+def run_polling_forever(app):
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True)
+        except Conflict:
+            # другой инстанс еще жив (обычно при деплое). Подождем и попробуем снова.
+            time.sleep(10)
+
+run_polling_forever(telegram_app)
 
 
 if __name__ == "__main__":
