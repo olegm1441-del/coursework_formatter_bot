@@ -636,15 +636,25 @@ def format_heading2(paragraph):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
 
 def format_table_caption(paragraph):
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
 
 def format_table_title(paragraph):
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
