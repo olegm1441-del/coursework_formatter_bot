@@ -879,6 +879,117 @@ def split_table_captions_prepass(document, body_start):
             break
 
 
+
+
+REFERENCE_CASE_PROTECTED_TOKENS = {
+    "РФ", "ФНС", "ГОСТ", "ИСО", "ISO", "IEC", "DIN",
+    "АО", "ООО", "ПАО", "ТТС", "ЭДО", "СЭД", "УПД", "КЭП",
+    "СБИС", "РБК", "1С", "CNEWS", "RBC", "PWC", "PDF", "URL",
+    "EUR-LEX", "EIDAS", "НДС", "ФЗ",
+}
+
+REFERENCE_CASE_TOKEN_RE = re.compile(r'https?://\S+|[\wА-Яа-яЁё№%+\-./]+|[^\w\s]+|\s+', re.UNICODE)
+
+def _is_probably_all_caps_reference_text(text: str) -> bool:
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) < 12:
+        return False
+    upper = sum(1 for ch in letters if ch.isupper())
+    return upper / max(len(letters), 1) >= 0.75
+
+def _protect_reference_token(token: str) -> bool:
+    if not token or token.isspace():
+        return True
+
+    if token.startswith("http://") or token.startswith("https://"):
+        return True
+
+    normalized = token.strip("()[]{}«»\"'“”‘’.,;:!?")
+    if not normalized:
+        return True
+
+    upper_norm = normalized.upper()
+
+    if upper_norm in REFERENCE_CASE_PROTECTED_TOKENS:
+        return True
+
+    if re.search(r'\d', normalized):
+        return True
+
+    # короткие аббревиатуры и смешанные технические токены сохраняем
+    if len(normalized) <= 6 and normalized.isupper():
+        return True
+
+    if re.fullmatch(r'[A-Z][A-Z0-9\-./]*', normalized):
+        return True
+
+    return False
+
+def _capitalize_reference_fragments(text: str) -> str:
+    result = []
+    capitalize_next = True
+
+    for ch in text:
+        if capitalize_next and ch.isalpha():
+            result.append(ch.upper())
+            capitalize_next = False
+            continue
+
+        result.append(ch)
+
+        if ch in '.!?':
+            capitalize_next = True
+        elif ch == '«':
+            capitalize_next = True
+        elif ch == '—':
+            capitalize_next = True
+
+    return ''.join(result)
+
+def smart_normalize_reference_line_case(text: str) -> str:
+    clean = clean_spaces(text)
+    if not clean:
+        return clean
+
+    m = re.match(r'^(\d+\.\s+)(.+)$', clean)
+    prefix = ""
+    body = clean
+
+    if m:
+        prefix = m.group(1)
+        body = m.group(2)
+
+    if not _is_probably_all_caps_reference_text(body):
+        return clean
+
+    parts = []
+    for token in REFERENCE_CASE_TOKEN_RE.findall(body):
+        if _protect_reference_token(token):
+            parts.append(token)
+        else:
+            parts.append(token.lower())
+
+    normalized = ''.join(parts)
+    normalized = _capitalize_reference_fragments(normalized)
+
+    # частые словари/бренды, которые плохо восстанавливаются общим правилом
+    replacements = {
+        "Businesstat": "BusinesStat",
+        "Pwc": "PwC",
+        "Cnews": "CNews",
+        "Rbc": "RBC",
+        "Eidas": "eIDAS",
+        "Eur-lex": "EUR-Lex",
+        "Сбис": "СБИС",
+        "Эдо": "ЭДО",
+        "Сэд": "СЭД",
+        "Упд": "УПД",
+        "Ттс": "ТТС",
+    }
+    for bad, good in replacements.items():
+        normalized = normalized.replace(bad, good)
+
+    return f"{prefix}{normalized}"
 def convert_reference_numbering_to_plain_text(document, body_start):
     in_references = False
     ref_counter = 1
@@ -937,6 +1048,7 @@ def convert_reference_numbering_to_plain_text(document, body_start):
             normalized = f"{ref_counter}. {clean}"
             ref_counter += 1
 
+        normalized = smart_normalize_reference_line_case(normalized)
         replace_paragraph_text(paragraph, normalized)
         format_body(paragraph)
 
@@ -1002,6 +1114,7 @@ def compact_references_block(document, body_start):
             else:
                 normalized = clean
 
+            normalized = smart_normalize_reference_line_case(normalized)
             if clean != normalized:
                 replace_paragraph_text(p, normalized)
 
@@ -1682,6 +1795,7 @@ def process_document(input_path: Path, output_path: Path):
 
     format_tables(doc)
     convert_reference_numbering_to_plain_text(doc, body_start)
+    compact_references_block(doc, body_start)
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
 
