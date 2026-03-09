@@ -1,14 +1,19 @@
 from telegram import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 
 # Тексты кнопок главного меню
-BTN_BALANCE = "Баланс"
+BTN_TOP_UP_BALANCE = "Пополнить баланс"
+BTN_REFERRAL = "Реферальная ссылка"
 BTN_SELECT_GUIDE = "Выбрать методичку"
 BTN_CONTACT = "Контакт"
 
-# Тексты inline-кнопок
+# Тексты inline-кнопок методички
 BTN_GUIDE_KFU_COURSEWORK_2025 = "КФУ — курсовая 2025"
 BTN_SHOW_GUIDE_FILE = "Открыть файл методички"
 BTN_BACK_TO_MENU = "Назад"
+
+# Тексты inline-кнопок оплаты
+BTN_BUY_1 = "💳 1 оформление — 149 ₽"
+BTN_BUY_3 = "📦 3 оформления — 349 ₽"
 
 # Callback data
 CB_SELECT_GUIDE_KFU_COURSEWORK_2025 = "guide:kfu_coursework_2025"
@@ -17,12 +22,9 @@ CB_BACK_TO_MENU = "menu:back"
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """
-    Главное меню бота.
-    .docx пользователь присылает просто файлом, без отдельной кнопки.
-    """
     keyboard = [
-        [KeyboardButton(BTN_BALANCE)],
+        [KeyboardButton(BTN_TOP_UP_BALANCE)],
+        [KeyboardButton(BTN_REFERRAL)],
         [KeyboardButton(BTN_SELECT_GUIDE)],
         [KeyboardButton(BTN_CONTACT)],
     ]
@@ -35,10 +37,6 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_guides_inline_keyboard() -> InlineKeyboardMarkup:
-    """
-    Клавиатура выбора методички.
-    Пока доступен один вариант, но структура уже готова к масштабированию.
-    """
     keyboard = [
         [InlineKeyboardButton(BTN_GUIDE_KFU_COURSEWORK_2025, callback_data=CB_SELECT_GUIDE_KFU_COURSEWORK_2025)],
         [InlineKeyboardButton(BTN_SHOW_GUIDE_FILE, callback_data=CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE)],
@@ -47,10 +45,16 @@ def get_guides_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_top_up_balance_inline_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(BTN_BUY_1, callback_data="buy:one")],
+        [InlineKeyboardButton(BTN_BUY_3, callback_data="buy:three")],
+        [InlineKeyboardButton(BTN_BACK_TO_MENU, callback_data=CB_BACK_TO_MENU)],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_back_to_menu_inline_keyboard() -> InlineKeyboardMarkup:
-    """
-    Универсальная inline-кнопка 'Назад'.
-    """
     keyboard = [
         [InlineKeyboardButton(BTN_BACK_TO_MENU, callback_data=CB_BACK_TO_MENU)],
     ]
