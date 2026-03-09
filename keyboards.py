@@ -9,8 +9,8 @@ BTN_GUIDE_KFU_COURSEWORK_2025 = "КФУ — курсовая 2025"
 BTN_SHOW_GUIDE_FILE = "Открыть файл методички"
 BTN_BACK_TO_MENU = "Назад"
 
-BTN_BUY_1 = "💳 1 оформление — 149 ₽"
-BTN_BUY_3 = "📦 3 оформления — 349 ₽"
+BTN_BUY_1 = "💳 1 оформление — 179 ₽"
+BTN_BUY_3 = "📦 3 оформления — 479 ₽"
 
 CB_SELECT_GUIDE_KFU_COURSEWORK_2025 = "guide:kfu_coursework_2025"
 CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE = "guide_file:kfu_coursework_2025"
