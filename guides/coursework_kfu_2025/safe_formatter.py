@@ -1107,6 +1107,7 @@ def compact_references_block(document, body_start):
             p.paragraph_format.widow_control = False
 
 def ensure_single_blank_after_references_heading(document, body_start):
+    any_changes = False
     changed = True
     while changed:
         changed = False
@@ -1125,6 +1126,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
                 new_p = insert_paragraph_after(p, "")
                 format_empty_paragraph(new_p)
                 changed = True
+                any_changes = True
                 break
 
             next_p = paragraphs[idx + 1]
@@ -1133,6 +1135,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
                 new_p = insert_paragraph_after(p, "")
                 format_empty_paragraph(new_p)
                 changed = True
+                any_changes = True
                 break
 
             # если пустых строк больше одной — удаляем лишние
@@ -1140,11 +1143,12 @@ def ensure_single_blank_after_references_heading(document, body_start):
                 remove_paragraph(paragraphs[idx + 2])
                 paragraphs = document.paragraphs
                 changed = True
+                any_changes = True
 
             format_empty_paragraph(next_p)
             break
 
-    return True
+    return any_changes
     
 def ensure_single_blank_after_headings(document, body_start):
     paragraphs = document.paragraphs

@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from multiprocessing import Process, Queue
 from pathlib import Path
 
@@ -23,6 +23,11 @@ POLL_INTERVAL_SECONDS = 2
 EMPTY_POLLS_LOG_EVERY = 45
 
 logger = logging.getLogger(__name__)
+
+
+def utcnow_naive() -> datetime:
+    """UTC timestamp without tzinfo for DB fields declared as naive DateTime."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def setup_logging() -> None:
@@ -158,7 +163,7 @@ def fail_request(
         if request:
             request.status = "failed"
             request.error_message = (error_text or "")[:1000]
-            request.completed_at = datetime.utcnow()
+            request.completed_at = utcnow_naive()
             db.commit()
     finally:
         db.close()
@@ -170,7 +175,7 @@ def fail_request(
 
 
 def reclaim_stale_processing_requests(bot_token: str) -> int:
-    now = datetime.utcnow()
+    now = utcnow_naive()
     stale_before = now - timedelta(seconds=STALE_PROCESSING_SECONDS)
 
     db = SessionLocal()
@@ -196,7 +201,7 @@ def reclaim_stale_processing_requests(bot_token: str) -> int:
 
             request.status = "failed"
             request.error_message = "stuck in processing timeout"
-            request.completed_at = datetime.utcnow()
+            request.completed_at = utcnow_naive()
             db.commit()
 
             services.refund_one_credit_in_new_session(request.user_id, str(request.id))
@@ -234,7 +239,7 @@ def pick_next_queued_request_id() -> int | None:
 
         request.status = "processing"
         request.error_message = None
-        request.completed_at = datetime.utcnow()
+        request.completed_at = utcnow_naive()
         db.commit()
         db.refresh(request)
 
@@ -323,7 +328,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
         request.status = "done"
         request.result_file_path = str(output_path)
         request.error_message = None
-        request.completed_at = datetime.utcnow()
+        request.completed_at = utcnow_naive()
         db.commit()
 
         services.track_event(
