@@ -523,16 +523,24 @@ def format_body(paragraph):
 
 
 def format_heading1(paragraph):
+    remove_page_break_artifacts_from_paragraph(paragraph)
+    remove_paragraph_numbering(paragraph)
+
     set_paragraph_style_safe(paragraph, "Heading 1", "Заголовок 1")
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=True)
 
 def format_heading2(paragraph):
+    remove_page_break_artifacts_from_paragraph(paragraph)
+    remove_paragraph_numbering(paragraph)
+
     set_paragraph_style_safe(paragraph, "Heading 2", "Заголовок 2")
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
 
