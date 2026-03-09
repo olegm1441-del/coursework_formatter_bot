@@ -1,38 +1,33 @@
 import os
 import hmac
 import hashlib
-import httpx
+import logging
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
 from models import Payment, CreditLedger
 
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 TRIBUTE_API_KEY = os.getenv("TRIBUTE_API_KEY")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL")
 FAIL_URL = os.getenv("PAYMENT_FAIL_URL")
 
 app = FastAPI()
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-from fastapi.responses import JSONResponse
-
-
 @app.get("/payment-success")
 async def payment_success():
     return JSONResponse(
         content={"status": "ok", "message": "Оплата прошла. Вернитесь в Telegram."},
-        media_type="application/json; charset=utf-8"
+        media_type="application/json; charset=utf-8",
     )
 
 
@@ -40,7 +35,7 @@ async def payment_success():
 async def payment_fail():
     return JSONResponse(
         content={"status": "fail", "message": "Оплата не завершена. Попробуйте снова."},
-        media_type="application/json; charset=utf-8"
+        media_type="application/json; charset=utf-8",
     )
 
 
@@ -50,6 +45,9 @@ async def tribute_webhook(request: Request):
     body = await request.body()
     signature = request.headers.get("trbt-signature")
 
+    logger.info("tribute_webhook_received")
+    logger.info("signature_present=%s", bool(signature))
+
     check = hmac.new(
         TRIBUTE_API_KEY.encode(),
         body,
@@ -57,16 +55,21 @@ async def tribute_webhook(request: Request):
     ).hexdigest()
 
     if signature != check:
+        logger.info("signature_invalid")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     data = await request.json()
 
+    logger.info("webhook_type=%s", data.get("type"))
+
     if data.get("type") != "shop_order":
+        logger.info("webhook_ignored_not_shop_order")
         return {"status": "ignored"}
 
     order = data["payload"]
 
     if order["status"] != "paid":
+        logger.info("webhook_ignored_not_paid")
         return {"status": "ignored"}
 
     tribute_id = order["uuid"]
@@ -78,9 +81,11 @@ async def tribute_webhook(request: Request):
     ).first()
 
     if not payment:
+        logger.info("payment_not_found tribute_id=%s", tribute_id)
         return {"status": "payment_not_found"}
 
     if payment.status == "paid":
+        logger.info("payment_already_processed tribute_id=%s", tribute_id)
         return {"status": "already_processed"}
 
     payment.status = "paid"
@@ -91,11 +96,13 @@ async def tribute_webhook(request: Request):
         amount=1,
         source_type="tribute_payment",
         source_id=tribute_id,
-        idempotency_key=f"tribute:{tribute_id}"
+        idempotency_key=f"tribute:{tribute_id}",
     )
 
     db.add(credit)
     db.commit()
+
+    logger.info("payment_processed tribute_id=%s", tribute_id)
 
     return {"status": "ok"}
 
@@ -114,7 +121,7 @@ async def create_payment(user_id: int):
                 "amount": 14900,
                 "currency": "rub",
                 "title": "1 оформление курсовой",
-                "description": "Автоформатирование курсовой по методичке КФУ",
+                "description": "Автоматическое оформление курсовой по методичке КФУ",
                 "successUrl": SUCCESS_URL,
                 "failUrl": FAIL_URL
             }
@@ -133,10 +140,12 @@ async def create_payment(user_id: int):
         tariff_code="one_format",
         amount_rub=149,
         status="pending",
-        external_payment_id=tribute_id
+        external_payment_id=tribute_id,
     )
 
     db.add(payment)
     db.commit()
+
+    logger.info("payment_created tribute_id=%s", tribute_id)
 
     return {"payment_url": payment_url}
