@@ -1882,6 +1882,20 @@ def process_document(input_path: Path, output_path: Path):
     remove_all_italic(doc)
 
     run_with_pass_limit(
+        "normalize_structural_heading_spacing_v2_final",
+        normalize_structural_heading_spacing_v2,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "ensure_single_blank_after_headings_final",
+        ensure_single_blank_after_headings,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
         "compact_references_block_final",
         compact_references_block,
         doc,
