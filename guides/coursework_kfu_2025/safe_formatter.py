@@ -1900,6 +1900,13 @@ def process_document(input_path: Path, output_path: Path):
     apply_page_numbering_policy(doc)
     remove_all_italic(doc)
 
+    run_with_pass_limit(
+        "ensure_single_blank_after_references_heading_final",
+        ensure_single_blank_after_references_heading,
+        doc,
+        body_start,
+    )
+
     doc.save(str(output_path))
     
 def remove_all_italic(doc):
