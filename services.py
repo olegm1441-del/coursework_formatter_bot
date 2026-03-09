@@ -39,12 +39,12 @@ DEFAULT_GUIDE_CODE = "kfu_coursework_2025"
 TARIFFS = {
     "one": {
         "title": "1 оформление",
-        "price_rub": 149,
+        "price_rub": 179,
         "credits": 1,
     },
     "three": {
         "title": "3 оформления",
-        "price_rub": 349,
+        "price_rub": 479,
         "credits": 3,
     },
 }
@@ -477,7 +477,7 @@ def build_start_text(balance: int, is_new: bool, active_guide_title: str) -> str
         if is_new:
             return (
                 "Здравствуйте! Это бот для форматирования студенческих работ.\n\n"
-                "У вас уже есть 1 бесплатное оформление.\n"
+                "Изначально у вас есть 1 бесплатное оформление.\n"
                 f"Сейчас доступно оформлений: {balance}\n"
                 f"Активная методичка: {active_guide_title}\n\n"
                 "Можно сразу отправить .docx-файл на обработку."
