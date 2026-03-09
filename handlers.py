@@ -1,7 +1,8 @@
 import logging
 from pathlib import Path
 
-from telegram import Update
+import httpx
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -13,20 +14,24 @@ from telegram.ext import (
 
 from db import SessionLocal
 from keyboards import (
-    BTN_BALANCE,
     BTN_CONTACT,
+    BTN_REFERRAL,
     BTN_SELECT_GUIDE,
+    BTN_TOP_UP_BALANCE,
     CB_BACK_TO_MENU,
     CB_SELECT_GUIDE_KFU_COURSEWORK_2025,
     CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE,
     get_back_to_menu_inline_keyboard,
     get_guides_inline_keyboard,
     get_main_menu_keyboard,
+    get_top_up_balance_inline_keyboard,
 )
 import services
 
 
 logger = logging.getLogger(__name__)
+
+PAYMENTS_API_BASE_URL = "https://courseworkformatterbot-production.up.railway.app"
 
 
 def _extract_referral_code_from_start(text: str | None) -> str | None:
@@ -177,6 +182,101 @@ async def choose_guide_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         db.close()
 
 
+async def top_up_balance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    await update.message.reply_text(
+        "Тарифы:\n"
+        "• 1 оформление — 149 ₽\n"
+        "• 3 оформления — 349 ₽\n\n"
+        "Бонусы:\n"
+        "• +1 оформление, если приглашённый пользователь впервые загрузит документ\n"
+        "• +1 оформление, если приглашённый пользователь впервые оплатит",
+        reply_markup=get_top_up_balance_inline_keyboard(),
+    )
+
+
+async def _create_payment_and_send_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    tariff_code: str,
+    button_text: str,
+    reply_text: str,
+) -> None:
+    message = update.message
+    if not message:
+        return
+
+    db = SessionLocal()
+    try:
+        user, _ = _ensure_current_user(db, update)
+    finally:
+        db.close()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{PAYMENTS_API_BASE_URL}/create-payment",
+            params={
+                "user_id": user.id,
+                "tariff_code": tariff_code,
+            },
+        )
+
+    try:
+        data = resp.json()
+    except Exception:
+        await message.reply_text(
+            f"Не удалось создать ссылку на оплату. Код ответа: {resp.status_code}",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    if not data.get("ok"):
+        logger.info("create_payment_failed response=%s", data)
+        await message.reply_text(
+            "Не удалось создать ссылку на оплату.\n"
+            f"Техническая причина: {data.get('error', 'unknown_error')}",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    payment_url = data.get("payment_url")
+    if not payment_url:
+        await message.reply_text(
+            "Ссылка на оплату не была получена. Попробуйте ещё раз через минуту.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    await message.reply_text(
+        reply_text,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(button_text, url=payment_url)]]
+        ),
+    )
+
+
+async def buy1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _create_payment_and_send_link(
+        update=update,
+        context=context,
+        tariff_code="one_format",
+        button_text="💳 Оплатить 149 ₽",
+        reply_text="Ссылка на оплату 1 оформления:",
+    )
+
+
+async def buy3_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _create_payment_and_send_link(
+        update=update,
+        context=context,
+        tariff_code="three_formats",
+        button_text="📦 Оплатить 349 ₽",
+        reply_text="Ссылка на оплату пакета из 3 оформлений:",
+    )
+
+
 async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -184,6 +284,16 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.answer()
     data = query.data or ""
+
+    if data == "buy:one":
+        fake_update = Update(update.update_id, message=query.message)
+        await buy1_handler(fake_update, context)
+        return
+
+    if data == "buy:three":
+        fake_update = Update(update.update_id, message=query.message)
+        await buy3_handler(fake_update, context)
+        return
 
     if data == CB_BACK_TO_MENU:
         await query.edit_message_text(
@@ -468,8 +578,12 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     text = update.message.text.strip()
 
-    if text == BTN_BALANCE:
-        await balance_handler(update, context)
+    if text == BTN_TOP_UP_BALANCE:
+        await top_up_balance_handler(update, context)
+        return
+
+    if text == BTN_REFERRAL:
+        await referral_handler(update, context)
         return
 
     if text == BTN_SELECT_GUIDE:
@@ -485,33 +599,13 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reply_markup=get_main_menu_keyboard(),
     )
 
-import httpx
-
-
-async def buy1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://courseworkformatterbot-production.up.railway.app/create-payment",
-            params={"user_id": user.id},
-        )
-
-    data = resp.json()
-    payment_url = data["payment_url"]
-
-    await update.message.reply_text(
-        "Оплатите оформление по ссылке:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Оплатить 149 ₽", url=payment_url)]
-        ])
-    )
 
 def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("balance", balance_handler))
-    app.add_handler(CommandHandler("buy1", buy1_handler))
     app.add_handler(CommandHandler("referral", referral_handler))
+    app.add_handler(CommandHandler("buy1", buy1_handler))
+    app.add_handler(CommandHandler("buy3", buy3_handler))
     app.add_handler(CommandHandler("userinfo", userinfo_handler))
     app.add_handler(CommandHandler("user_info", userinfo_handler))
     app.add_handler(CommandHandler("contact", contact_handler))
@@ -519,12 +613,11 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("givecredits", give_credits_handler))
     app.add_handler(CommandHandler("give_credits", give_credits_handler))
     app.add_handler(CommandHandler("markpaid", markpaid_handler))
-    
 
     app.add_handler(
         CallbackQueryHandler(
             guide_callback_handler,
-            pattern=r"^(guide:|guide_file:|menu:back)",
+            pattern=r"^(guide:|guide_file:|menu:back|buy:)",
         )
     )
     app.add_handler(MessageHandler(filters.Document.FileExtension("docx"), docx_handler))
