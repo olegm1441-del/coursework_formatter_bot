@@ -1106,46 +1106,71 @@ def compact_references_block(document, body_start):
             p.paragraph_format.keep_together = False
             p.paragraph_format.widow_control = False
 
-def ensure_single_blank_after_references_heading(document, body_start):
-    changed = True
+def ensure_single_blank_after_headings(document, body_start):
+    paragraphs = document.paragraphs
+    prev_kind = None
+    changed = False
+    in_references = False
 
-    while changed:
-        changed = False
-        paragraphs = document.paragraphs
+    idx = max(body_start, 0)
 
-        for idx, p in enumerate(paragraphs):
-            if idx < body_start:
-                continue
+    while idx < len(paragraphs):
+        p = paragraphs[idx]
+        text = clean_spaces(p.text)
 
-            text = clean_spaces(p.text)
-            if not is_references_heading_text(text):
-                continue
+        if is_references_heading_text(text):
+            in_references = True
+        elif in_references and is_appendix_heading_text(text):
+            in_references = False
 
-            # После "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ" должна быть ровно одна пустая строка
-            if idx + 1 >= len(paragraphs):
-                new_p = insert_paragraph_after(p, "")
-                format_empty_paragraph(new_p)
-                changed = True
-                break
+        kind = classify_paragraph(text, prev_kind=prev_kind)
+        parsed_h1 = parse_heading1(text)
 
-            next_p = paragraphs[idx + 1]
+        need_blank_after = False
 
-            if not is_empty_paragraph(next_p):
-                new_p = insert_paragraph_after(p, "")
-                format_empty_paragraph(new_p)
-                changed = True
-                break
+        # После параграфов 1.1 / 1.2 / 2.1 и т.д. нужна одна пустая строка
+        if kind == "heading2":
+            need_blank_after = True
 
-            # Если пустых строк больше одной — оставляем только одну
-            if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-                remove_paragraph(paragraphs[idx + 2])
-                changed = True
-                break
+        # После ВВЕДЕНИЯ / ЗАКЛЮЧЕНИЯ / СПИСКА ИСТОЧНИКОВ нужна одна пустая строка
+        # После названий глав 1 / 2 / 3 пустая строка НЕ нужна
+        elif parsed_h1:
+            if parsed_h1["kind"] == "heading1_exact":
+                need_blank_after = True
+            elif parsed_h1["kind"] == "heading1_chapter":
+                need_blank_after = False
 
-            format_empty_paragraph(next_p)
+        if not need_blank_after:
+            prev_kind = kind
+            idx += 1
+            continue
+
+        if idx + 1 >= len(paragraphs):
+            new_p = insert_paragraph_after(p, "")
+            format_empty_paragraph(new_p)
+            changed = True
             break
 
-    return
+        next_p = paragraphs[idx + 1]
+
+        if not is_empty_paragraph(next_p):
+            new_p = insert_paragraph_after(p, "")
+            format_empty_paragraph(new_p)
+            changed = True
+            break
+
+        while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+            remove_paragraph(paragraphs[idx + 2])
+            paragraphs = document.paragraphs
+            changed = True
+
+        if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+            format_empty_paragraph(paragraphs[idx + 1])
+
+        prev_kind = kind
+        idx += 1
+
+    return changed
     
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
     empty_count = 0
