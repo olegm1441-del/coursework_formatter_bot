@@ -466,7 +466,25 @@ def remove_paragraph_numbering(paragraph):
     if numPr is not None:
         pPr.remove(numPr)
 
+def remove_page_break_artifacts_from_paragraph(paragraph):
+    paragraph.paragraph_format.page_break_before = False
+    paragraph.paragraph_format.keep_with_next = False
+    paragraph.paragraph_format.keep_together = False
+    paragraph.paragraph_format.widow_control = False
 
+    for run in paragraph.runs:
+        r = run._element
+
+        # Удаляем явные разрывы страницы внутри runs
+        for br in list(r.findall(qn("w:br"))):
+            br_type = br.get(qn("w:type"))
+            if br_type in (None, "page"):
+                r.remove(br)
+
+        # На всякий случай убираем lastRenderedPageBreak
+        for lrp in list(r.findall(qn("w:lastRenderedPageBreak"))):
+            r.remove(lrp)
+            
 def format_empty_paragraph(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -837,15 +855,10 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         if canonical:
             replace_paragraph_text(paragraph, canonical)
             remove_paragraph_numbering(paragraph)
-            set_paragraph_style_safe(paragraph, "Normal", "Обычный")
-            clear_paragraph_outline_level(paragraph)
-
-            paragraph.paragraph_format.page_break_before = False
-            paragraph.paragraph_format.keep_with_next = False
-            paragraph.paragraph_format.keep_together = False
-            paragraph.paragraph_format.widow_control = False
+            remove_page_break_artifacts_from_paragraph(paragraph)
 
             format_reference_subheading(paragraph)
+            prev_kind = "reference_subheading"
             continue
 
         if is_empty_paragraph(paragraph):
