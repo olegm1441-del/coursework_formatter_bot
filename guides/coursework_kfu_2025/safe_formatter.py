@@ -1764,14 +1764,15 @@ def process_document(input_path: Path, output_path: Path):
         prev_kind = kind
 
     format_tables(doc)
-    compact_references_block(doc, body_start)
+
+    convert_reference_numbering_to_plain_text(doc, body_start)
+
     run_with_pass_limit(
         "compact_references_block",
         compact_references_block,
         doc,
         body_start,
     )
-    
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
 
