@@ -519,10 +519,18 @@ def format_source_line(paragraph):
 def format_reference_subheading(paragraph):
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
-    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
+    remove_paragraph_numbering(paragraph)
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
     for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
+        set_run_font(
+            run,
+            size_pt=BODY_FONT_SIZE_PT,
+            bold=True,
+            italic=False,
+            all_caps=False,
+        )
 
 def format_figure_caption(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
