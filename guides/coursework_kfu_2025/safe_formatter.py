@@ -801,7 +801,6 @@ def split_table_captions_prepass(document, body_start):
 def convert_reference_numbering_to_plain_text(document, body_start):
     in_references = False
     ref_counter = 1
-    prev_kind = None
 
     for idx, paragraph in enumerate(document.paragraphs):
         if idx < body_start:
@@ -816,54 +815,59 @@ def convert_reference_numbering_to_plain_text(document, body_start):
             "список использованной литературы",
         }:
             in_references = True
-            prev_kind = "heading1"
+            ref_counter = 1
             continue
 
         if not in_references:
-            prev_kind = classify_paragraph(text, prev_kind=prev_kind)
             continue
 
         if low in {"приложения", "приложение"}:
             in_references = False
-            prev_kind = classify_paragraph(text, prev_kind=prev_kind)
             continue
 
-        parsed_h1 = parse_heading1(text)
-        if parsed_h1 and parsed_h1["kind"] == "heading1_chapter":
-            in_references = False
-            prev_kind = "heading1"
-            continue
-
+        # Подзаголовки внутри списка источников
         if canonical:
             replace_paragraph_text(paragraph, canonical)
             remove_paragraph_numbering(paragraph)
+            set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+            clear_paragraph_outline_level(paragraph)
+
             paragraph.paragraph_format.page_break_before = False
             paragraph.paragraph_format.keep_with_next = False
             paragraph.paragraph_format.keep_together = False
             paragraph.paragraph_format.widow_control = False
 
-            format_body(paragraph)
             format_reference_subheading(paragraph)
-            prev_kind = "reference_subheading"
             continue
 
-        kind = classify_paragraph(text, prev_kind=prev_kind)
-
-        if kind == "empty_paragraph":
-            prev_kind = kind
+        if is_empty_paragraph(paragraph):
             continue
 
-        if paragraph_has_numbering(paragraph):
-            remove_paragraph_numbering(paragraph)
-
-        clean = clean_spaces(paragraph.text)
-        if not re.match(r"^\d+\.\s+", clean):
-            replace_paragraph_text(paragraph, f"{ref_counter}. {clean}")
+        # Любой обычный источник в блоке литературы
+        remove_paragraph_numbering(paragraph)
+        set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+        clear_paragraph_outline_level(paragraph)
 
         paragraph.paragraph_format.page_break_before = False
+        paragraph.paragraph_format.keep_with_next = False
+        paragraph.paragraph_format.keep_together = False
+        paragraph.paragraph_format.widow_control = False
+
+        clean = clean_spaces(paragraph.text)
+
+        # Если видимый номер уже есть — сохраняем его
+        m = re.match(r"^\s*(\d+)\.\s+(.+)$", clean)
+        if m:
+            number = int(m.group(1))
+            source_text = clean_spaces(m.group(2))
+            normalized = f"{number}. {source_text}"
+            ref_counter = number + 1
+        else:
+            normalized = f"{ref_counter}. {clean}"
+            ref_counter += 1
+
+        replace_paragraph_text(paragraph, normalized)
         format_body(paragraph)
-        ref_counter += 1
-        prev_kind = "body_text"
 
 
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
