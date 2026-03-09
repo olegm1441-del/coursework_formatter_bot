@@ -515,7 +515,6 @@ def format_source_line(paragraph):
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
-
 def format_reference_subheading(paragraph):
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
