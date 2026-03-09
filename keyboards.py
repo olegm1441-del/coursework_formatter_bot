@@ -19,8 +19,8 @@ CB_BACK_TO_MENU = "menu:back"
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(BTN_TOP_UP_BALANCE)],
         [KeyboardButton(BTN_REFERRAL)],
+        [KeyboardButton(BTN_TOP_UP_BALANCE)],
         [KeyboardButton(BTN_SELECT_GUIDE)],
         [KeyboardButton(BTN_CONTACT)],
     ]
