@@ -484,6 +484,18 @@ def remove_page_break_artifacts_from_paragraph(paragraph):
         # На всякий случай убираем lastRenderedPageBreak
         for lrp in list(r.findall(qn("w:lastRenderedPageBreak"))):
             r.remove(lrp)
+
+def is_references_heading_text(text: str) -> bool:
+    low = clean_spaces(text).lower()
+    return low in {
+        "список использованных источников",
+        "список использованной литературы",
+    }
+
+
+def is_appendix_heading_text(text: str) -> bool:
+    low = clean_spaces(text).lower()
+    return low in {"приложение", "приложения"}
             
 def format_empty_paragraph(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
@@ -903,78 +915,76 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
 def compact_references_block(document, body_start):
     in_references = False
-    changes = 0
-    idx = 0
+    changed = True
 
-    while idx < len(document.paragraphs):
-        p = document.paragraphs[idx]
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
 
-        if idx < body_start:
-            idx += 1
-            continue
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
 
-        text = clean_spaces(p.text)
-        low = text.lower()
-        canonical = canonical_reference_subheading_text(text)
+            text = clean_spaces(p.text)
+            low = text.lower()
+            canonical = canonical_reference_subheading_text(text)
 
-        if low in {
-            "список использованных источников",
-            "список использованной литературы",
-        }:
-            in_references = True
-            idx += 1
-            continue
+            if is_references_heading_text(text):
+                in_references = True
+                continue
 
-        if not in_references:
-            idx += 1
-            continue
+            if not in_references:
+                continue
 
-        if low in {"приложения", "приложение"}:
-            in_references = False
-            idx += 1
-            continue
+            if is_appendix_heading_text(text):
+                in_references = False
+                continue
 
-        # Полностью убираем пустые абзацы внутри блока литературы
-        if is_empty_paragraph(p):
-            remove_paragraph(p)
-            changes += 1
-            continue
+            # Полностью убираем пустые абзацы внутри блока литературы
+            if is_empty_paragraph(p):
+                remove_paragraph(p)
+                changed = True
+                break
 
-        # Снимаем page-break / list-мусор
-        remove_page_break_artifacts_from_paragraph(p)
-        remove_paragraph_numbering(p)
-
-        # Подзаголовки внутри списка источников
-        if canonical:
-            replace_paragraph_text(p, canonical)
+            # Сначала снимаем весь мусор разрывов / списков / заголовков
+            remove_page_break_artifacts_from_paragraph(p)
+            remove_paragraph_numbering(p)
             set_paragraph_style_safe(p, "Normal", "Обычный")
             clear_paragraph_outline_level(p)
-            format_reference_subheading(p)
-            idx += 1
-            continue
 
-        # Обычный источник
-        set_paragraph_style_safe(p, "Normal", "Обычный")
-        clear_paragraph_outline_level(p)
+            # Подзаголовки разделов внутри литературы
+            if canonical:
+                replace_paragraph_text(p, canonical)
+                format_reference_subheading(p)
 
-        clean = clean_spaces(p.text)
-        m = re.match(r"^\s*(\d+)\.\s+(.+)$", clean)
-        if m:
-            number = int(m.group(1))
-            source_text = clean_spaces(m.group(2))
-            normalized = f"{number}. {source_text}"
+                p.paragraph_format.page_break_before = False
+                p.paragraph_format.keep_with_next = False
+                p.paragraph_format.keep_together = False
+                p.paragraph_format.widow_control = False
+
+                continue
+
+            # Обычный источник
+            clean = clean_spaces(p.text)
+
+            m = re.match(r"^\s*(\d+)\.\s+(.+)$", clean)
+            if m:
+                number = int(m.group(1))
+                source_text = clean_spaces(m.group(2))
+                normalized = f"{number}. {source_text}"
+            else:
+                normalized = clean
+
             if clean != normalized:
                 replace_paragraph_text(p, normalized)
-                changes += 1
-        else:
-            # Не навязываем новую нумерацию, если текст уже выглядит как нормальный источник
-            replace_paragraph_text(p, clean)
-            changes += 1
 
-        format_body(p)
-        idx += 1
+            format_body(p)
 
-    return changes
+            # Финальный добивающий reset именно после format_body
+            p.paragraph_format.page_break_before = False
+            p.paragraph_format.keep_with_next = False
+            p.paragraph_format.keep_together = False
+            p.paragraph_format.widow_control = False
 
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
     empty_count = 0
@@ -996,12 +1006,28 @@ def ensure_empty_after_source_and_note(document, body_start):
         changed = False
         paragraphs = document.paragraphs
         prev_kind = None
+        in_references = False
 
         for idx, p in enumerate(paragraphs):
             if idx < body_start:
                 continue
 
-            kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                prev_kind = "heading1"
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            # Внутри списка источников ничего не разрежаем
+            if in_references:
+                prev_kind = "body_text"
+                continue
+
+            kind = classify_paragraph(text, prev_kind=prev_kind)
 
             if kind == "source_line":
                 if idx + 1 < len(paragraphs) and not is_empty_paragraph(paragraphs[idx + 1]):
@@ -1009,7 +1035,11 @@ def ensure_empty_after_source_and_note(document, body_start):
                     p._element.addnext(new_p)
                     changed = True
                     break
-                if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]) and is_empty_paragraph(paragraphs[idx + 2]):
+                if (
+                    idx + 2 < len(paragraphs)
+                    and is_empty_paragraph(paragraphs[idx + 1])
+                    and is_empty_paragraph(paragraphs[idx + 2])
+                ):
                     remove_paragraph(paragraphs[idx + 2])
                     changed = True
                     break
@@ -1553,12 +1583,6 @@ def process_document(input_path: Path, output_path: Path):
         body_start,
     )
 
-    run_with_pass_limit(
-        "compact_references_block",
-        compact_references_block,
-        doc,
-        body_start,
-    )
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
     format_empty_paragraphs_in_body(doc, body_start)
@@ -1566,6 +1590,13 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "normalize_structural_heading_spacing_v2",
         normalize_structural_heading_spacing_v2,
+        doc,
+        body_start,
+    )
+    
+    run_with_pass_limit(
+        "compact_references_block",
+        compact_references_block,
         doc,
         body_start,
     )
