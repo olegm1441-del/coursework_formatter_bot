@@ -171,7 +171,7 @@ async def create_payment(user_id: int, tariff_code: str = "one_format"):
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            "https://api.tribute.tg/api/v1/orders",
+            "https://tribute.tg/api/v1/shop/orders",
             headers={"Api-Key": TRIBUTE_API_KEY},
             json={
                 "productId": product_id,
