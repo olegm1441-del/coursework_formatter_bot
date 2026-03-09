@@ -1283,60 +1283,41 @@ def ensure_empty_after_source_and_note(document, body_start):
 
             prev_kind = kind
             
-def ensure_single_blank_after_headings(document, body_start):
-    changed = True
-    while changed:
-        changed = False
-        paragraphs = document.paragraphs
-        prev_kind = None
-        in_references = False
+def ensure_single_blank_after_headings(doc, body_start):
+    paragraphs = doc.paragraphs
 
-        for idx, p in enumerate(paragraphs):
-            if idx < body_start:
-                continue
+    for i in range(body_start, len(paragraphs) - 1):
+        p = paragraphs[i]
+        text = clean_spaces(p.text).upper()
 
-            text = clean_spaces(p.text)
+        # Проверяем стиль
+        style_name = ""
+        try:
+            style_name = p.style.name.lower()
+        except Exception:
+            pass
 
-            if is_references_heading_text(text):
-                in_references = True
-                prev_kind = "heading1"
-                continue
+        is_heading1 = "heading 1" in style_name
+        is_heading2 = "heading 2" in style_name
 
-            if in_references and is_appendix_heading_text(text):
-                in_references = False
+        # ----- правила -----
 
-            # Внутри списка источников этот общий spacing-проход не работает
-            if in_references:
-                prev_kind = "body_text"
-                continue
+        # параграфы (1.1, 1.2 и т.п.)
+        if is_heading2:
+            ensure_one_empty_after(paragraphs, i)
+            continue
 
-            kind = classify_paragraph(text, prev_kind=prev_kind)
+        # специальные разделы
+        if is_heading1 and text in {
+            "ВВЕДЕНИЕ",
+            "ЗАКЛЮЧЕНИЕ",
+            "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+        }:
+            ensure_one_empty_after(paragraphs, i)
+            continue
 
-            if kind not in {"heading1", "heading2"}:
-                prev_kind = kind
-                continue
+        # главы — ничего не делаем
 
-            if idx + 1 >= len(paragraphs):
-                new_p = insert_paragraph_after(p, "")
-                format_empty_paragraph(new_p)
-                changed = True
-                break
-
-            next_p = paragraphs[idx + 1]
-
-            if not is_empty_paragraph(next_p):
-                new_p = insert_paragraph_after(p, "")
-                format_empty_paragraph(new_p)
-                changed = True
-                break
-
-            if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-                remove_paragraph(paragraphs[idx + 2])
-                changed = True
-                break
-
-            format_empty_paragraph(next_p)
-            prev_kind = kind
 def ensure_empty_between_heading1_and_heading2(document, body_start):
     changed = True
     while changed:
