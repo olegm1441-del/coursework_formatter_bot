@@ -885,6 +885,66 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         replace_paragraph_text(paragraph, normalized)
         format_body(paragraph)
 
+def compact_references_block(document, body_start):
+    in_references = False
+    changed = True
+
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+            low = text.lower()
+            canonical = canonical_reference_subheading_text(text)
+
+            if low in {
+                "список использованных источников",
+                "список использованной литературы",
+            }:
+                in_references = True
+                continue
+
+            if not in_references:
+                continue
+
+            if low in {"приложения", "приложение"}:
+                in_references = False
+                continue
+
+            # Любой абзац внутри списка источников сначала чистим от page-break мусора
+            remove_page_break_artifacts_from_paragraph(p)
+            remove_paragraph_numbering(p)
+
+            # 1) Полностью удаляем пустые абзацы внутри списка источников
+            #    Они и создают "разлёт" источников
+            if is_empty_paragraph(p):
+                remove_paragraph(p)
+                changed = True
+                break
+
+            # 2) Подзаголовки типа "Официальные материалы"
+            if canonical:
+                replace_paragraph_text(p, canonical)
+                set_paragraph_style_safe(p, "Normal", "Обычный")
+                clear_paragraph_outline_level(p)
+                format_reference_subheading(p)
+
+                # после подзаголовка не должно быть пустой строки
+                if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+                    remove_paragraph(paragraphs[idx + 1])
+                    changed = True
+                    break
+
+                continue
+
+            # 3) Обычный источник — всегда обычный текст без заголовочной логики
+            set_paragraph_style_safe(p, "Normal", "Обычный")
+            clear_paragraph_outline_level(p)
+            format_body(p)
 
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
     empty_count = 0
@@ -1452,9 +1512,16 @@ def process_document(input_path: Path, output_path: Path):
         body_start,
     )
 
-    run_with_pass_limit(
+        run_with_pass_limit(
         "cleanup_reference_subheadings_layout",
         cleanup_reference_subheadings_layout,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "compact_references_block",
+        compact_references_block,
         doc,
         body_start,
     )
