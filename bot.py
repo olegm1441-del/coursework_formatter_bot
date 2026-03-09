@@ -41,7 +41,8 @@ def run_polling_forever(app):
 
 
 def start_api() -> None:
-    uvicorn.run(payments_app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(payments_app, host="0.0.0.0", port=port)
 
 
 def main() -> None:
