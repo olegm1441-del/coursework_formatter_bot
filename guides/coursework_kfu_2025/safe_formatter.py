@@ -1279,19 +1279,33 @@ def ensure_single_blank_after_headings(document, body_start):
         changed = False
         paragraphs = document.paragraphs
         prev_kind = None
+        in_references = False
 
         for idx, p in enumerate(paragraphs):
             if idx < body_start:
                 continue
 
             text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                prev_kind = "heading1"
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            # Внутри списка источников этот общий spacing-проход не работает
+            if in_references:
+                prev_kind = "body_text"
+                continue
+
             kind = classify_paragraph(text, prev_kind=prev_kind)
 
             if kind not in {"heading1", "heading2"}:
                 prev_kind = kind
                 continue
 
-            # После heading1/heading2 должна быть ровно одна пустая строка
             if idx + 1 >= len(paragraphs):
                 new_p = insert_paragraph_after(p, "")
                 format_empty_paragraph(new_p)
@@ -1306,7 +1320,6 @@ def ensure_single_blank_after_headings(document, body_start):
                 changed = True
                 break
 
-            # Если пустых строк больше одной — сжимаем до одной
             if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
                 remove_paragraph(paragraphs[idx + 2])
                 changed = True
@@ -1314,7 +1327,6 @@ def ensure_single_blank_after_headings(document, body_start):
 
             format_empty_paragraph(next_p)
             prev_kind = kind
-
 def ensure_empty_between_heading1_and_heading2(document, body_start):
     changed = True
     while changed:
@@ -1355,37 +1367,51 @@ def ensure_compact_heading2_spacing(document, body_start):
     prev_kind = None
     changed = False
     idx = max(body_start, 0)
+    in_references = False
 
     while idx < len(paragraphs):
         p = paragraphs[idx]
-        kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
+        text = clean_spaces(p.text)
+
+        if is_references_heading_text(text):
+            in_references = True
+            prev_kind = "heading1"
+            idx += 1
+            continue
+
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+
+        # Внутри списка источников этот проход не должен ничего вставлять/удалять
+        if in_references:
+            prev_kind = "body_text"
+            idx += 1
+            continue
+
+        kind = classify_paragraph(text, prev_kind=prev_kind)
 
         if kind != "heading2":
             prev_kind = kind
             idx += 1
             continue
 
-        # 1) Remove all consecutive empty paragraphs immediately before heading2.
         while idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
             remove_paragraph(paragraphs[idx - 1])
             paragraphs = document.paragraphs
             idx -= 1
             changed = True
 
-        # 2) Ensure exactly one empty paragraph immediately after heading2.
         if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
             new_p = OxmlElement("w:p")
             p._element.addnext(new_p)
             paragraphs = document.paragraphs
             changed = True
 
-        # 3) Remove extra empty paragraphs after heading2, keep only one.
         while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
             remove_paragraph(paragraphs[idx + 2])
             paragraphs = document.paragraphs
             changed = True
 
-        # 4) Normalize the single empty paragraph after heading2.
         if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
             hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
 
