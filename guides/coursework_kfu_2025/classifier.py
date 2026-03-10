@@ -47,9 +47,31 @@ def paragraph_text(paragraph) -> str:
     return clean_spaces(paragraph.text)
 
 
+
+def is_intro_heading_line(text: str) -> bool:
+    """
+    Robust detection of the body-start heading "Введение".
+
+    Accepts minor punctuation variants like:
+      - "ВВЕДЕНИЕ"
+      - "Введение:"
+      - "Введение."
+
+    Does NOT treat TOC lines like "ВВЕДЕНИЕ........3" as body start.
+    """
+    t = clean_spaces(text).lower()
+    if not t:
+        return False
+
+    # Remove trailing punctuation/spacing; keep internal text intact.
+    t = re.sub(r"[\s\.:;!?]+$", "", t)
+
+    return t == INTRO_HEADING
+
+
 def find_body_start_index(document):
     for idx, p in enumerate(document.paragraphs):
-        if paragraph_text(p).lower() == INTRO_HEADING:
+        if is_intro_heading_line(paragraph_text(p)):
             return idx
     return None
 
