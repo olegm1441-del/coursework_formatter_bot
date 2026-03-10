@@ -2156,7 +2156,11 @@ def process_document(input_path: Path, output_path: Path):
             "source_line",
             "reference_subheading",
         }:
-            if auto_detect_report_heading1(paragraph, prev_kind=prev_kind):
+            if auto_detect_report_heading1(
+                paragraph,
+                prev_kind=prev_kind,
+                current_chapter_num=current_chapter_num,
+            ):
                 kind = "heading1"
                 current_chapter_num = None
                 next_paragraph_num = None
