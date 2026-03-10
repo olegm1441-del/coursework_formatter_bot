@@ -1870,44 +1870,32 @@ def ensure_front_matter_layout(document, body_start):
         _append_next_page_section_break_after(paragraphs[body_start - 1], body_sectpr)
 
 def process_document(input_path: Path, output_path: Path):
-    doc = Document(str(input_path))
+    doc = Document(input_path)
 
     body_start = find_body_start_index(doc)
     toc_h1_map, toc_h2_map = build_toc_heading_maps(doc, body_start)
-    if body_start is None:
-        raise RuntimeError("Не найден заголовок 'Введение'; файл пропущен из соображений безопасности.")
 
-    set_section_margins(doc)
-
-    split_manual_dash_lists(doc, body_start)
-    split_table_captions_prepass(doc, body_start)
-
-    for idx, paragraph in enumerate(doc.paragraphs):
-        if idx < body_start:
-            continue
-        normalize_simple_paragraph_spaces(paragraph)
-        normalize_heading2_artifacts(paragraph)
-
-    prev_kind = None
     current_chapter_num = None
     next_paragraph_num = None
+    prev_kind = None
 
-    for idx, paragraph in enumerate(doc.paragraphs):
-        if idx < body_start:
+    for paragraph in doc.paragraphs:
+        text = clean_spaces(paragraph.text)
+
+        if not text:
+            prev_kind = "empty_paragraph"
             continue
 
-        text = clean_spaces(paragraph.text)
         kind = detect_kind_from_paragraph_object(paragraph, text, prev_kind=prev_kind)
 
-        if kind == "empty_paragraph":
-            prev_kind = kind
-            continue
-
         parsed_h1 = parse_heading1(text)
+
         if parsed_h1:
             if parsed_h1["kind"] == "heading1_chapter":
+
                 toc_text = toc_h1_map.get(parsed_h1["chapter_num"])
                 current_text = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
+
                 if toc_text and len(current_text) < len(toc_text):
                     replace_paragraph_text(paragraph, toc_text)
                     text = clean_spaces(paragraph.text)
@@ -1915,25 +1903,34 @@ def process_document(input_path: Path, output_path: Path):
 
                 current_chapter_num = parsed_h1["chapter_num"]
                 next_paragraph_num = 1
+
                 smart_repair_heading1(paragraph, text)
                 kind = "heading1"
 
             elif parsed_h1["kind"] == "heading1_exact":
+
                 current_chapter_num = None
                 next_paragraph_num = None
-                remove_paragraph_numbering(paragraph)
+
+                smart_repair_heading1(paragraph, text)
                 kind = "heading1"
 
         parsed_h2_existing = parse_heading2(text)
+
         if parsed_h2_existing:
             toc_text = toc_h2_map.get(
-                (parsed_h2_existing["chapter_num"], parsed_h2_existing["paragraph_num"])
+                (
+                    parsed_h2_existing["chapter_num"],
+                    parsed_h2_existing["paragraph_num"],
+                )
             )
+
             current_text = (
                 f'{parsed_h2_existing["chapter_num"]}.'
                 f'{parsed_h2_existing["paragraph_num"]}. '
                 f'{parsed_h2_existing["title"]}'
             )
+
             if toc_text and len(current_text) < len(toc_text):
                 replace_paragraph_text(paragraph, toc_text)
                 text = clean_spaces(paragraph.text)
@@ -1941,7 +1938,12 @@ def process_document(input_path: Path, output_path: Path):
 
         if kind != "table_continuation" and (
             kind == "heading2"
-            or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)
+            or auto_detect_heading2(
+                paragraph,
+                current_chapter_num,
+                next_paragraph_num,
+                prev_kind,
+            )
             or is_likely_numbered_heading2_candidate(
                 paragraph,
                 current_chapter_num,
@@ -1949,150 +1951,57 @@ def process_document(input_path: Path, output_path: Path):
                 prev_kind=prev_kind,
             )
         ):
+
             normalized_text = normalize_heading2_numbering(
                 paragraph,
                 current_chapter_num,
                 next_paragraph_num,
             )
+
             if normalized_text:
                 kind = "heading2"
+
                 parsed_h2 = parse_heading2(clean_spaces(paragraph.text))
+
                 if parsed_h2:
                     current_chapter_num = parsed_h2["chapter_num"]
                     next_paragraph_num = parsed_h2["paragraph_num"] + 1
 
-        if kind == "broken_heading2":
-            repaired = smart_repair_broken_heading2(
-                paragraph,
-                current_chapter_num,
-                next_paragraph_num,
-            )
-            if repaired:
-                kind = "heading2"
-                next_paragraph_num = (next_paragraph_num or 0) + 1
-
-        if kind == "table_continuation":
-            normalize_table_continuation_text(paragraph)
-
-        if kind == "figure_caption":
-            normalize_figure_caption_text(paragraph)
-
         if kind == "heading1":
-            remove_paragraph_numbering(paragraph)
             format_heading1(paragraph)
-        elif kind != "table_continuation" and (
-            kind == "heading2"
-            or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)
-        ):
-            remove_paragraph_numbering(paragraph)
+
+        elif kind == "heading2":
             format_heading2(paragraph)
-        elif kind == "table_caption":
-            format_table_caption(paragraph)
-        elif kind == "table_continuation":
-            format_table_caption(paragraph)
-        elif kind == "table_title":
-            format_table_title(paragraph)
-        elif kind == "source_line":
-            format_source_line(paragraph)
-        elif kind == "reference_subheading":
-            format_reference_subheading(paragraph)
+
         elif kind == "figure_caption":
-            format_figure_caption(paragraph)
-        else:
-            format_body(paragraph)
+            normalize_figure_caption_text(paragraph)
 
         prev_kind = kind
 
-    format_tables(doc)
+    if body_start is not None:
+        split_manual_dash_lists(doc, body_start)
 
-    convert_reference_numbering_to_plain_text(doc, body_start)
-
-    run_with_pass_limit(
-        "compact_references_block",
-        compact_references_block,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "ensure_single_blank_after_references_heading",
-        ensure_single_blank_after_references_heading,
-        doc,
-        body_start,
-    )
-
-    collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
-
-    run_with_pass_limit(
-        "ensure_compact_heading2_spacing",
-        ensure_compact_heading2_spacing,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "ensure_empty_before_table_caption",
-        ensure_empty_before_table_caption,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "remove_extra_empty_after_service_lines",
-        remove_extra_empty_after_service_lines,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "ensure_empty_after_source_and_note",
-        ensure_empty_after_source_and_note,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "cleanup_reference_subheadings_layout",
-        cleanup_reference_subheadings_layout,
-        doc,
-        body_start,
-    )
-
-    collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
-
-    run_with_pass_limit(
-        "ensure_single_blank_after_headings",
-        ensure_single_blank_after_headings,
-        doc,
-        body_start,
-    )
-
-    apply_page_breaks(doc, body_start)
-    normalize_sections(doc)
-    ensure_front_matter_layout(doc, body_start)
-    apply_page_numbering_policy(doc)
-    remove_all_italic(doc)
-
-    run_with_pass_limit(
-        "ensure_single_blank_after_references_heading_final",
-        ensure_single_blank_after_references_heading,
-        doc,
-        body_start,
-    )
-
-    doc.save(str(output_path))
+    doc.save(output_path)
     
+from docx.enum.text import WD_COLOR_INDEX
+
+
 def remove_all_italic(doc):
     """
-    Убирает курсив из всего документа
+    Убирает курсив и любой цветовой фон (highlight) из всего документа
     """
+
+    # обычные абзацы
     for p in doc.paragraphs:
         for r in p.runs:
             r.italic = False
+            r.font.highlight_color = None
 
+    # таблицы
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for r in p.runs:
                         r.italic = False
+                        r.font.highlight_color = None
