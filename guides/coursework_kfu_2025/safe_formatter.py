@@ -524,6 +524,50 @@ def strip_leading_heading_garbage(text: str) -> str:
     # Убираем лишние пробелы после очистки
     t = clean_spaces(t)
     return t
+
+def auto_detect_numbered_heading1(paragraph, current_chapter_num=None):
+    text = clean_spaces(paragraph.text)
+    if not text:
+        return False
+
+    # Если уже распозналось обычным способом — ничего не делаем
+    if parse_heading1(text):
+        return False
+
+    # Заголовок первого уровня не должен быть подписью таблицы/рисунка
+    low = text.lower()
+    forbidden_prefixes = (
+        "таблица",
+        "табл.",
+        "рисунок",
+        "рис.",
+        "источник:",
+        "примечание:",
+        "продолжение таблицы",
+        "продолжение табл.",
+    )
+    if low.startswith(forbidden_prefixes):
+        return False
+
+    # Нужен именно Word numbering / auto-numbering
+    if not paragraph_has_numbering(paragraph):
+        return False
+
+    # Ограничения по длине как ты и просил
+    words = text.split()
+    word_limit = 12 if "." in text else 15
+    if len(words) < 1 or len(words) > word_limit:
+        return False
+
+    # Запрещённые финальные знаки
+    if text.endswith((":", ";", "?", "!")):
+        return False
+
+    # Если это уже похоже на heading2, не считаем heading1
+    if parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    return True
     
 def normalize_heading2_artifacts(paragraph):
     text = clean_spaces(paragraph.text)
@@ -2128,6 +2172,23 @@ def process_document(input_path: Path, output_path: Path):
                 next_paragraph_num,
                 prev_kind,
             )
+        if kind not in {
+            "heading1",
+            "heading2",
+            "table_caption",
+            "table_continuation",
+            "table_title",
+            "figure_caption",
+            "source_line",
+            "reference_subheading",
+        }:
+            if auto_detect_numbered_heading1(paragraph):
+                kind = "heading1"
+                current_chapter_num = None
+                next_paragraph_num = None
+                
+        if kind == "table_continuation":
+            
             or is_likely_numbered_heading2_candidate(
                 paragraph,
                 current_chapter_num,
@@ -2146,24 +2207,7 @@ def process_document(input_path: Path, output_path: Path):
                 if parsed_h2:
                     current_chapter_num = parsed_h2["chapter_num"]
                     next_paragraph_num = parsed_h2["paragraph_num"] + 1
-        if kind not in {
-            "heading1",
-            "heading2",
-            "table_caption",
-            "table_continuation",
-            "table_title",
-            "figure_caption",
-            "source_line",
-            "reference_subheading",
-        }:
-            if auto_detect_report_heading1(
-                paragraph,
-                prev_kind=prev_kind,
-                current_chapter_num=current_chapter_num,
-            ):
-                kind = "heading1"
-                current_chapter_num = None
-                next_paragraph_num = None
+
 
         if kind == "table_continuation":
             normalize_table_continuation_text(paragraph)
