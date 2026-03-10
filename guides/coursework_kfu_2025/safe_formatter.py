@@ -929,7 +929,18 @@ TOC_TRAILING_PAGE_RE = re.compile(r'[\t\. ]+\d+\s*$')
 
 def normalize_toc_line(text: str) -> str:
     t = clean_spaces(text.replace("\t", " "))
-    t = TOC_TRAILING_PAGE_RE.sub("", t).strip()
+
+    # Убираем хвосты содержания:
+    # ..... 12
+    # ……… 12
+    # . . . 12
+    # смешанные лидеры и пробелы перед номером страницы
+    t = re.sub(r'[\s\.\u2024\u2025\u2026·•]+(\d+)\s*$', "", t).strip()
+
+    # Дополнительно убираем хвосты вида "………………" без номера,
+    # если Word уже отдельно разорвал страницу/табуляцию
+    t = re.sub(r'[\s\.\u2024\u2025\u2026·•]+$', "", t).strip()
+
     return t
 
 
