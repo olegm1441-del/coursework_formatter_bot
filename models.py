@@ -81,7 +81,8 @@ class FormattingRequest(Base):
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
-
+    silent_fail = Column(Boolean, nullable=False, default=False)
+    retry_source = Column(String(100), nullable=True, index=True)
 class AnalyticsEvent(Base):
     __tablename__ = "analytics_events"
 
