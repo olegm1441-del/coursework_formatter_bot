@@ -1436,6 +1436,30 @@ def ensure_compact_heading2_spacing(document, body_start):
             paragraphs = document.paragraphs
             idx -= 1
             changed = True
+        next_is_heading2 = False
+ # Между соседними heading2 пустую строку не вставляем,
+        # иначе проход может зациклиться (вставка после первого -> удаление перед вторым).
+        if next_is_heading2:
+            while idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+                remove_paragraph(paragraphs[idx + 1])
+                paragraphs = document.paragraphs
+                changed = True
+        else:
+            if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
+                new_p = OxmlElement("w:p")
+                p._element.addnext(new_p)
+                paragraphs = document.paragraphs
+                changed = True
+        if idx + 1 < len(paragraphs):
+            while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+                remove_paragraph(paragraphs[idx + 2])
+                paragraphs = document.paragraphs
+                changed = True
+
+            if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+                hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
+            next_text = clean_spaces(paragraphs[idx + 1].text)
+            next_is_heading2 = classify_paragraph(next_text, prev_kind="heading2") == "heading2"
 
         if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
             new_p = OxmlElement("w:p")
