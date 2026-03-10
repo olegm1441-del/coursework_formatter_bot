@@ -12,8 +12,8 @@ H1_EXACT = {
 }
 
 CHAPTER_RE = re.compile(r"^\s*глава\s+(\d+)\s*\.?\s*(.+?)\s*$", re.IGNORECASE)
-NORMALIZED_H1_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
-H2_RE = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.+?)\s*$")
+NORMALIZED_H1_RE = re.compile(r"^\s*(\d+)\.\s*(?::|[-—–])?\s+(.+?)\s*$")
+H2_RE = re.compile(r"^\s*(\d+)\.(\d+)\.?\s*(?::|[-—–])?\s+(.+?)\s*$")
 BROKEN_H2_RE = re.compile(r"^\s*\.\s+(.+?)\s*$")
 
 TABLE_CAPTION_RE = re.compile(
@@ -47,6 +47,16 @@ def paragraph_text(paragraph) -> str:
     return clean_spaces(paragraph.text)
 
 
+def normalize_heading_candidate(text: str) -> str:
+    """Normalize minor visual separators often produced by Word list exports."""
+    t = clean_spaces(text)
+    # Examples: "1. · Заголовок", "3.1 • Подраздел"
+    t = re.sub(r"\s*[·•▪]\s*", " ", t)
+    return clean_spaces(t)
+
+
+
+
 
 def is_intro_heading_line(text: str) -> bool:
     """
@@ -77,7 +87,7 @@ def find_body_start_index(document):
 
 
 def parse_heading1(text: str):
-    t = clean_spaces(text)
+    t = normalize_heading_candidate(text)
     low = t.lower()
 
     if low in H1_EXACT:
@@ -105,7 +115,7 @@ def parse_heading1(text: str):
 
 
 def parse_heading2(text: str):
-    t = clean_spaces(text)
+    t = normalize_heading_candidate(text)
     m = H2_RE.match(t)
     if not m:
         return None
