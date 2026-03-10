@@ -31,6 +31,24 @@ FIGURE_CAPTION_RE = re.compile(
 SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:\s*.+$", re.IGNORECASE)
 
 
+INTRO_FALLBACK_RE = re.compile(r"^\s*(?:\d+\.\s*)?введение(?:\s*[.…·•\-_]+\s*\d{1,3})?\s*$", re.IGNORECASE)
+
+
+def is_intro_heading_candidate(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t:
+        return False
+
+    low = t.lower()
+    if low == INTRO_HEADING:
+        return True
+
+    if TABLE_CAPTION_RE.match(t) or is_table_continuation_line(t) or FIGURE_CAPTION_RE.match(t):
+        return False
+
+    return bool(INTRO_FALLBACK_RE.match(t))
+
+
 def clean_spaces(text: str) -> str:
     if text is None:
         return ""
@@ -92,9 +110,62 @@ def is_probable_numbered_heading1_title(title: str) -> bool:
     return True
 
 def find_body_start_index(document):
-    for idx, p in enumerate(document.paragraphs):
+    paragraphs = document.paragraphs
+
+    # 1) Строгое совпадение (базовый безопасный путь)
+    for idx, p in enumerate(paragraphs):
         if paragraph_text(p).lower() == INTRO_HEADING:
             return idx
+
+    # 2) Нормализованные варианты: "1. Введение", "Введение ... 3" и т.п.
+    for idx, p in enumerate(paragraphs):
+        if is_intro_heading_candidate(paragraph_text(p)):
+            return idx
+
+    # 3) Безопасный fallback: после содержания, если далее есть явные структурные сигналы
+    toc_idx = None
+    for idx, p in enumerate(paragraphs):
+        low = paragraph_text(p).lower()
+        if low == "содержание" or "содержан" in low:
+            toc_idx = idx
+            break
+
+    if toc_idx is None:
+        return None
+
+    for idx in range(toc_idx + 1, len(paragraphs)):
+        t = paragraph_text(paragraphs[idx])
+        if not t:
+            continue
+
+        if not is_intro_heading_candidate(t):
+            continue
+
+        scan_end = min(len(paragraphs), idx + 80)
+        has_next_structure = False
+
+        for j in range(idx + 1, scan_end):
+            tt = paragraph_text(paragraphs[j])
+            if not tt:
+                continue
+
+            low = tt.lower()
+            if low in {"заключение", "список использованных источников", "список использованной литературы"}:
+                has_next_structure = True
+                break
+
+            parsed_h1 = parse_heading1(tt)
+            if parsed_h1 and parsed_h1.get("kind") == "heading1_chapter":
+                has_next_structure = True
+                break
+
+            if parse_heading2(tt):
+                has_next_structure = True
+                break
+
+        if has_next_structure:
+            return idx
+
     return None
 
 
