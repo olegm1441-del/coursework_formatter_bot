@@ -624,12 +624,17 @@ def format_heading1(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
     remove_paragraph_numbering(paragraph)
 
+    text = clean_spaces(paragraph.text)
+    if text:
+        replace_paragraph_text(paragraph, text.upper())
+
     set_paragraph_style_safe(paragraph, "Heading 1", "Заголовок 1")
+    clear_paragraph_outline_level(paragraph)
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=True)
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, italic=False, all_caps=False)
 
 def format_heading2(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
@@ -643,6 +648,12 @@ def format_heading2(paragraph):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
 
 def format_table_caption(paragraph):
+    text = clean_spaces(paragraph.text)
+    m = TABLE_NUM_RE.match(text)
+    if m:
+        number = m.group(1)
+        replace_paragraph_text(paragraph, f"Таблица {number}")
+
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
     remove_paragraph_numbering(paragraph)
@@ -651,7 +662,7 @@ def format_table_caption(paragraph):
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
 
 
 def format_table_title(paragraph):
@@ -949,6 +960,33 @@ def build_toc_heading_maps(document, body_start):
     return h1_map, h2_map
 
 def detect_kind_from_paragraph_object(paragraph, text: str, prev_kind=None) -> str:
+    t = clean_spaces(text)
+    low = t.lower()
+
+    parsed_h1 = parse_heading1(t)
+    if parsed_h1:
+        if parsed_h1["kind"] == "heading1_exact" and low == "содержание":
+            return "toc_heading"
+        return "heading1"
+
+    if parse_heading2(t):
+        return "heading2"
+
+    if parse_broken_heading2(t):
+        return "broken_heading2"
+
+    if TABLE_NUM_RE.match(t):
+        return "table_caption"
+
+    if is_table_continuation_text(t):
+        return "table_continuation"
+
+    if FIG_RE.match(t):
+        return "figure_caption"
+
+    if re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", t, re.IGNORECASE):
+        return "source_line"
+
     style_name = ""
     try:
         style_name = (paragraph.style.name or "").strip().lower()
@@ -961,20 +999,13 @@ def detect_kind_from_paragraph_object(paragraph, text: str, prev_kind=None) -> s
     if style_name in {"heading 2", "заголовок 2"}:
         return "heading2"
 
-    if is_probable_center_bold_heading(paragraph):
-        if parse_heading2(text) or parse_broken_heading2(text):
-            return "heading2"
-        if parse_heading1(text):
-            return "heading1"
-        if clean_spaces(text).upper() in {
-            "ВВЕДЕНИЕ",
-            "ЗАКЛЮЧЕНИЕ",
-            "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
-            "СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ",
-        }:
-            return "heading1"
+    if is_probable_unnumbered_heading1(t):
+        return "heading1"
 
-    return classify_paragraph(text, prev_kind=prev_kind)
+    if prev_kind in {"table_caption", "table_continuation"}:
+        return "table_title"
+
+    return "body_text"
     
 def split_manual_dash_lists(document, body_start):
     changed = True
@@ -2101,11 +2132,10 @@ def process_document(input_path: Path, output_path: Path):
 
 def remove_all_italic(doc):
     """
-    Убирает курсив, подсветку, цвет текста и заливку текста
-    из всех runs в документе, включая таблицы.
+    Убирает курсив, highlight, цвет текста и XML-заливку из всего документа.
     """
 
-    def clear_run_visuals(run):
+    def clear_run(run):
         run.italic = False
 
         try:
@@ -2120,13 +2150,10 @@ def remove_all_italic(doc):
 
         rPr = run._element.get_or_add_rPr()
 
-        highlight = rPr.find(qn("w:highlight"))
-        if highlight is not None:
-            rPr.remove(highlight)
-
-        shd = rPr.find(qn("w:shd"))
-        if shd is not None:
-            rPr.remove(shd)
+        for tag in ("w:highlight", "w:shd"):
+            node = rPr.find(qn(tag))
+            if node is not None:
+                rPr.remove(node)
 
         color = rPr.find(qn("w:color"))
         if color is None:
@@ -2135,19 +2162,17 @@ def remove_all_italic(doc):
         color.set(qn("w:val"), "000000")
 
         for attr in ("w:themeColor", "w:themeTint", "w:themeShade"):
-            try:
-                if color.get(qn(attr)) is not None:
-                    del color.attrib[qn(attr)]
-            except Exception:
-                pass
+            qname = qn(attr)
+            if qname in color.attrib:
+                del color.attrib[qname]
 
     for p in doc.paragraphs:
         for r in p.runs:
-            clear_run_visuals(r)
+            clear_run(r)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for r in p.runs:
-                        clear_run_visuals(r)
+                        clear_run(r)
