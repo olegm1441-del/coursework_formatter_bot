@@ -151,9 +151,11 @@ def find_body_start_index(document):
 def parse_heading1(text: str):
     t = clean_spaces(text)
     low = t.lower()
+    low_exact = low.rstrip(".")
 
-    if low in H1_EXACT:
-        return {"kind": "heading1_exact", "chapter_num": None, "title": t}
+    if low_exact in H1_EXACT:
+        canonical = low_exact.upper()
+        return {"kind": "heading1_exact", "chapter_num": None, "title": canonical}
 
     m = CHAPTER_RE.match(t)
     if m:
