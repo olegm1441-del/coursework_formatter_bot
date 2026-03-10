@@ -63,46 +63,7 @@ def is_table_continuation_line(text: str) -> bool:
 
 
 
-def is_probable_unnumbered_heading1(text: str) -> bool:
-    t = clean_spaces(text)
-    if not t:
-        return False
 
-    if len(t) < 5 or len(t) > 90:
-        return False
-
-    if any(ch in t for ch in (":", ";", "?", "!")):
-        return False
-
-    if t.endswith((".", ",")):
-        return False
-
-    if TABLE_CAPTION_RE.match(t) or is_table_continuation_line(t) or FIGURE_CAPTION_RE.match(t):
-        return False
-
-    if SOURCE_LINE_RE.match(t):
-        return False
-
-    if re.search(r"\d{2,}", t):
-        return False
-
-    words = t.split()
-    if len(words) > 9:
-        return False
-
-    letters = [ch for ch in t if ch.isalpha()]
-    if not letters:
-        return False
-
-    first_alpha = next((ch for ch in t if ch.isalpha()), "")
-    if first_alpha and first_alpha.islower():
-        return False
-
-    upper_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
-    if upper_ratio < 0.7:
-        return False
-
-    return True
 
 def is_probable_numbered_heading1_title(title: str) -> bool:
     t = clean_spaces(title)
