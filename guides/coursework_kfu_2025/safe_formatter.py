@@ -2132,9 +2132,12 @@ def process_document(input_path: Path, output_path: Path):
             "reference_subheading",
         }:
             if auto_detect_numbered_heading1(paragraph):
+                inferred_chapter_num = 1 if current_chapter_num is None else current_chapter_num + 1
+                heading_text = clean_spaces(paragraph.text)
+                replace_paragraph_text(paragraph, f"{inferred_chapter_num}. {heading_text}")
                 kind = "heading1"
-                current_chapter_num = None
-                next_paragraph_num = None
+                current_chapter_num = inferred_chapter_num
+                next_paragraph_num = 1
 
         if kind == "table_continuation":
             normalize_table_continuation_text(paragraph)
