@@ -1901,6 +1901,54 @@ def ensure_front_matter_layout(document, body_start):
         # титул -> введение
         _append_next_page_section_break_after(paragraphs[body_start - 1], body_sectpr)
 
+def remove_all_italic(doc):
+    """
+    Убирает курсив, highlight, цвет текста и XML-заливку из всего документа.
+    """
+
+    def clear_run(run):
+        run.italic = False
+
+        try:
+            run.font.highlight_color = None
+        except Exception:
+            pass
+
+        try:
+            run.font.color.rgb = RGBColor(0, 0, 0)
+        except Exception:
+            pass
+
+        rPr = run._element.get_or_add_rPr()
+
+        for tag in ("w:highlight", "w:shd"):
+            node = rPr.find(qn(tag))
+            if node is not None:
+                rPr.remove(node)
+
+        color = rPr.find(qn("w:color"))
+        if color is None:
+            color = OxmlElement("w:color")
+            rPr.append(color)
+        color.set(qn("w:val"), "000000")
+
+        for attr in ("w:themeColor", "w:themeTint", "w:themeShade"):
+            qname = qn(attr)
+            if qname in color.attrib:
+                del color.attrib[qname]
+
+    for p in doc.paragraphs:
+        for r in p.runs:
+            clear_run(r)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        clear_run(r)
+
+
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
 
@@ -2203,49 +2251,4 @@ def process_document(input_path: Path, output_path: Path):
 
     doc.save(str(output_path))
 
-def remove_all_italic(doc):
-    """
-    Убирает курсив, highlight, цвет текста и XML-заливку из всего документа.
-    """
 
-    def clear_run(run):
-        run.italic = False
-
-        try:
-            run.font.highlight_color = None
-        except Exception:
-            pass
-
-        try:
-            run.font.color.rgb = RGBColor(0, 0, 0)
-        except Exception:
-            pass
-
-        rPr = run._element.get_or_add_rPr()
-
-        for tag in ("w:highlight", "w:shd"):
-            node = rPr.find(qn(tag))
-            if node is not None:
-                rPr.remove(node)
-
-        color = rPr.find(qn("w:color"))
-        if color is None:
-            color = OxmlElement("w:color")
-            rPr.append(color)
-        color.set(qn("w:val"), "000000")
-
-        for attr in ("w:themeColor", "w:themeTint", "w:themeShade"):
-            qname = qn(attr)
-            if qname in color.attrib:
-                del color.attrib[qname]
-
-    for p in doc.paragraphs:
-        for r in p.runs:
-            clear_run(r)
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    for r in p.runs:
-                        clear_run(r)
