@@ -408,7 +408,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             db,
             user_id=user.id,
             original_filename=filename,
-            storage_path=str(input_path),
+            storage_path=tg_file.file_path or str(input_path),
         )
         services.track_event(
             db,

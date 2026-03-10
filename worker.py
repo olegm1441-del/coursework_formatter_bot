@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from multiprocessing import Process, Queue
 from pathlib import Path
 
+import httpx
+
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from telegram import Bot
@@ -259,6 +261,29 @@ def pick_next_queued_request_id() -> int | None:
         db.close()
 
 
+
+def prepare_worker_input_path(
+    storage_path: str,
+    request_id: int,
+    original_filename: str,
+    bot_token: str,
+) -> Path:
+    suffix = Path(original_filename).suffix or ".docx"
+
+    if storage_path.startswith(("http://", "https://")):
+        source_url = storage_path
+    elif storage_path.startswith("documents/") or storage_path.startswith("photos/"):
+        source_url = f"https://api.telegram.org/file/bot{bot_token}/{storage_path.lstrip('/')}"
+    else:
+        return Path(storage_path)
+
+    local_input_path = services.TEMP_DIR / f"{request_id}_downloaded{suffix}"
+    response = httpx.get(source_url, timeout=60.0)
+    response.raise_for_status()
+    local_input_path.write_bytes(response.content)
+    return local_input_path
+
+
 def process_one_request(request_id: int, bot_token: str) -> bool:
     db = SessionLocal()
     output_path: Path | None = None
@@ -295,7 +320,12 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             )
             return False
 
-        input_path = Path(document.storage_path)
+        input_path = prepare_worker_input_path(
+            storage_path=document.storage_path,
+            request_id=request.id,
+            original_filename=document.original_filename,
+            bot_token=bot_token,
+        )
         if not input_path.exists():
             fail_request(
                 request_id=request_id,
