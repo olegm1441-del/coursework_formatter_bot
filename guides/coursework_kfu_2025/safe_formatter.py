@@ -1490,7 +1490,16 @@ def ensure_compact_heading2_spacing(document, body_start):
             idx -= 1
             changed = True
 
-        if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
+        next_is_heading2 = False
+        if idx + 1 < len(paragraphs) and not is_empty_paragraph(paragraphs[idx + 1]):
+            next_text = clean_spaces(paragraphs[idx + 1].text)
+            next_kind = classify_paragraph(next_text, prev_kind=kind)
+            next_is_heading2 = next_kind == "heading2"
+
+        # IMPORTANT: don't force an empty line between two consecutive heading2 lines,
+        # otherwise this step starts oscillating between
+        # "add empty after heading2" and "remove empty before next heading2".
+        if (idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1])) and not next_is_heading2:
             new_p = OxmlElement("w:p")
             p._element.addnext(new_p)
             paragraphs = document.paragraphs
