@@ -69,50 +69,37 @@ def enforce_structural_spacing(doc):
 
 # ===== AUTO PATCH: robust heading2 detection =====
 
-def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
-    if current_chapter_num is None or next_paragraph_num is None:
+def looks_like_heading2_title(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t:
         return False
 
-    text = clean_spaces(paragraph.text)
-    if not text:
+    if TABLE_CONTINUATION_RE.match(t):
         return False
+
+    if t.endswith((".", ":", ";", "!", "?")):
+        return False
+
+    if len(t) > 220:
+        return False
+
+    return True
+
+def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
+    text = clean_spaces(paragraph.text)
 
     low = text.lower()
 
-    forbidden_prefixes = (
-        "таблица ",
-        "рисунок ",
-        "рис. ",
-        "продолжение таблицы",
-        "продолжение табл.",
-        "источник:",
-        "составлено по:",
-        "рассчитано по:",
-        "примечание:",
-    )
-    if low.startswith(forbidden_prefixes):
-        return False
-
-    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
-        return False
-
-    if is_table_continuation_text(text):
-        return False
-
-    if not looks_like_heading2_title(text):
-        return False
-
-    if paragraph_has_numbering(paragraph):
-        return True
-
-    if is_probable_center_bold_heading(paragraph):
-        return True
-
-    # Частый кейс: сразу после главы идёт подпункт, но Word потерял номер
-    if prev_kind in {"heading1", "empty_paragraph"}:
-        return True
-
-    return False
+    if low.startswith("таблица "):
+        return None
+    if low.startswith("рисунок "):
+        return None
+    if low.startswith("рис. "):
+        return None
+    if low.startswith("продолжение таблицы"):
+        return None
+    if low.startswith("продолжение табл."):
+        return None
 
 # ===== END PATCH =====
 
@@ -192,7 +179,6 @@ from .classifier import (
     parse_heading1,
     parse_heading2,
     parse_broken_heading2,
-    is_probable_unnumbered_heading1,
 )
 from .page_numbering import apply_page_numbering_policy
 from .page_breaks import apply_page_breaks
@@ -433,86 +419,6 @@ def canonical_reference_subheading_text(text: str):
 
     return REFERENCE_SUBHEADINGS_CANON.get(t.lower())
 
-
-
-# ===== Reference list case normalization =====
-_REF_URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
-_REF_TOKEN_RE = re.compile(r'([A-Za-zА-ЯЁа-яё]+(?:[-–—][A-Za-zА-ЯЁа-яё]+)*)')
-_REF_ACRONYM_KEEP = {
-    'ФНС', 'РФ', 'РБК', 'ТТС', 'ЭДО', 'СЭД', 'СМК', 'ГОСТ', 'ИСО', 'ЕС', 'АО', 'ООО', 'ПАО',
-    'ISO', 'IEC', 'IEEE', 'OECD', 'EU', 'USA', 'UK', 'UN', 'PDF', 'HTML', 'URL', 'DOI', 'ISBN',
-    'CRM', 'ERP', 'API', 'XML', 'JSON', 'UPD', 'B2B', 'B2G', 'B2C', 'ID', 'IT', 'AI', 'FTS',
-}
-_REF_CANONICAL_TOKEN_MAP = {
-    'EIDAS': 'eIDAS',
-    'BUSINESSTAT': 'BusinesStat',
-    'CONSULTANTPLUS': 'КонсультантПлюс',
-    'КОНСУЛЬТАНТПЛЮС': 'КонсультантПлюс',
-}
-
-def _looks_like_shouting_reference(text: str) -> bool:
-    letters = [ch for ch in text if ch.isalpha()]
-    if len(letters) < 12:
-        return False
-    uppers = sum(1 for ch in letters if ch.isupper())
-    return (uppers / len(letters)) >= 0.65
-
-def _normalize_reference_token(token: str) -> str:
-    if not token:
-        return token
-
-    upper = token.upper()
-    if upper in _REF_CANONICAL_TOKEN_MAP:
-        return _REF_CANONICAL_TOKEN_MAP[upper]
-
-    # Сохраняем общеупотребимые аббревиатуры и короткие токены с цифрами
-    if upper in _REF_ACRONYM_KEEP:
-        return upper
-    if any(ch.isdigit() for ch in token):
-        return token
-    if len(token) <= 3 and token.isupper():
-        return upper
-
-    # Полностью верхний регистр -> нормальный Title Case
-    if token.isupper():
-        if '-' in token or '–' in token or '—' in token:
-            parts = re.split(r'([-–—])', token)
-            return ''.join(_normalize_reference_token(part) if part not in '-–—' else part for part in parts)
-        low = token.lower()
-        return low[:1].upper() + low[1:]
-
-    return token
-
-def _normalize_reference_case_fragment(fragment: str) -> str:
-    return _REF_TOKEN_RE.sub(lambda m: _normalize_reference_token(m.group(0)), fragment)
-
-def smart_normalize_reference_line_case(text: str) -> str:
-    clean = clean_spaces(text)
-    if not clean:
-        return clean
-
-    m = re.match(r'^(\d+\.\s+)(.+)$', clean)
-    prefix = ''
-    body = clean
-    if m:
-        prefix, body = m.group(1), m.group(2)
-
-    if not _looks_like_shouting_reference(body):
-        return clean
-
-    urls = []
-    def _url_repl(match):
-        urls.append(match.group(0).lower())
-        return f'__REFURL{len(urls)-1}__'
-
-    body = _REF_URL_RE.sub(_url_repl, body)
-    body = _normalize_reference_case_fragment(body)
-
-    for i, url in enumerate(urls):
-        body = body.replace(f'__REFURL{i}__', url)
-
-    return f'{prefix}{body}' if prefix else body
-
 def strip_leading_heading_garbage(text: str) -> str:
     t = clean_spaces(text)
     if not t:
@@ -602,6 +508,12 @@ def is_appendix_heading_text(text: str) -> bool:
     low = clean_spaces(text).lower()
     return low in {"приложение", "приложения"}
             
+def format_empty_paragraph(paragraph):
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = ensure_empty_run(paragraph)
+    set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+
 def format_empty_paragraphs_in_body(document, body_start):
     for idx, paragraph in enumerate(document.paragraphs):
         if idx < body_start:
@@ -625,17 +537,12 @@ def format_heading1(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
     remove_paragraph_numbering(paragraph)
 
-    text = clean_spaces(paragraph.text)
-    if text:
-        replace_paragraph_text(paragraph, text.upper())
-
     set_paragraph_style_safe(paragraph, "Heading 1", "Заголовок 1")
-    clear_paragraph_outline_level(paragraph)
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, italic=False, all_caps=False)
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=True)
 
 def format_heading2(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
@@ -649,31 +556,15 @@ def format_heading2(paragraph):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
 
 def format_table_caption(paragraph):
-    text = clean_spaces(paragraph.text)
-    m = TABLE_NUM_RE.match(text)
-    if m:
-        number = m.group(1)
-        replace_paragraph_text(paragraph, f"Таблица {number}")
-
-    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
-    clear_paragraph_outline_level(paragraph)
-    remove_paragraph_numbering(paragraph)
-
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-
     for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
 
 def format_table_title(paragraph):
-    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
-    clear_paragraph_outline_level(paragraph)
-    remove_paragraph_numbering(paragraph)
-
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
@@ -924,90 +815,7 @@ def normalize_figure_caption_text(paragraph):
     title = clean_spaces(m.group(3))
     replace_paragraph_text(paragraph, f"Рис. {number}. {title}")
 
-TOC_TRAILING_PAGE_RE = re.compile(r'[\t\. ]+\d+\s*$')
 
-
-def normalize_toc_line(text: str) -> str:
-    t = clean_spaces(text.replace("\t", " "))
-    t = TOC_TRAILING_PAGE_RE.sub("", t).strip()
-    return t
-
-
-def build_toc_heading_maps(document, body_start):
-    h1_map = {}
-    h2_map = {}
-
-    if body_start is None:
-        return h1_map, h2_map
-
-    for idx, p in enumerate(document.paragraphs):
-        if idx >= body_start:
-            break
-
-        text = normalize_toc_line(p.text)
-        if not text:
-            continue
-
-        parsed_h1 = parse_heading1(text)
-        if parsed_h1 and parsed_h1["kind"] == "heading1_chapter":
-            h1_map[parsed_h1["chapter_num"]] = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
-            continue
-
-        parsed_h2 = parse_heading2(text)
-        if parsed_h2:
-            key = (parsed_h2["chapter_num"], parsed_h2["paragraph_num"])
-            h2_map[key] = f'{parsed_h2["chapter_num"]}.{parsed_h2["paragraph_num"]}. {parsed_h2["title"]}'
-
-    return h1_map, h2_map
-
-def detect_kind_from_paragraph_object(paragraph, text: str, prev_kind=None) -> str:
-    t = clean_spaces(text)
-    low = t.lower()
-
-    parsed_h1 = parse_heading1(t)
-    if parsed_h1:
-        if parsed_h1["kind"] == "heading1_exact" and low == "содержание":
-            return "toc_heading"
-        return "heading1"
-
-    if parse_heading2(t):
-        return "heading2"
-
-    if parse_broken_heading2(t):
-        return "broken_heading2"
-
-    if TABLE_NUM_RE.match(t):
-        return "table_caption"
-
-    if is_table_continuation_text(t):
-        return "table_continuation"
-
-    if FIG_RE.match(t):
-        return "figure_caption"
-
-    if re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", t, re.IGNORECASE):
-        return "source_line"
-
-    style_name = ""
-    try:
-        style_name = (paragraph.style.name or "").strip().lower()
-    except Exception:
-        style_name = ""
-
-    if style_name in {"heading 1", "заголовок 1"}:
-        return "heading1"
-
-    if style_name in {"heading 2", "заголовок 2"}:
-        return "heading2"
-
-    if is_probable_unnumbered_heading1(t):
-        return "heading1"
-
-    if prev_kind in {"table_caption", "table_continuation"}:
-        return "table_title"
-
-    return "body_text"
-    
 def split_manual_dash_lists(document, body_start):
     changed = True
     while changed:
@@ -1071,6 +879,117 @@ def split_table_captions_prepass(document, body_start):
             break
 
 
+
+
+REFERENCE_CASE_PROTECTED_TOKENS = {
+    "РФ", "ФНС", "ГОСТ", "ИСО", "ISO", "IEC", "DIN",
+    "АО", "ООО", "ПАО", "ТТС", "ЭДО", "СЭД", "УПД", "КЭП",
+    "СБИС", "РБК", "1С", "CNEWS", "RBC", "PWC", "PDF", "URL",
+    "EUR-LEX", "EIDAS", "НДС", "ФЗ",
+}
+
+REFERENCE_CASE_TOKEN_RE = re.compile(r'https?://\S+|[\wА-Яа-яЁё№%+\-./]+|[^\w\s]+|\s+', re.UNICODE)
+
+def _is_probably_all_caps_reference_text(text: str) -> bool:
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) < 12:
+        return False
+    upper = sum(1 for ch in letters if ch.isupper())
+    return upper / max(len(letters), 1) >= 0.75
+
+def _protect_reference_token(token: str) -> bool:
+    if not token or token.isspace():
+        return True
+
+    if token.startswith("http://") or token.startswith("https://"):
+        return True
+
+    normalized = token.strip("()[]{}«»\"'“”‘’.,;:!?")
+    if not normalized:
+        return True
+
+    upper_norm = normalized.upper()
+
+    if upper_norm in REFERENCE_CASE_PROTECTED_TOKENS:
+        return True
+
+    if re.search(r'\d', normalized):
+        return True
+
+    # короткие аббревиатуры и смешанные технические токены сохраняем
+    if len(normalized) <= 6 and normalized.isupper():
+        return True
+
+    if re.fullmatch(r'[A-Z][A-Z0-9\-./]*', normalized):
+        return True
+
+    return False
+
+def _capitalize_reference_fragments(text: str) -> str:
+    result = []
+    capitalize_next = True
+
+    for ch in text:
+        if capitalize_next and ch.isalpha():
+            result.append(ch.upper())
+            capitalize_next = False
+            continue
+
+        result.append(ch)
+
+        if ch in '.!?':
+            capitalize_next = True
+        elif ch == '«':
+            capitalize_next = True
+        elif ch == '—':
+            capitalize_next = True
+
+    return ''.join(result)
+
+def smart_normalize_reference_line_case(text: str) -> str:
+    clean = clean_spaces(text)
+    if not clean:
+        return clean
+
+    m = re.match(r'^(\d+\.\s+)(.+)$', clean)
+    prefix = ""
+    body = clean
+
+    if m:
+        prefix = m.group(1)
+        body = m.group(2)
+
+    if not _is_probably_all_caps_reference_text(body):
+        return clean
+
+    parts = []
+    for token in REFERENCE_CASE_TOKEN_RE.findall(body):
+        if _protect_reference_token(token):
+            parts.append(token)
+        else:
+            parts.append(token.lower())
+
+    normalized = ''.join(parts)
+    normalized = _capitalize_reference_fragments(normalized)
+
+    # частые словари/бренды, которые плохо восстанавливаются общим правилом
+    replacements = {
+        "Businesstat": "BusinesStat",
+        "Pwc": "PwC",
+        "Cnews": "CNews",
+        "Rbc": "RBC",
+        "Eidas": "eIDAS",
+        "Eur-lex": "EUR-Lex",
+        "Сбис": "СБИС",
+        "Эдо": "ЭДО",
+        "Сэд": "СЭД",
+        "Упд": "УПД",
+        "Ттс": "ТТС",
+    }
+    for bad, good in replacements.items():
+        normalized = normalized.replace(bad, good)
+
+    return f"{prefix}{normalized}"
 def convert_reference_numbering_to_plain_text(document, body_start):
     in_references = False
     ref_counter = 1
@@ -1196,7 +1115,6 @@ def compact_references_block(document, body_start):
                 normalized = clean
 
             normalized = smart_normalize_reference_line_case(normalized)
-
             if clean != normalized:
                 replace_paragraph_text(p, normalized)
 
@@ -1208,116 +1126,6 @@ def compact_references_block(document, body_start):
             p.paragraph_format.keep_together = False
             p.paragraph_format.widow_control = False
 
-def ensure_single_blank_after_references_heading(document, body_start):
-    any_changes = False
-    changed = True
-    while changed:
-        changed = False
-        paragraphs = document.paragraphs
-
-        for idx, p in enumerate(paragraphs):
-            if idx < body_start:
-                continue
-
-            text = clean_spaces(p.text)
-            if not is_references_heading_text(text):
-                continue
-
-            # гарантируем 1 пустую строку после заголовка списка
-            if idx + 1 >= len(paragraphs):
-                new_p = insert_paragraph_after(p, "")
-                format_empty_paragraph(new_p)
-                changed = True
-                any_changes = True
-                break
-
-            next_p = paragraphs[idx + 1]
-
-            if not is_empty_paragraph(next_p):
-                new_p = insert_paragraph_after(p, "")
-                format_empty_paragraph(new_p)
-                changed = True
-                any_changes = True
-                break
-
-            # если пустых строк больше одной — удаляем лишние
-            while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-                remove_paragraph(paragraphs[idx + 2])
-                paragraphs = document.paragraphs
-                changed = True
-                any_changes = True
-
-            format_empty_paragraph(next_p)
-            break
-
-    return any_changes
-    
-def ensure_single_blank_after_headings(document, body_start):
-    paragraphs = document.paragraphs
-    prev_kind = None
-    changed = False
-    in_references = False
-
-    idx = max(body_start, 0)
-
-    while idx < len(paragraphs):
-        p = paragraphs[idx]
-        text = clean_spaces(p.text)
-
-        if is_references_heading_text(text):
-            in_references = True
-        elif in_references and is_appendix_heading_text(text):
-            in_references = False
-
-        kind = classify_paragraph(text, prev_kind=prev_kind)
-        parsed_h1 = parse_heading1(text)
-
-        need_blank_after = False
-
-        # После параграфов 1.1 / 1.2 / 2.1 и т.д. нужна одна пустая строка
-        if kind == "heading2":
-            need_blank_after = True
-
-        # После ВВЕДЕНИЯ / ЗАКЛЮЧЕНИЯ / СПИСКА ИСТОЧНИКОВ нужна одна пустая строка
-        # После названий глав 1 / 2 / 3 пустая строка НЕ нужна
-        elif parsed_h1:
-            if parsed_h1["kind"] == "heading1_exact":
-                need_blank_after = True
-            elif parsed_h1["kind"] == "heading1_chapter":
-                need_blank_after = False
-
-        if not need_blank_after:
-            prev_kind = kind
-            idx += 1
-            continue
-
-        if idx + 1 >= len(paragraphs):
-            new_p = insert_paragraph_after(p, "")
-            format_empty_paragraph(new_p)
-            changed = True
-            break
-
-        next_p = paragraphs[idx + 1]
-
-        if not is_empty_paragraph(next_p):
-            new_p = insert_paragraph_after(p, "")
-            format_empty_paragraph(new_p)
-            changed = True
-            break
-
-        while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-            remove_paragraph(paragraphs[idx + 2])
-            paragraphs = document.paragraphs
-            changed = True
-
-        if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-            format_empty_paragraph(paragraphs[idx + 1])
-
-        prev_kind = kind
-        idx += 1
-
-    return changed
-    
 def collapse_empty_paragraphs_in_body(paragraphs, body_start):
     empty_count = 0
     for idx, p in enumerate(list(paragraphs)):
@@ -1454,33 +1262,47 @@ def ensure_empty_after_source_and_note(document, body_start):
 
             prev_kind = kind
             
-def ensure_one_empty_after(paragraphs, index):
-    """Ensure exactly one empty paragraph right after paragraphs[index]."""
-    if index >= len(paragraphs):
-        return False
+def ensure_single_blank_after_headings(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        prev_kind = None
 
-    changed = False
-    p = paragraphs[index]
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
 
-    if index + 1 >= len(paragraphs):
-        new_p = insert_paragraph_after(p, "")
-        format_empty_paragraph(new_p)
-        return True
+            text = clean_spaces(p.text)
+            kind = classify_paragraph(text, prev_kind=prev_kind)
 
-    next_p = paragraphs[index + 1]
-    if not is_empty_paragraph(next_p):
-        new_p = insert_paragraph_after(p, "")
-        format_empty_paragraph(new_p)
-        return True
+            if kind not in {"heading1", "heading2"}:
+                prev_kind = kind
+                continue
 
-    format_empty_paragraph(next_p)
+            # После heading1/heading2 должна быть ровно одна пустая строка
+            if idx + 1 >= len(paragraphs):
+                new_p = insert_paragraph_after(p, "")
+                format_empty_paragraph(new_p)
+                changed = True
+                break
 
-    while index + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[index + 2]):
-        remove_paragraph(paragraphs[index + 2])
-        paragraphs = p._parent.paragraphs
-        changed = True
+            next_p = paragraphs[idx + 1]
 
-    return changed
+            if not is_empty_paragraph(next_p):
+                new_p = insert_paragraph_after(p, "")
+                format_empty_paragraph(new_p)
+                changed = True
+                break
+
+            # Если пустых строк больше одной — сжимаем до одной
+            if idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+                remove_paragraph(paragraphs[idx + 2])
+                changed = True
+                break
+
+            format_empty_paragraph(next_p)
+            prev_kind = kind
 
 def ensure_empty_between_heading1_and_heading2(document, body_start):
     changed = True
@@ -1522,67 +1344,39 @@ def ensure_compact_heading2_spacing(document, body_start):
     prev_kind = None
     changed = False
     idx = max(body_start, 0)
-    in_references = False
 
     while idx < len(paragraphs):
         p = paragraphs[idx]
-        text = clean_spaces(p.text)
-
-        if is_references_heading_text(text):
-            in_references = True
-            prev_kind = "heading1"
-            idx += 1
-            continue
-
-        if in_references and is_appendix_heading_text(text):
-            in_references = False
-
-        # Внутри списка источников этот проход не должен ничего вставлять/удалять
-        if in_references:
-            prev_kind = "body_text"
-            idx += 1
-            continue
-
-        kind = classify_paragraph(text, prev_kind=prev_kind)
+        kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
 
         if kind != "heading2":
             prev_kind = kind
             idx += 1
             continue
 
+        # 1) Remove all consecutive empty paragraphs immediately before heading2.
         while idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
             remove_paragraph(paragraphs[idx - 1])
             paragraphs = document.paragraphs
             idx -= 1
             changed = True
-            
-        next_is_heading2 = False
-        if idx + 1 < len(paragraphs):
-            next_text = clean_spaces(paragraphs[idx + 1].text)
-            next_is_heading2 = classify_paragraph(next_text, prev_kind="heading2") == "heading2"
 
+        # 2) Ensure exactly one empty paragraph immediately after heading2.
+        if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
+            new_p = OxmlElement("w:p")
+            p._element.addnext(new_p)
+            paragraphs = document.paragraphs
+            changed = True
 
+        # 3) Remove extra empty paragraphs after heading2, keep only one.
+        while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+            remove_paragraph(paragraphs[idx + 2])
+            paragraphs = document.paragraphs
+            changed = True
 
-        if next_is_heading2:
-            while idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-                remove_paragraph(paragraphs[idx + 1])
-                paragraphs = document.paragraphs
-                changed = True
-        else:
-            if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
-                new_p = OxmlElement("w:p")
-                p._element.addnext(new_p)
-                paragraphs = document.paragraphs
-                changed = True
-                
-            while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-                remove_paragraph(paragraphs[idx + 2])
-                paragraphs = document.paragraphs
-                changed = True
-
-            if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-                hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
-
+        # 4) Normalize the single empty paragraph after heading2.
+        if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+            hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
 
         prev_kind = kind
         idx += 1
@@ -1730,21 +1524,9 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 format_reference_subheading(p)
 
                 if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                    # Если пустая строка стоит сразу после
-                    # "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
-                    # её сохраняем — она нужна по шаблону.
-                    if idx - 2 >= body_start:
-                        prev_prev_text = clean_spaces(paragraphs[idx - 2].text)
-                        if is_references_heading_text(prev_prev_text):
-                            pass
-                        else:
-                            remove_paragraph(paragraphs[idx - 1])
-                            changed = True
-                            break
-                    else:
-                        remove_paragraph(paragraphs[idx - 1])
-                        changed = True
-                        break
+                    remove_paragraph(paragraphs[idx - 1])
+                    changed = True
+                    break
 
                 if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
                     remove_paragraph(paragraphs[idx + 1])
@@ -1908,8 +1690,6 @@ def process_document(input_path: Path, output_path: Path):
     if body_start is None:
         raise RuntimeError("Не найден заголовок 'Введение'; файл пропущен из соображений безопасности.")
 
-    toc_h1_map, toc_h2_map = build_toc_heading_maps(doc, body_start)
-
     set_section_margins(doc)
 
     split_manual_dash_lists(doc, body_start)
@@ -1930,7 +1710,7 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         text = clean_spaces(paragraph.text)
-        kind = detect_kind_from_paragraph_object(paragraph, text, prev_kind=prev_kind)
+        kind = classify_paragraph(text, prev_kind=prev_kind)
 
         if kind == "empty_paragraph":
             prev_kind = kind
@@ -1939,59 +1719,19 @@ def process_document(input_path: Path, output_path: Path):
         parsed_h1 = parse_heading1(text)
         if parsed_h1:
             if parsed_h1["kind"] == "heading1_chapter":
-                toc_text = toc_h1_map.get(parsed_h1["chapter_num"])
-                current_text = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
-
-                if toc_text and len(current_text) < len(toc_text):
-                    replace_paragraph_text(paragraph, toc_text)
-                    text = clean_spaces(paragraph.text)
-                    parsed_h1 = parse_heading1(text)
-
                 current_chapter_num = parsed_h1["chapter_num"]
                 next_paragraph_num = 1
                 smart_repair_heading1(paragraph, text)
                 kind = "heading1"
-
             elif parsed_h1["kind"] == "heading1_exact":
                 current_chapter_num = None
                 next_paragraph_num = None
-                smart_repair_heading1(paragraph, text)
+                remove_paragraph_numbering(paragraph)
                 kind = "heading1"
-
-        parsed_h2_existing = parse_heading2(text)
-        if parsed_h2_existing:
-            toc_text = toc_h2_map.get(
-                (parsed_h2_existing["chapter_num"], parsed_h2_existing["paragraph_num"])
-            )
-            current_text = (
-                f'{parsed_h2_existing["chapter_num"]}.'
-                f'{parsed_h2_existing["paragraph_num"]}. '
-                f'{parsed_h2_existing["title"]}'
-            )
-
-            if toc_text and len(current_text) < len(toc_text):
-                replace_paragraph_text(paragraph, toc_text)
-                text = clean_spaces(paragraph.text)
-                kind = "heading2"
-
-        if kind == "broken_heading2":
-            repaired = smart_repair_broken_heading2(
-                paragraph,
-                current_chapter_num,
-                next_paragraph_num,
-            )
-            if repaired:
-                text = clean_spaces(paragraph.text)
-                kind = "heading2"
 
         if kind != "table_continuation" and (
             kind == "heading2"
-            or auto_detect_heading2(
-                paragraph,
-                current_chapter_num,
-                next_paragraph_num,
-                prev_kind,
-            )
+            or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)
             or is_likely_numbered_heading2_candidate(
                 paragraph,
                 current_chapter_num,
@@ -2011,6 +1751,16 @@ def process_document(input_path: Path, output_path: Path):
                     current_chapter_num = parsed_h2["chapter_num"]
                     next_paragraph_num = parsed_h2["paragraph_num"] + 1
 
+        if kind == "broken_heading2":
+            repaired = smart_repair_broken_heading2(
+                paragraph,
+                current_chapter_num,
+                next_paragraph_num,
+            )
+            if repaired:
+                kind = "heading2"
+                next_paragraph_num = (next_paragraph_num or 0) + 1
+
         if kind == "table_continuation":
             normalize_table_continuation_text(paragraph)
 
@@ -2020,64 +1770,35 @@ def process_document(input_path: Path, output_path: Path):
         if kind == "heading1":
             remove_paragraph_numbering(paragraph)
             format_heading1(paragraph)
-
         elif kind != "table_continuation" and (
             kind == "heading2"
-            or auto_detect_heading2(
-                paragraph,
-                current_chapter_num,
-                next_paragraph_num,
-                prev_kind,
-            )
+            or auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind)
         ):
             remove_paragraph_numbering(paragraph)
             format_heading2(paragraph)
-
         elif kind == "table_caption":
             format_table_caption(paragraph)
-
         elif kind == "table_continuation":
             format_table_caption(paragraph)
-
         elif kind == "table_title":
             format_table_title(paragraph)
-
         elif kind == "source_line":
             format_source_line(paragraph)
-
         elif kind == "reference_subheading":
-            canonical = canonical_reference_subheading_text(text)
-            if canonical:
-                replace_paragraph_text(paragraph, canonical)
             format_reference_subheading(paragraph)
-
         elif kind == "figure_caption":
             format_figure_caption(paragraph)
-
         else:
             format_body(paragraph)
 
         prev_kind = kind
 
     format_tables(doc)
-
     convert_reference_numbering_to_plain_text(doc, body_start)
-
-    run_with_pass_limit(
-        "compact_references_block",
-        compact_references_block,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "ensure_single_blank_after_references_heading",
-        ensure_single_blank_after_references_heading,
-        doc,
-        body_start,
-    )
+    compact_references_block(doc, body_start)
 
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
+
 
     run_with_pass_limit(
         "ensure_compact_heading2_spacing",
@@ -2114,6 +1835,7 @@ def process_document(input_path: Path, output_path: Path):
         body_start,
     )
 
+
     collapse_empty_paragraphs_in_body(doc.paragraphs, body_start)
 
     run_with_pass_limit(
@@ -2123,57 +1845,32 @@ def process_document(input_path: Path, output_path: Path):
         body_start,
     )
 
+    run_with_pass_limit(
+        "ensure_compact_heading2_spacing",
+        ensure_compact_heading2_spacing,
+        doc,
+        body_start,
+    )
+
     apply_page_breaks(doc, body_start)
     normalize_sections(doc)
     ensure_front_matter_layout(doc, body_start)
     apply_page_numbering_policy(doc)
+    remove_all_italic(doc)
+    
 
     doc.save(str(output_path))
-
-
 def remove_all_italic(doc):
     """
-    Убирает курсив, highlight, цвет текста и XML-заливку из всего документа.
+    Убирает курсив из всего документа
     """
-
-    def clear_run(run):
-        run.italic = False
-
-        try:
-            run.font.highlight_color = None
-        except Exception:
-            pass
-
-        try:
-            run.font.color.rgb = RGBColor(0, 0, 0)
-        except Exception:
-            pass
-
-        rPr = run._element.get_or_add_rPr()
-
-        for tag in ("w:highlight", "w:shd"):
-            node = rPr.find(qn(tag))
-            if node is not None:
-                rPr.remove(node)
-
-        color = rPr.find(qn("w:color"))
-        if color is None:
-            color = OxmlElement("w:color")
-            rPr.append(color)
-        color.set(qn("w:val"), "000000")
-
-        for attr in ("w:themeColor", "w:themeTint", "w:themeShade"):
-            qname = qn(attr)
-            if qname in color.attrib:
-                del color.attrib[qname]
-
     for p in doc.paragraphs:
         for r in p.runs:
-            clear_run(r)
+            r.italic = False
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for r in p.runs:
-                        clear_run(r)
+                        r.italic = False
