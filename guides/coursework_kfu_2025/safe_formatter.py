@@ -69,8 +69,6 @@ def enforce_structural_spacing(doc):
 
 # ===== AUTO PATCH: robust heading2 detection =====
 
-
-
 def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
     text = clean_spaces(paragraph.text)
 
@@ -574,7 +572,6 @@ def is_appendix_heading_text(text: str) -> bool:
     low = clean_spaces(text).lower()
     return low in {"приложение", "приложения"}
             
-
 def format_empty_paragraphs_in_body(document, body_start):
     for idx, paragraph in enumerate(document.paragraphs):
         if idx < body_start:
@@ -1333,8 +1330,6 @@ def ensure_empty_after_source_and_note(document, body_start):
 
             prev_kind = kind
             
-
-
 def ensure_one_empty_after(paragraphs, index):
     """Ensure exactly one empty paragraph right after paragraphs[index]."""
     if index >= len(paragraphs):
@@ -1436,9 +1431,14 @@ def ensure_compact_heading2_spacing(document, body_start):
             paragraphs = document.paragraphs
             idx -= 1
             changed = True
+            
         next_is_heading2 = False
- # Между соседними heading2 пустую строку не вставляем,
-        # иначе проход может зациклиться (вставка после первого -> удаление перед вторым).
+        if idx + 1 < len(paragraphs):
+            next_text = clean_spaces(paragraphs[idx + 1].text)
+            next_is_heading2 = classify_paragraph(next_text, prev_kind="heading2") == "heading2"
+
+
+
         if next_is_heading2:
             while idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
                 remove_paragraph(paragraphs[idx + 1])
@@ -1450,7 +1450,7 @@ def ensure_compact_heading2_spacing(document, body_start):
                 p._element.addnext(new_p)
                 paragraphs = document.paragraphs
                 changed = True
-        if idx + 1 < len(paragraphs):
+                
             while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
                 remove_paragraph(paragraphs[idx + 2])
                 paragraphs = document.paragraphs
@@ -1458,22 +1458,7 @@ def ensure_compact_heading2_spacing(document, body_start):
 
             if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
                 hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
-            next_text = clean_spaces(paragraphs[idx + 1].text)
-            next_is_heading2 = classify_paragraph(next_text, prev_kind="heading2") == "heading2"
 
-        if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
-            new_p = OxmlElement("w:p")
-            p._element.addnext(new_p)
-            paragraphs = document.paragraphs
-            changed = True
-
-        while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-            remove_paragraph(paragraphs[idx + 2])
-            paragraphs = document.paragraphs
-            changed = True
-
-        if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-            hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
 
         prev_kind = kind
         idx += 1
