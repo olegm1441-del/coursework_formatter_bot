@@ -69,21 +69,7 @@ def enforce_structural_spacing(doc):
 
 # ===== AUTO PATCH: robust heading2 detection =====
 
-def looks_like_heading2_title(text: str) -> bool:
-    t = clean_spaces(text)
-    if not t:
-        return False
 
-    if TABLE_CONTINUATION_RE.match(t):
-        return False
-
-    if t.endswith((".", ":", ";", "!", "?")):
-        return False
-
-    if len(t) > 220:
-        return False
-
-    return True
 
 def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
     text = clean_spaces(paragraph.text)
@@ -588,11 +574,6 @@ def is_appendix_heading_text(text: str) -> bool:
     low = clean_spaces(text).lower()
     return low in {"приложение", "приложения"}
             
-def format_empty_paragraph(paragraph):
-    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run = ensure_empty_run(paragraph)
-    set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
 def format_empty_paragraphs_in_body(document, body_start):
     for idx, paragraph in enumerate(document.paragraphs):
@@ -1352,40 +1333,6 @@ def ensure_empty_after_source_and_note(document, body_start):
 
             prev_kind = kind
             
-def ensure_single_blank_after_headings(doc, body_start):
-    paragraphs = doc.paragraphs
-
-    for i in range(body_start, len(paragraphs) - 1):
-        p = paragraphs[i]
-        text = clean_spaces(p.text).upper()
-
-        # Проверяем стиль
-        style_name = ""
-        try:
-            style_name = p.style.name.lower()
-        except Exception:
-            pass
-
-        is_heading1 = "heading 1" in style_name
-        is_heading2 = "heading 2" in style_name
-
-        # ----- правила -----
-
-        # параграфы (1.1, 1.2 и т.п.)
-        if is_heading2:
-            ensure_one_empty_after(paragraphs, i)
-            continue
-
-        # специальные разделы
-        if is_heading1 and text in {
-            "ВВЕДЕНИЕ",
-            "ЗАКЛЮЧЕНИЕ",
-            "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
-        }:
-            ensure_one_empty_after(paragraphs, i)
-            continue
-
-        # главы — ничего не делаем
 
 
 def ensure_one_empty_after(paragraphs, index):
