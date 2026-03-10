@@ -17,15 +17,15 @@ H2_RE = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.+?)\s*$")
 BROKEN_H2_RE = re.compile(r"^\s*\.\s+(.+?)\s*$")
 
 TABLE_CAPTION_RE = re.compile(
-    r"^\s*таблица\s+\d+(?:\.\d+){0,2}\.?\s*(?:[-—–].*)?$",
+    r"^\s*(таблица|table)\s+\d+(?:\.\d+){0,2}\.?(?:\s*(?:[-—–]\s*)?.+)?\s*$",
     re.IGNORECASE,
 )
 TABLE_CONTINUATION_RE = re.compile(
-    r"^\s*продолжение\s+таблицы",
+    r"^\s*(продолжение\s+таблицы|continuation(?:\s+of)?\s+table)\b",
     re.IGNORECASE,
 )
 FIGURE_CAPTION_RE = re.compile(
-    r"^\s*(рис\.|рисунок)\s*\d+(?:\.\d+){0,2}\s*[.\-—–]?\s+.+$",
+    r"^\s*(рис\.|рисунок|figure|fig\.)\s*\d+(?:\.\d+){0,2}\s*[.\-—–]?\s+.+$",
     re.IGNORECASE,
 )
 SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:\s*.+$", re.IGNORECASE)
@@ -46,6 +46,50 @@ def clean_spaces(text: str) -> str:
 def paragraph_text(paragraph) -> str:
     return clean_spaces(paragraph.text)
 
+
+def is_table_continuation_line(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t:
+        return False
+
+    if len(t) > 100:
+        return False
+
+    return bool(TABLE_CONTINUATION_RE.match(t))
+
+
+
+
+def is_probable_numbered_heading1_title(title: str) -> bool:
+    t = clean_spaces(title)
+    if not t:
+        return False
+
+    if len(t) > 140:
+        return False
+
+    if t.endswith((".", ":", ";", "!", "?")):
+        return False
+
+    if re.search(r"\.{2,}", t):
+        return False
+
+    if re.search(r"\d{1,4}\s*$", t):
+        return False
+
+    if t.count(".") >= 2:
+        return False
+
+    if re.search(r"\(\d{1,3}\)\s*$", t):
+        return False
+
+    if " - " in t or " — " in t or " – " in t:
+        return False
+
+    if TABLE_CAPTION_RE.match(t) or is_table_continuation_line(t) or FIGURE_CAPTION_RE.match(t):
+        return False
+
+    return True
 
 def find_body_start_index(document):
     for idx, p in enumerate(document.paragraphs):
@@ -72,7 +116,7 @@ def parse_heading1(text: str):
     m = NORMALIZED_H1_RE.match(t)
     if m:
         title = clean_spaces(m.group(2))
-        if title:
+        if title and is_probable_numbered_heading1_title(title):
             return {
                 "kind": "heading1_chapter",
                 "chapter_num": int(m.group(1)),
@@ -121,7 +165,7 @@ def classify_paragraph(text: str, prev_kind=None) -> str:
     if TABLE_CAPTION_RE.match(t):
         return "table_caption"
 
-    if TABLE_CONTINUATION_RE.match(t):
+    if is_table_continuation_line(t):
         return "table_continuation"
 
     if FIGURE_CAPTION_RE.match(t):
