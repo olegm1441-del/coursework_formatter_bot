@@ -86,20 +86,47 @@ def looks_like_heading2_title(text: str) -> bool:
     return True
 
 def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
+    if current_chapter_num is None or next_paragraph_num is None:
+        return False
+
     text = clean_spaces(paragraph.text)
+    if not text:
+        return False
 
     low = text.lower()
 
     if low.startswith("таблица "):
         return None
+        return False
     if low.startswith("рисунок "):
         return None
+        return False
     if low.startswith("рис. "):
         return None
+        return False
     if low.startswith("продолжение таблицы"):
         return None
+        return False
     if low.startswith("продолжение табл."):
         return None
+        return False
+
+    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    if TABLE_NUM_RE.match(text) or FIG_RE.match(text) or DASH_LINE_RE.match(text):
+        return False
+
+    if is_table_continuation_text(text):
+        return False
+
+    if not looks_like_heading2_title(text):
+        return False
+
+    if paragraph_has_numbering(paragraph):
+        return True
+
+    return is_probable_center_bold_heading(paragraph)
 
 # ===== END PATCH =====
 
