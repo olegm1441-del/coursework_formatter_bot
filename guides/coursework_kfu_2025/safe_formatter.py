@@ -1397,6 +1397,52 @@ def collapse_empty_paragraphs_in_body(paragraphs, body_start):
         else:
             empty_count = 0
 
+def remove_single_empty_between_body_paragraphs(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            if not is_empty_paragraph(p):
+                continue
+
+            # Ищем ближайший непустой абзац слева
+            prev_idx = idx - 1
+            while prev_idx >= body_start and is_empty_paragraph(paragraphs[prev_idx]):
+                prev_idx -= 1
+
+            # Ищем ближайший непустой абзац справа
+            next_idx = idx + 1
+            while next_idx < len(paragraphs) and is_empty_paragraph(paragraphs[next_idx]):
+                next_idx += 1
+
+            if prev_idx < body_start or next_idx >= len(paragraphs):
+                continue
+
+            prev_text = clean_spaces(paragraphs[prev_idx].text)
+            next_text = clean_spaces(paragraphs[next_idx].text)
+
+            prev_prev_kind = None
+            for j in range(body_start, prev_idx):
+                t = clean_spaces(paragraphs[j].text)
+                if not t:
+                    continue
+                prev_prev_kind = classify_paragraph(t, prev_kind=prev_prev_kind)
+
+            prev_kind = classify_paragraph(prev_text, prev_kind=prev_prev_kind)
+            next_kind = classify_paragraph(next_text, prev_kind=prev_kind)
+
+            # Удаляем только случайную пустую строку между двумя обычными абзацами текста
+            if prev_kind == "body_text" and next_kind == "body_text":
+                remove_paragraph(p)
+                changed = True
+                break
+
+    return changed
 
 def ensure_empty_after_source_and_note(document, body_start):
     changed = True
@@ -2261,6 +2307,12 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "normalize_structural_heading_spacing_v2",
         normalize_structural_heading_spacing_v2,
+        doc,
+        body_start,
+    )
+    run_with_pass_limit(
+        "remove_single_empty_between_body_paragraphs",
+        remove_single_empty_between_body_paragraphs,
         doc,
         body_start,
     )
