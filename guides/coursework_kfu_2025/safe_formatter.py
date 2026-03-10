@@ -70,20 +70,49 @@ def enforce_structural_spacing(doc):
 # ===== AUTO PATCH: robust heading2 detection =====
 
 def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, prev_kind=None):
+    if current_chapter_num is None or next_paragraph_num is None:
+        return False
+
     text = clean_spaces(paragraph.text)
+    if not text:
+        return False
 
     low = text.lower()
 
-    if low.startswith("таблица "):
-        return None
-    if low.startswith("рисунок "):
-        return None
-    if low.startswith("рис. "):
-        return None
-    if low.startswith("продолжение таблицы"):
-        return None
-    if low.startswith("продолжение табл."):
-        return None
+    forbidden_prefixes = (
+        "таблица ",
+        "рисунок ",
+        "рис. ",
+        "продолжение таблицы",
+        "продолжение табл.",
+        "источник:",
+        "составлено по:",
+        "рассчитано по:",
+        "примечание:",
+    )
+    if low.startswith(forbidden_prefixes):
+        return False
+
+    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    if is_table_continuation_text(text):
+        return False
+
+    if not looks_like_heading2_title(text):
+        return False
+
+    if paragraph_has_numbering(paragraph):
+        return True
+
+    if is_probable_center_bold_heading(paragraph):
+        return True
+
+    # Частый кейс: сразу после главы идёт подпункт, но Word потерял номер
+    if prev_kind in {"heading1", "empty_paragraph"}:
+        return True
+
+    return False
 
 # ===== END PATCH =====
 
@@ -883,6 +912,41 @@ def normalize_figure_caption_text(paragraph):
     title = clean_spaces(m.group(3))
     replace_paragraph_text(paragraph, f"Рис. {number}. {title}")
 
+TOC_TRAILING_PAGE_RE = re.compile(r'[\t\. ]+\d+\s*$')
+
+
+def normalize_toc_line(text: str) -> str:
+    t = clean_spaces(text.replace("\t", " "))
+    t = TOC_TRAILING_PAGE_RE.sub("", t).strip()
+    return t
+
+
+def build_toc_heading_maps(document, body_start):
+    h1_map = {}
+    h2_map = {}
+
+    if body_start is None:
+        return h1_map, h2_map
+
+    for idx, p in enumerate(document.paragraphs):
+        if idx >= body_start:
+            break
+
+        text = normalize_toc_line(p.text)
+        if not text:
+            continue
+
+        parsed_h1 = parse_heading1(text)
+        if parsed_h1 and parsed_h1["kind"] == "heading1_chapter":
+            h1_map[parsed_h1["chapter_num"]] = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
+            continue
+
+        parsed_h2 = parse_heading2(text)
+        if parsed_h2:
+            key = (parsed_h2["chapter_num"], parsed_h2["paragraph_num"])
+            h2_map[key] = f'{parsed_h2["chapter_num"]}.{parsed_h2["paragraph_num"]}. {parsed_h2["title"]}'
+
+    return h1_map, h2_map
 
 def split_manual_dash_lists(document, body_start):
     changed = True
@@ -1781,6 +1845,7 @@ def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
 
     body_start = find_body_start_index(doc)
+    toc_h1_map, toc_h2_map = build_toc_heading_maps(doc, body_start)
     if body_start is None:
         raise RuntimeError("Не найден заголовок 'Введение'; файл пропущен из соображений безопасности.")
 
