@@ -157,6 +157,8 @@ def fail_request(
     silent_fail: bool = False,
 ) -> None:
     db = SessionLocal()
+    effective_silent_fail = bool(silent_fail)
+
     try:
         request = (
             db.query(FormattingRequest)
@@ -167,13 +169,14 @@ def fail_request(
             request.status = "failed"
             request.error_message = (error_text or "")[:1000]
             request.completed_at = utcnow_naive()
+            effective_silent_fail = effective_silent_fail or bool(request.silent_fail)
             db.commit()
     finally:
         db.close()
 
     services.refund_one_credit_in_new_session(user_id, str(request_id))
 
-    if bot_token and telegram_id and not silent_fail:
+    if bot_token and telegram_id and not effective_silent_fail:
         notify_failure(bot_token, telegram_id)
 
 
@@ -427,7 +430,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             if request:
                 user = db.query(User).filter(User.id == request.user_id).first()
                 telegram_id = user.telegram_id if user else None
-                 silent_fail = bool(request.silent_fail)
+                silent_fail = bool(request.silent_fail)
 
             if user_id is not None:
                 fail_request(
@@ -459,7 +462,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             telegram_id = None
 
             silent_fail = False
-            
+
             if request:
                 user = db.query(User).filter(User.id == request.user_id).first()
                 telegram_id = user.telegram_id if user else None
