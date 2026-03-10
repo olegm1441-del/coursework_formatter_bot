@@ -948,6 +948,34 @@ def build_toc_heading_maps(document, body_start):
 
     return h1_map, h2_map
 
+def detect_kind_from_paragraph_object(paragraph, text: str, prev_kind=None) -> str:
+    style_name = ""
+    try:
+        style_name = (paragraph.style.name or "").strip().lower()
+    except Exception:
+        style_name = ""
+
+    if style_name in {"heading 1", "заголовок 1"}:
+        return "heading1"
+
+    if style_name in {"heading 2", "заголовок 2"}:
+        return "heading2"
+
+    if is_probable_center_bold_heading(paragraph):
+        if parse_heading2(text) or parse_broken_heading2(text):
+            return "heading2"
+        if parse_heading1(text):
+            return "heading1"
+        if clean_spaces(text).upper() in {
+            "ВВЕДЕНИЕ",
+            "ЗАКЛЮЧЕНИЕ",
+            "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+            "СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ",
+        }:
+            return "heading1"
+
+    return classify_paragraph(text, prev_kind=prev_kind)
+    
 def split_manual_dash_lists(document, body_start):
     changed = True
     while changed:
@@ -1869,7 +1897,7 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         text = clean_spaces(paragraph.text)
-        kind = classify_paragraph(text, prev_kind=prev_kind)
+        kind = detect_kind_from_paragraph_object(paragraph, text, prev_kind=prev_kind)
 
         if kind == "empty_paragraph":
             prev_kind = kind
@@ -1878,15 +1906,38 @@ def process_document(input_path: Path, output_path: Path):
         parsed_h1 = parse_heading1(text)
         if parsed_h1:
             if parsed_h1["kind"] == "heading1_chapter":
+                toc_text = toc_h1_map.get(parsed_h1["chapter_num"])
+                current_text = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
+                if toc_text and len(current_text) < len(toc_text):
+                    replace_paragraph_text(paragraph, toc_text)
+                    text = clean_spaces(paragraph.text)
+                    parsed_h1 = parse_heading1(text)
+
                 current_chapter_num = parsed_h1["chapter_num"]
                 next_paragraph_num = 1
                 smart_repair_heading1(paragraph, text)
                 kind = "heading1"
-            elif parsed_h1["kind"] == "heading1_exact":
-                current_chapter_num = None
-                next_paragraph_num = None
-                remove_paragraph_numbering(paragraph)
-                kind = "heading1"
+
+    elif parsed_h1["kind"] == "heading1_exact":
+        current_chapter_num = None
+        next_paragraph_num = None
+        remove_paragraph_numbering(paragraph)
+        kind = "heading1"
+
+        parsed_h2_existing = parse_heading2(text)
+        if parsed_h2_existing:
+            toc_text = toc_h2_map.get(
+                (parsed_h2_existing["chapter_num"], parsed_h2_existing["paragraph_num"])
+            )
+            current_text = (
+                f'{parsed_h2_existing["chapter_num"]}.'
+                f'{parsed_h2_existing["paragraph_num"]}. '
+                f'{parsed_h2_existing["title"]}'
+            )
+            if toc_text and len(current_text) < len(toc_text):
+                replace_paragraph_text(paragraph, toc_text)
+                text = clean_spaces(paragraph.text)
+                kind = "heading2"
 
         if kind != "table_continuation" and (
             kind == "heading2"
