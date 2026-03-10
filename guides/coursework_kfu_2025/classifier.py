@@ -135,9 +135,15 @@ def is_probable_numbered_heading1_title(title: str) -> bool:
 
     return True
 
+def is_intro_heading_text(text: str) -> bool:
+    t = clean_spaces(text).lower()
+    t = t.rstrip(".")
+    return t == INTRO_HEADING
+
+
 def find_body_start_index(document):
     for idx, p in enumerate(document.paragraphs):
-        if paragraph_text(p).lower() == INTRO_HEADING:
+        if is_intro_heading_text(paragraph_text(p)):
             return idx
     return None
 
