@@ -1918,11 +1918,11 @@ def process_document(input_path: Path, output_path: Path):
                 smart_repair_heading1(paragraph, text)
                 kind = "heading1"
 
-    elif parsed_h1["kind"] == "heading1_exact":
-        current_chapter_num = None
-        next_paragraph_num = None
-        remove_paragraph_numbering(paragraph)
-        kind = "heading1"
+            elif parsed_h1["kind"] == "heading1_exact":
+                current_chapter_num = None
+                next_paragraph_num = None
+                remove_paragraph_numbering(paragraph)
+                kind = "heading1"
 
         parsed_h2_existing = parse_heading2(text)
         if parsed_h2_existing:
