@@ -31,23 +31,6 @@ FIGURE_CAPTION_RE = re.compile(
 SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:\s*.+$", re.IGNORECASE)
 
 
-INTRO_FALLBACK_RE = re.compile(r"^\s*(?:\d+\.\s*)?введение(?:\s*[.…·•\-_]+\s*\d{1,3})?\s*$", re.IGNORECASE)
-
-
-def is_intro_heading_candidate(text: str) -> bool:
-    t = clean_spaces(text)
-    if not t:
-        return False
-
-    low = t.lower()
-    if low == INTRO_HEADING:
-        return True
-
-    if TABLE_CAPTION_RE.match(t) or is_table_continuation_line(t) or FIGURE_CAPTION_RE.match(t):
-        return False
-
-    return bool(INTRO_FALLBACK_RE.match(t))
-
 
 def clean_spaces(text: str) -> str:
     if text is None:
@@ -77,6 +60,49 @@ def is_table_continuation_line(text: str) -> bool:
 
 
 
+
+
+
+def is_probable_unnumbered_heading1(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t:
+        return False
+
+    if len(t) < 5 or len(t) > 90:
+        return False
+
+    if any(ch in t for ch in (":", ";", "?", "!")):
+        return False
+
+    if t.endswith((".", ",")):
+        return False
+
+    if TABLE_CAPTION_RE.match(t) or is_table_continuation_line(t) or FIGURE_CAPTION_RE.match(t):
+        return False
+
+    if SOURCE_LINE_RE.match(t):
+        return False
+
+    if re.search(r"\d{2,}", t):
+        return False
+
+    words = t.split()
+    if len(words) > 9:
+        return False
+
+    letters = [ch for ch in t if ch.isalpha()]
+    if not letters:
+        return False
+
+    first_alpha = next((ch for ch in t if ch.isalpha()), "")
+    if first_alpha and first_alpha.islower():
+        return False
+
+    upper_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
+    if upper_ratio < 0.7:
+        return False
+
+    return True
 
 def is_probable_numbered_heading1_title(title: str) -> bool:
     t = clean_spaces(title)
@@ -110,62 +136,9 @@ def is_probable_numbered_heading1_title(title: str) -> bool:
     return True
 
 def find_body_start_index(document):
-    paragraphs = document.paragraphs
-
-    # 1) Строгое совпадение (базовый безопасный путь)
-    for idx, p in enumerate(paragraphs):
+    for idx, p in enumerate(document.paragraphs):
         if paragraph_text(p).lower() == INTRO_HEADING:
             return idx
-
-    # 2) Нормализованные варианты: "1. Введение", "Введение ... 3" и т.п.
-    for idx, p in enumerate(paragraphs):
-        if is_intro_heading_candidate(paragraph_text(p)):
-            return idx
-
-    # 3) Безопасный fallback: после содержания, если далее есть явные структурные сигналы
-    toc_idx = None
-    for idx, p in enumerate(paragraphs):
-        low = paragraph_text(p).lower()
-        if low == "содержание" or "содержан" in low:
-            toc_idx = idx
-            break
-
-    if toc_idx is None:
-        return None
-
-    for idx in range(toc_idx + 1, len(paragraphs)):
-        t = paragraph_text(paragraphs[idx])
-        if not t:
-            continue
-
-        if not is_intro_heading_candidate(t):
-            continue
-
-        scan_end = min(len(paragraphs), idx + 80)
-        has_next_structure = False
-
-        for j in range(idx + 1, scan_end):
-            tt = paragraph_text(paragraphs[j])
-            if not tt:
-                continue
-
-            low = tt.lower()
-            if low in {"заключение", "список использованных источников", "список использованной литературы"}:
-                has_next_structure = True
-                break
-
-            parsed_h1 = parse_heading1(tt)
-            if parsed_h1 and parsed_h1.get("kind") == "heading1_chapter":
-                has_next_structure = True
-                break
-
-            if parse_heading2(tt):
-                has_next_structure = True
-                break
-
-        if has_next_structure:
-            return idx
-
     return None
 
 
@@ -253,6 +226,9 @@ def classify_paragraph(text: str, prev_kind=None) -> str:
 
     if parse_heading2(t):
         return "heading2"
+
+    if is_probable_unnumbered_heading1(t):
+        return "heading1"
 
     if parse_broken_heading2(t):
         return "broken_heading2"
