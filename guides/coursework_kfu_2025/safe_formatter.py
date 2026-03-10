@@ -192,7 +192,6 @@ from .classifier import (
     parse_heading1,
     parse_heading2,
     parse_broken_heading2,
-    is_probable_unnumbered_heading1,
 )
 from .page_numbering import apply_page_numbering_policy
 from .page_breaks import apply_page_breaks
@@ -525,23 +524,26 @@ def strip_leading_heading_garbage(text: str) -> str:
     t = clean_spaces(t)
     return t
 
-def auto_detect_numbered_heading1(paragraph, current_chapter_num=None):
+def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_paragraph=None):
     text = clean_spaces(paragraph.text)
     if not text:
         return False
 
-    # Если уже распозналось обычным способом — ничего не делаем
+    low = text.lower()
+
+    # Уже распознанный heading1 не трогаем
     if parse_heading1(text):
         return False
 
-    # Заголовок первого уровня не должен быть подписью таблицы/рисунка
-    low = text.lower()
+    # Не трогаем подписи таблиц/рисунков и служебные строки
     forbidden_prefixes = (
         "таблица",
         "табл.",
         "рисунок",
         "рис.",
         "источник:",
+        "составлено по:",
+        "рассчитано по:",
         "примечание:",
         "продолжение таблицы",
         "продолжение табл.",
@@ -549,23 +551,33 @@ def auto_detect_numbered_heading1(paragraph, current_chapter_num=None):
     if low.startswith(forbidden_prefixes):
         return False
 
-    # Нужен именно Word numbering / auto-numbering
+    # Нужна именно Word-автонумерация / numbering
     if not paragraph_has_numbering(paragraph):
         return False
 
-    # Ограничения по длине как ты и просил
-    words = text.split()
-    word_limit = 12 if "." in text else 15
-    if len(words) < 1 or len(words) > word_limit:
+    # Если это уже похоже на heading2, не считаем heading1
+    if parse_heading2(text) or parse_broken_heading2(text):
         return False
 
     # Запрещённые финальные знаки
     if text.endswith((":", ";", "?", "!")):
         return False
 
-    # Если это уже похоже на heading2, не считаем heading1
-    if parse_heading2(text) or parse_broken_heading2(text):
+    words = text.split()
+    word_limit = 12 if "." in text else 15
+    if len(words) < 1 or len(words) > word_limit:
         return False
+
+    # Если следующий абзац тоже numbered и тоже короткий,
+    # это больше похоже на список, а не на heading1
+    if next_paragraph is not None:
+        next_text = clean_spaces(next_paragraph.text)
+        if next_text and paragraph_has_numbering(next_paragraph):
+            if not parse_heading1(next_text) and not parse_heading2(next_text):
+                next_words = next_text.split()
+                next_limit = 12 if "." in next_text else 15
+                if 1 <= len(next_words) <= next_limit and not next_text.endswith((":", ";", "?", "!")):
+                    return False
 
     return True
     
@@ -2131,7 +2143,11 @@ def process_document(input_path: Path, output_path: Path):
             "source_line",
             "reference_subheading",
         }:
-            if auto_detect_numbered_heading1(paragraph):
+            if auto_detect_numbered_heading1(
+                paragraph,
+                current_chapter_num=current_chapter_num,
+                next_paragraph=paragraphs[idx + 1] if idx + 1 < len(paragraphs) else None,
+            ):
                 inferred_chapter_num = 1 if current_chapter_num is None else current_chapter_num + 1
                 heading_text = clean_spaces(paragraph.text)
                 replace_paragraph_text(paragraph, f"{inferred_chapter_num}. {heading_text}")
