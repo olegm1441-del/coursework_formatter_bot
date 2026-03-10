@@ -17,7 +17,7 @@ from models import Document, FormattingRequest, User
 import services
 
 
-FORMAT_TIMEOUT_SECONDS = 60
+FORMAT_TIMEOUT_SECONDS = 180
 STALE_PROCESSING_SECONDS = 5 * 60
 POLL_INTERVAL_SECONDS = 2
 EMPTY_POLLS_LOG_EVERY = 45
