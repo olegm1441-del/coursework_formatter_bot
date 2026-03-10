@@ -154,6 +154,7 @@ def fail_request(
     error_text: str,
     bot_token: str | None = None,
     telegram_id: int | None = None,
+    silent_fail: bool = False,
 ) -> None:
     db = SessionLocal()
     try:
@@ -172,7 +173,7 @@ def fail_request(
 
     services.refund_one_credit_in_new_session(user_id, str(request_id))
 
-    if bot_token and telegram_id:
+    if bot_token and telegram_id and not silent_fail:
         notify_failure(bot_token, telegram_id)
 
 
@@ -208,7 +209,7 @@ def reclaim_stale_processing_requests(bot_token: str) -> int:
 
             services.refund_one_credit_in_new_session(request.user_id, str(request.id))
 
-            if user:
+            if user and not request.silent_fail:
                 notify_failure(bot_token, user.telegram_id)
 
             logger.warning(
@@ -307,6 +308,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 request_id=request_id,
                 user_id=request.user_id,
                 error_text="User not found",
+                silent_fail=bool(request.silent_fail),
             )
             return False
 
@@ -317,6 +319,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 error_text="Document not found",
                 bot_token=bot_token,
                 telegram_id=user.telegram_id,
+                silent_fail=bool(request.silent_fail),
             )
             return False
 
@@ -333,6 +336,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 error_text=f"Input file not found: {input_path}",
                 bot_token=bot_token,
                 telegram_id=user.telegram_id,
+                silent_fail=bool(request.silent_fail),
             )
             return False
 
@@ -418,9 +422,12 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             user_id = request.user_id if request else None
             telegram_id = None
 
+            silent_fail = False
+
             if request:
                 user = db.query(User).filter(User.id == request.user_id).first()
                 telegram_id = user.telegram_id if user else None
+                 silent_fail = bool(request.silent_fail)
 
             if user_id is not None:
                 fail_request(
@@ -429,6 +436,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                     error_text=str(e),
                     bot_token=bot_token,
                     telegram_id=telegram_id,
+                    silent_fail=silent_fail,
                 )
         except Exception:
             logger.exception("timeout_fail_request_failed request_id=%s", request_id)
@@ -450,9 +458,12 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             user_id = request.user_id if request else None
             telegram_id = None
 
+            silent_fail = False
+            
             if request:
                 user = db.query(User).filter(User.id == request.user_id).first()
                 telegram_id = user.telegram_id if user else None
+                silent_fail = bool(request.silent_fail)
 
             if user_id is not None:
                 fail_request(
@@ -461,6 +472,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                     error_text=str(e),
                     bot_token=bot_token,
                     telegram_id=telegram_id,
+                    silent_fail=silent_fail,
                 )
         except Exception:
             logger.exception("generic_fail_request_failed request_id=%s", request_id)
