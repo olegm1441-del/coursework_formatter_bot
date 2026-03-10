@@ -914,75 +914,7 @@ def is_likely_numbered_heading2_candidate(paragraph, current_chapter_num, next_p
 
     return True
 
-def auto_detect_report_heading1(paragraph, prev_kind=None, current_chapter_num=None):
-    text = clean_spaces(paragraph.text)
-    if not text:
-        return False
 
-    low = text.lower()
-
-    # Уже распознанные заголовки не трогаем
-    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
-        return False
-
-    # После начала нормальной numbered-структуры это правило выключаем,
-    # чтобы не мешать обычным курсовым
-    if current_chapter_num is not None:
-        return False
-
-    # Не трогаем подписи таблиц/рисунков и служебные строки
-    if low in {"таблица", "табл."}:
-        return False
-
-    forbidden_prefixes = (
-        "таблица",
-        "табл.",
-        "рисунок",
-        "рис.",
-        "источник:",
-        "составлено по:",
-        "рассчитано по:",
-        "примечание:",
-        "продолжение таблицы",
-        "продолжение табл.",
-    )
-    if low.startswith(forbidden_prefixes):
-        return False
-
-    if prev_kind in {
-        "table_caption",
-        "table_continuation",
-        "table_title",
-        "figure_caption",
-        "source_line",
-        "reference_subheading",
-    }:
-        return False
-
-    # Автонумерацию/списочную нумерацию не считаем heading1 отчёта
-    if paragraph_has_numbering(paragraph):
-        return False
-
-    # Не берём строки с запрещённым финальным знаком
-    if text.endswith((":", ";", "?", "!")):
-        return False
-
-    # Слишком короткие и слишком длинные строки отсекаем
-    if len(text) < 5 or len(text) > 180:
-        return False
-
-    words = text.split()
-    word_limit = 12 if "." in text else 15
-    if len(words) < 2 or len(words) > word_limit:
-        return False
-
-    # Не берём совсем уж похожие на обычный абзац строки
-    # (например, если первое слово начинается со строчной буквы)
-    first_alpha = next((ch for ch in text if ch.isalpha()), "")
-    if first_alpha and first_alpha.islower():
-        return False
-
-    return True
     
 def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_num):
     if current_chapter_num is None or next_paragraph_num is None:
