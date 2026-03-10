@@ -915,9 +915,7 @@ def auto_detect_report_heading1(paragraph, prev_kind=None):
     if paragraph_has_numbering(paragraph):
         return False
 
-    # Если это похоже на heading2 — не трогаем
-    if looks_like_heading2_title(text):
-        return False
+ 
 
     # Разрешаем только центрированный или уже стилизованный как heading1 текст
     style_name = ""
