@@ -235,9 +235,6 @@ def classify_paragraph(text: str, prev_kind=None) -> str:
     if parse_heading2(t):
         return "heading2"
 
-    if is_probable_unnumbered_heading1(t):
-        return "heading1"
-
     if parse_broken_heading2(t):
         return "broken_heading2"
 
