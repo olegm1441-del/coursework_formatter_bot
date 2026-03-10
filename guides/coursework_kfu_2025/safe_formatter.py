@@ -870,7 +870,70 @@ def is_likely_numbered_heading2_candidate(paragraph, current_chapter_num, next_p
 
     return True
 
+def auto_detect_report_heading1(paragraph, prev_kind=None):
+    text = clean_spaces(paragraph.text)
+    if not text:
+        return False
 
+    low = text.lower()
+
+    # Уже распознанные заголовки не трогаем
+    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    # Не трогаем подписи таблиц/рисунков и служебные строки
+    if low in {"таблица", "табл."}:
+        return False
+
+    forbidden_prefixes = (
+        "таблица",
+        "табл.",
+        "рисунок",
+        "рис.",
+        "источник:",
+        "составлено по:",
+        "рассчитано по:",
+        "примечание:",
+        "продолжение таблицы",
+        "продолжение табл.",
+    )
+    if low.startswith(forbidden_prefixes):
+        return False
+
+    if prev_kind in {"table_caption", "table_continuation", "table_title", "figure_caption", "source_line"}:
+        return False
+
+    # Если абзац слишком длинный — это почти точно не heading1
+    if len(text) < 5 or len(text) > 120:
+        return False
+
+    # Не берём строки с явной конечной пунктуацией
+    if text.endswith((".", ":", ";", "?", "!")):
+        return False
+
+    # Не берём явные подпункты / numbering
+    if paragraph_has_numbering(paragraph):
+        return False
+
+    # Если это похоже на heading2 — не трогаем
+    if looks_like_heading2_title(text):
+        return False
+
+    # Разрешаем только центрированный или уже стилизованный как heading1 текст
+    style_name = ""
+    try:
+        style_name = (paragraph.style.name or "").strip().lower()
+    except Exception:
+        style_name = ""
+
+    is_centered = paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    has_h1_style = style_name in {"heading 1", "заголовок 1"}
+
+    if not (is_centered or has_h1_style or is_probable_center_bold_heading(paragraph)):
+        return False
+
+    return True
+    
 def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_num):
     if current_chapter_num is None or next_paragraph_num is None:
         return None
@@ -2077,6 +2140,20 @@ def process_document(input_path: Path, output_path: Path):
                 if parsed_h2:
                     current_chapter_num = parsed_h2["chapter_num"]
                     next_paragraph_num = parsed_h2["paragraph_num"] + 1
+        if kind not in {
+            "heading1",
+            "heading2",
+            "table_caption",
+            "table_continuation",
+            "table_title",
+            "figure_caption",
+            "source_line",
+            "reference_subheading",
+        }:
+            if auto_detect_report_heading1(paragraph, prev_kind=prev_kind):
+                kind = "heading1"
+                current_chapter_num = None
+                next_paragraph_num = None
 
         if kind == "table_continuation":
             normalize_table_continuation_text(paragraph)
