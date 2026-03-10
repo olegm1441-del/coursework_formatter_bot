@@ -2172,6 +2172,25 @@ def process_document(input_path: Path, output_path: Path):
                 next_paragraph_num,
                 prev_kind,
             )
+            or is_likely_numbered_heading2_candidate(
+                paragraph,
+                current_chapter_num,
+                next_paragraph_num,
+                prev_kind=prev_kind,
+            )
+        ):
+            normalized_text = normalize_heading2_numbering(
+                paragraph,
+                current_chapter_num,
+                next_paragraph_num,
+            )
+            if normalized_text:
+                kind = "heading2"
+                parsed_h2 = parse_heading2(clean_spaces(paragraph.text))
+                if parsed_h2:
+                    current_chapter_num = parsed_h2["chapter_num"]
+                    next_paragraph_num = parsed_h2["paragraph_num"] + 1
+
         if kind not in {
             "heading1",
             "heading2",
