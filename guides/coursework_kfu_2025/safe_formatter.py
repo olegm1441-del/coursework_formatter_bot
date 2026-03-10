@@ -927,9 +927,13 @@ def auto_detect_report_heading1(paragraph, prev_kind=None):
     is_centered = paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
     has_h1_style = style_name in {"heading 1", "заголовок 1"}
 
-    if not (is_centered or has_h1_style or is_probable_center_bold_heading(paragraph)):
+    is_center_bold = is_probable_center_bold_heading(paragraph)
+
+    if not (has_h1_style or is_center_bold or is_centered):
         return False
 
+    if prev_kind == "body_text" and not (has_h1_style or is_center_bold):
+        return False
     return True
     
 def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_num):
