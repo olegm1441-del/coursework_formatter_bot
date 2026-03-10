@@ -192,6 +192,7 @@ from .classifier import (
     parse_heading1,
     parse_heading2,
     parse_broken_heading2,
+    is_probable_unnumbered_heading1,
 )
 from .page_numbering import apply_page_numbering_policy
 from .page_breaks import apply_page_breaks
