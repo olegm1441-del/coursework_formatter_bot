@@ -2038,6 +2038,7 @@ def process_document(input_path: Path, output_path: Path):
         normalize_simple_paragraph_spaces(paragraph)
         normalize_heading2_artifacts(paragraph)
 
+    paragraphs = doc.paragraphs
     prev_kind = None
     current_chapter_num = None
     next_paragraph_num = None
@@ -2146,7 +2147,7 @@ def process_document(input_path: Path, output_path: Path):
             if auto_detect_numbered_heading1(
                 paragraph,
                 current_chapter_num=current_chapter_num,
-                next_paragraph=paragraphs[idx + 1] if idx + 1 < len(paragraphs) else None,
+                next_paragraph=doc.paragraphs[idx + 1] if idx + 1 < len(doc.paragraphs) else None,
             ):
                 inferred_chapter_num = 1 if current_chapter_num is None else current_chapter_num + 1
                 heading_text = clean_spaces(paragraph.text)
