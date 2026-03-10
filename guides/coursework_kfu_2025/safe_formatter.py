@@ -870,7 +870,7 @@ def is_likely_numbered_heading2_candidate(paragraph, current_chapter_num, next_p
 
     return True
 
-def auto_detect_report_heading1(paragraph, prev_kind=None):
+def auto_detect_report_heading1(paragraph, prev_kind=None, current_chapter_num=None):
     text = clean_spaces(paragraph.text)
     if not text:
         return False
@@ -879,6 +879,11 @@ def auto_detect_report_heading1(paragraph, prev_kind=None):
 
     # Уже распознанные заголовки не трогаем
     if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    # После начала нормальной numbered-структуры это правило выключаем,
+    # чтобы не мешать обычным курсовым
+    if current_chapter_num is not None:
         return False
 
     # Не трогаем подписи таблиц/рисунков и служебные строки
@@ -900,40 +905,39 @@ def auto_detect_report_heading1(paragraph, prev_kind=None):
     if low.startswith(forbidden_prefixes):
         return False
 
-    if prev_kind in {"table_caption", "table_continuation", "table_title", "figure_caption", "source_line"}:
+    if prev_kind in {
+        "table_caption",
+        "table_continuation",
+        "table_title",
+        "figure_caption",
+        "source_line",
+        "reference_subheading",
+    }:
         return False
 
-    # Если абзац слишком длинный — это почти точно не heading1
-    if len(text) < 5 or len(text) > 120:
-        return False
-
-    # Не берём строки с явной конечной пунктуацией
-    if text.endswith((".", ":", ";", "?", "!")):
-        return False
-
-    # Не берём явные подпункты / numbering
+    # Автонумерацию/списочную нумерацию не считаем heading1 отчёта
     if paragraph_has_numbering(paragraph):
         return False
 
- 
-
-    # Разрешаем только центрированный или уже стилизованный как heading1 текст
-    style_name = ""
-    try:
-        style_name = (paragraph.style.name or "").strip().lower()
-    except Exception:
-        style_name = ""
-
-    is_centered = paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
-    has_h1_style = style_name in {"heading 1", "заголовок 1"}
-
-    is_center_bold = is_probable_center_bold_heading(paragraph)
-
-    if not (has_h1_style or is_center_bold or is_centered):
+    # Не берём строки с запрещённым финальным знаком
+    if text.endswith((":", ";", "?", "!")):
         return False
 
-    if prev_kind == "body_text" and not (has_h1_style or is_center_bold):
+    # Слишком короткие и слишком длинные строки отсекаем
+    if len(text) < 5 or len(text) > 180:
         return False
+
+    words = text.split()
+    word_limit = 12 if "." in text else 15
+    if len(words) < 2 or len(words) > word_limit:
+        return False
+
+    # Не берём совсем уж похожие на обычный абзац строки
+    # (например, если первое слово начинается со строчной буквы)
+    first_alpha = next((ch for ch in text if ch.isalpha()), "")
+    if first_alpha and first_alpha.islower():
+        return False
+
     return True
     
 def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_num):
