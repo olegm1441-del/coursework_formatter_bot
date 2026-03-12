@@ -409,13 +409,38 @@ def set_run_font(run, font_name=FONT_NAME, size_pt=BODY_FONT_SIZE_PT, bold=None,
             pass
 
 def set_section_margins(document):
+    # Глобально отключаем зеркальные поля на уровне settings.xml
+    try:
+        settings_el = document.settings._element
+        mirror = settings_el.find(qn("w:mirrorMargins"))
+        if mirror is not None:
+            settings_el.remove(mirror)
+    except Exception:
+        pass
+
     for section in document.sections:
         section.left_margin = Mm(LEFT_MARGIN_MM)
         section.right_margin = Mm(RIGHT_MARGIN_MM)
         section.top_margin = Mm(TOP_MARGIN_MM)
         section.bottom_margin = Mm(BOTTOM_MARGIN_MM)
 
+        # На уровне секции убираем gutter/переплёт и следы зеркалинга
+        try:
+            sectPr = section._sectPr
 
+            pgMar = sectPr.find(qn("w:pgMar"))
+            if pgMar is not None:
+                pgMar.set(qn("w:left"), str(Mm(LEFT_MARGIN_MM)._emu))
+                pgMar.set(qn("w:right"), str(Mm(RIGHT_MARGIN_MM)._emu))
+                pgMar.set(qn("w:top"), str(Mm(TOP_MARGIN_MM)._emu))
+                pgMar.set(qn("w:bottom"), str(Mm(BOTTOM_MARGIN_MM)._emu))
+                pgMar.set(qn("w:gutter"), "0")
+
+            gutter = sectPr.find(qn("w:gutter"))
+            if gutter is not None:
+                sectPr.remove(gutter)
+        except Exception:
+            pass
 def normalize_simple_paragraph_spaces(paragraph):
     if len(paragraph.runs) == 1 and "\n" not in paragraph.runs[0].text and "\v" not in paragraph.runs[0].text:
         old = paragraph.runs[0].text
@@ -423,6 +448,65 @@ def normalize_simple_paragraph_spaces(paragraph):
         if new != old:
             paragraph.runs[0].text = new
 
+QUOTE_CHARS_DOUBLE = {
+    '"',      # ASCII
+    '“', '”', # curly double
+    '„', '‟', # low/high double
+    '«', '»', # уже правильные, но учитываем в общем потоке
+    '″', '‟', '〝', '〞', '＂',
+}
+
+def _normalize_quotes_in_text_fragment(text: str, quote_state: dict) -> str:
+    """
+    Меняет все двойные кавычки на «» по принципу открытия/закрытия.
+    Не трогает одинарные апострофы и штрихи — это сознательное ограничение
+    ради безопасности обычных курсовых.
+    """
+    if not text:
+        return text
+
+    out = []
+    for ch in text:
+        if ch in QUOTE_CHARS_DOUBLE:
+            if quote_state["open"]:
+                out.append("«")
+            else:
+                out.append("»")
+            quote_state["open"] = not quote_state["open"]
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def normalize_quotes_in_paragraph_runs(paragraph, quote_state: dict):
+    """
+    Нормализует кавычки в run-ах абзаца без пересборки абзаца,
+    чтобы не ломать гиперссылки, разметку и прочую структуру Word.
+    """
+    for run in paragraph.runs:
+        old = run.text
+        new = _normalize_quotes_in_text_fragment(old, quote_state)
+        if new != old:
+            run.text = new
+
+
+def normalize_quotes_in_document(document, body_start=0):
+    """
+    Проходит по рабочей части документа последовательно сверху вниз.
+    Состояние открытия/закрытия кавычек сохраняется между абзацами.
+    """
+    quote_state = {"open": True}
+
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        normalize_quotes_in_paragraph_runs(paragraph, quote_state)
+
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    normalize_quotes_in_paragraph_runs(paragraph, quote_state)
 
 def canonical_reference_subheading_text(text: str):
     t = clean_spaces(text)
@@ -799,8 +883,44 @@ def set_cell_border(cell, color="000000", size="4", space="0"):
         element.set(qn("w:space"), space)
         element.set(qn("w:color"), color)
 
+def force_table_outer_borders_single(table, color="000000", size="4", space="0"):
+    """
+    Жестко задает таблице одинарные границы и убирает cell spacing,
+    из-за которого в Word могут визуально появляться двойные линии.
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+
+    tblBorders = tblPr.find(qn("w:tblBorders"))
+    if tblBorders is None:
+        tblBorders = OxmlElement("w:tblBorders")
+        tblPr.append(tblBorders)
+
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        element = tblBorders.find(qn(f"w:{edge}"))
+        if element is None:
+            element = OxmlElement(f"w:{edge}")
+            tblBorders.append(element)
+
+        element.set(qn("w:val"), "single")
+        element.set(qn("w:sz"), size)
+        element.set(qn("w:space"), space)
+        element.set(qn("w:color"), color)
+
+    tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
+    if tblCellSpacing is None:
+        tblCellSpacing = OxmlElement("w:tblCellSpacing")
+        tblPr.append(tblCellSpacing)
+
+    tblCellSpacing.set(qn("w:w"), "0")
+    tblCellSpacing.set(qn("w:type"), "dxa")
 
 def apply_table_borders(table):
+    force_table_outer_borders_single(table, size="4")
+
     for row in table.rows:
         for cell in row.cells:
             set_cell_border(cell, size="4")
@@ -2139,7 +2259,7 @@ def process_document(input_path: Path, output_path: Path):
 
     split_manual_dash_lists(doc, body_start)
     split_table_captions_prepass(doc, body_start)
-
+    normalize_quotes_in_document(doc, body_start or 0)
     # Преднормализация только тела работы; содержание не трогаем
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
