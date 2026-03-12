@@ -130,6 +130,8 @@ async def tribute_webhook(request: Request):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     data = await request.json()
+    logger.info("tribute_webhook_raw=%s", data)
+    logger.info("tribute_webhook_payload=%s", data.get("payload"))
     event_name = data.get("name")
     logger.info("tribute_webhook_name=%s", event_name)
 
