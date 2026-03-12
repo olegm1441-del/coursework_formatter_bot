@@ -53,9 +53,9 @@ def _resolve_tariff(
 
 def _create_payment_link(tariff_code: str) -> tuple[str | None, int]:
     if tariff_code == "three_formats":
-        return BUY3_LINK, 349
+        return BUY3_LINK, 362
     if tariff_code == "one_format":
-        return BUY1_LINK, 149
+        return BUY1_LINK, 135
     return None, 0
 
 
@@ -164,7 +164,7 @@ async def tribute_webhook(request: Request):
         )
         return {"status": "unknown_product"}
 
-    amount_rub = 349 if tariff_code == "three_formats" else 149
+    amount_rub = 362 if tariff_code == "three_formats" else 135
 
     db: Session = SessionLocal()
     try:
