@@ -213,11 +213,26 @@ async def tribute_webhook(request: Request):
 
         try:
             db.commit()
-        except IntegrityError:
+        except IntegrityError as e:
             db.rollback()
-            logger.info("payment_already_processed_by_constraint purchase_id=%s", purchase_id)
-            return {"status": "already_processed"}
+            logger.warning(
+                "payment_commit_integrity_error purchase_id=%s error=%s",
+                purchase_id,
+                e,
+            )
 
+            duplicate_payment = db.query(Payment).filter(
+                Payment.external_payment_id == str(purchase_id)
+            ).first()
+            duplicate_credit = db.query(CreditLedger).filter(
+                CreditLedger.idempotency_key == f"tribute:{purchase_id}"
+            ).first()
+
+            if duplicate_payment or duplicate_credit:
+                logger.info("payment_already_processed_by_constraint purchase_id=%s", purchase_id)
+                return {"status": "already_processed"}
+
+            raise
         balance = (
             db.query(CreditLedger)
             .filter(CreditLedger.user_id == user.id)
