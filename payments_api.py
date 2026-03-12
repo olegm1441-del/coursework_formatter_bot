@@ -4,6 +4,7 @@ import hashlib
 import logging
 from telegram import Bot
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
@@ -210,7 +211,12 @@ async def tribute_webhook(request: Request):
 
         _apply_first_payment_referral_bonus(db, user.id, paid_at)
 
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.info("payment_already_processed_by_constraint purchase_id=%s", purchase_id)
+            return {"status": "already_processed"}
 
         balance = (
             db.query(CreditLedger)
