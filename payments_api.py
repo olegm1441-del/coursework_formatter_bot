@@ -2,6 +2,8 @@ import os
 import hmac
 import hashlib
 import logging
+from telegram import Bot
+from sqlalchemy import func
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
@@ -210,6 +212,26 @@ async def tribute_webhook(request: Request):
 
         db.commit()
 
+        balance = (
+            db.query(CreditLedger)
+            .filter(CreditLedger.user_id == user.id)
+            .with_entities(func.sum(CreditLedger.amount))
+            .scalar()
+        ) or 0
+
+        try:
+            bot = Bot(token=os.getenv("BOT_TOKEN"))
+            await bot.send_message(
+                chat_id=user.telegram_id,
+                text=(
+                    f"✅ Оплата получена!\n\n"
+                    f"Начислено: {credits} оформлений.\n"
+                    f"Ваш баланс: {balance} оформлений."
+                ),
+            )
+        except Exception as e:
+            logger.error("payment_notification_failed %s", e)
+
         logger.info(
             "payment_processed purchase_id=%s user_id=%s tariff=%s credits=%s",
             purchase_id,
@@ -218,7 +240,6 @@ async def tribute_webhook(request: Request):
             credits,
         )
         return {"status": "ok"}
-
     finally:
         db.close()
 
