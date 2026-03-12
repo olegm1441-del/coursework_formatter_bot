@@ -25,7 +25,7 @@ TABLE_CONTINUATION_RE = re.compile(
     re.IGNORECASE,
 )
 FIGURE_CAPTION_RE = re.compile(
-    r"^\s*(рис\.|рисунок|figure|fig\.)\s*\d+(?:\.\d+){0,2}\s*[.\-—–]?\s+.+$",
+    r"^\s*(рис\.|рисунок|figure|fig\.)\s*\d+(?:\.\d+){0,2}(?:\s*[.\-—–]?\s+.+)?\s*$",
     re.IGNORECASE,
 )
 SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:\s*.+$", re.IGNORECASE)
