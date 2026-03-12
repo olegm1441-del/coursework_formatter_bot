@@ -29,25 +29,25 @@ def _normalize_currency(currency: str | None) -> str:
     return (currency or "").strip().upper()
 
 
-def _resolve_tariff(amount: int | None, currency: str | None, product_name: str | None = None) -> tuple[str | None, int]:
-    curr = _normalize_currency(currency)
+def _resolve_tariff(
+    amount: int | None,
+    currency: str | None,
+    product_name: str | None = None,
+    product_id: int | None = None,
+) -> tuple[str | None, int]:
+    if product_id == 109598:
+        return "one_format", 1
+    if product_id == 109599:
+        return "three_formats", 3
+
     name = (product_name or "").lower()
 
-    # Основной путь — по сумме в копейках/минимальных единицах
-    if curr == "RUB":
-        if amount == 14900:
-            return "one_format", 1
-        if amount == 34900:
-            return "three_formats", 3
-
-    # Запасной путь — по названию товара
     if "3" in name and "формат" in name:
         return "three_formats", 3
     if "формат" in name:
         return "one_format", 1
 
     return None, 0
-
 
 def _create_payment_link(tariff_code: str) -> tuple[str | None, int]:
     if tariff_code == "three_formats":
@@ -130,8 +130,6 @@ async def tribute_webhook(request: Request):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     data = await request.json()
-    logger.info("tribute_webhook_raw=%s", data)
-    logger.info("tribute_webhook_payload=%s", data.get("payload"))
     event_name = data.get("name")
     logger.info("tribute_webhook_name=%s", event_name)
 
@@ -140,6 +138,7 @@ async def tribute_webhook(request: Request):
         return {"status": "ignored"}
 
     payload = data.get("payload") or {}
+    product_id = payload.get("product_id")
 
     purchase_id = payload.get("purchase_id")
     telegram_user_id = payload.get("telegram_user_id")
@@ -152,7 +151,7 @@ async def tribute_webhook(request: Request):
         logger.info("webhook_missing_required_fields purchase_id=%s telegram_user_id=%s", purchase_id, telegram_user_id)
         return {"status": "ignored"}
 
-    tariff_code, credits = _resolve_tariff(amount, currency, product_name)
+    tariff_code, credits = _resolve_tariff(amount, currency, product_name, product_id)
     if not tariff_code:
         logger.info(
             "webhook_unknown_product purchase_id=%s amount=%s currency=%s product_name=%s",
