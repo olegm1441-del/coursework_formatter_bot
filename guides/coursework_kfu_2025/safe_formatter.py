@@ -252,7 +252,10 @@ def run_with_pass_limit(step_name, func, document, body_start):
 
 TABLE_NUM_RE = re.compile(r"^\s*таблица\s*(\d+(?:\.\d+){0,2})\.?\s*(.*?)\s*$", re.IGNORECASE)
 DASH_LINE_RE = re.compile(r"^\s*[—–\-•]\s*.+$")
-FIG_RE = re.compile(r"^\s*(рисунок|рис\.)\s*(\d+(?:\.\d+){0,2})\s*[.\-—–]?\s*(.+?)\s*$", re.IGNORECASE)
+FIG_RE = re.compile(
+    r"^\s*(рисунок|рис\.)\s*(\d+(?:\.\d+){0,2})(?:\s*[.\-—–]?\s*(.+?))?\s*$",
+    re.IGNORECASE,
+)
 HEADING2_ARTIFACT_RE = re.compile(r"^\s*[•·▪■◆►→\-–—]*\s*(\d+\.\d+\.?)\s*[•·▪■◆►→\-–—]*\s*(.+?)\s*$")
 
 TABLE_CONTINUATION_RE = re.compile(r"^\s*продолжение\s+табл(?:ицы)?\.?\s*\d+(?:\.\d+){1,2}\.?\s*$", re.IGNORECASE)
@@ -743,7 +746,7 @@ def format_source_line(paragraph):
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
     for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+        set_run_font(run, size_pt=TABLE_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
 
 def format_reference_subheading(paragraph):
     # Обязательно делаем обычным абзацем, а не заголовком
@@ -802,7 +805,58 @@ def apply_table_borders(table):
         for cell in row.cells:
             set_cell_border(cell, size="4")
 
+def force_zero_indent_in_table_paragraph(paragraph):
+    """
+    Жестко сбрасывает любые абзацные отступы внутри таблицы:
+    первая строка, левый/правый отступ, а также XML-атрибуты w:ind.
+    Это узкая функция только для абзацев внутри ячеек таблицы.
+    """
+    fmt = paragraph.paragraph_format
+    fmt.first_line_indent = Cm(0)
+    fmt.left_indent = Cm(0)
+    fmt.right_indent = Cm(0)
 
+    pPr = paragraph._element.get_or_add_pPr()
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        pPr.append(ind)
+
+    # Полностью обнуляем ключевые виды отступов Word
+    ind.set(qn("w:firstLine"), "0")
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:right"), "0")
+    ind.set(qn("w:start"), "0")
+    ind.set(qn("w:end"), "0")
+    ind.set(qn("w:hanging"), "0")
+
+
+def force_table_run_plain(run):
+    """
+    Жестко убирает жирность у run внутри таблицы.
+    Обычного run.bold = False иногда недостаточно, поэтому
+    дополнительно прибиваем XML-свойства жирности.
+    """
+    set_run_font(
+        run,
+        size_pt=TABLE_FONT_SIZE_PT,
+        bold=False,
+        italic=False,
+        all_caps=False,
+    )
+
+    run.bold = False
+    run.font.bold = False
+
+    rPr = run._element.get_or_add_rPr()
+
+    for tag in ("w:b", "w:bCs"):
+        node = rPr.find(qn(tag))
+        if node is None:
+            node = OxmlElement(tag)
+            rPr.append(node)
+        node.set(qn("w:val"), "0")
+        
 def format_tables(document):
     for table in document.tables:
         apply_table_borders(table)
@@ -811,6 +865,7 @@ def format_tables(document):
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
                     fmt = paragraph.paragraph_format
                     fmt.first_line_indent = Cm(0)
                     fmt.left_indent = Cm(0)
@@ -823,10 +878,13 @@ def format_tables(document):
                     fmt.page_break_before = False
                     fmt.widow_control = False
 
+                    # Жестко обнуляем отступы и на уровне XML тоже
+                    force_zero_indent_in_table_paragraph(paragraph)
+
                     for run in paragraph.runs:
-                        set_run_font(run, size_pt=TABLE_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
-
-
+                        # Жестко убираем жирность и нормализуем шрифт
+                        force_table_run_plain(run)
+                        
 def smart_repair_heading1(paragraph, text: str):
     cleaned = strip_leading_heading_garbage(text)
     parsed = parse_heading1(cleaned)
@@ -978,10 +1036,15 @@ def normalize_figure_caption_text(paragraph):
         return
 
     number = m.group(2)
-    title = clean_spaces(m.group(3))
-    replace_paragraph_text(paragraph, f"Рис. {number}. {title}")
+    title = clean_spaces(m.group(3) or "")
 
-TOC_TRAILING_PAGE_RE = re.compile(r'[\t\. ]+\d+\s*$')
+    if title:
+        normalized = f"Рис. {number}. {title}"
+    else:
+        normalized = f"Рис. {number}"
+
+    if text != normalized:
+        replace_paragraph_text(paragraph, normalized)
 
 
 def normalize_toc_line(text: str) -> str:
