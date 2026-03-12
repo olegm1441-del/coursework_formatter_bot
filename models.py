@@ -38,7 +38,7 @@ class Payment(Base):
     tariff_code = Column(String(100), nullable=False)
     amount_rub = Column(Integer, nullable=False)
     status = Column(String(50), nullable=False)
-    external_payment_id = Column(String(255), nullable=True)
+    external_payment_id = Column(String(255), unique=True, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     paid_at = Column(DateTime, nullable=True)
 
