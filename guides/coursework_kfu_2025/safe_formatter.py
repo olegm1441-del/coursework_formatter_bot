@@ -578,6 +578,9 @@ def center_image_paragraphs(document, body_start):
     - подписи рисунков
     - таблицы
     - текст
+
+    Возвращает True только если реально изменил выравнивание.
+    Это важно, чтобы run_with_pass_limit(...) не зацикливался.
     """
     changed = False
 
@@ -587,7 +590,10 @@ def center_image_paragraphs(document, body_start):
         if idx < body_start:
             continue
 
-        if paragraph_has_drawing(paragraph):
+        if not paragraph_has_drawing(paragraph):
+            continue
+
+        if paragraph.alignment != WD_ALIGN_PARAGRAPH.CENTER:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             changed = True
 
