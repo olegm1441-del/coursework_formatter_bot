@@ -79,30 +79,26 @@ def normalize_formula_explanation_text(text: str, is_first=False) -> str:
 def split_formula_explanations_in_paragraph(paragraph, is_first=False):
     """
     Если в одном абзаце склеены несколько расшифровок формулы через ';',
-    разбивает их на отдельные абзацы.
-
-    Пример:
-    'V- количество...; R – цена...'
-    ->
-    'V - количество...;'
-    'R – цена...'
+    разбивает их на отдельные абзацы и сохраняет финальные ';' там, где они были.
     """
     text = normalize_formula_explanation_text(paragraph.text, is_first=is_first)
     if not text:
         replace_paragraph_text(paragraph, "")
         return []
 
-    parts = [clean_spaces(x) for x in text.split(";") if clean_spaces(x)]
-    if not parts:
+    has_trailing_semicolon = text.rstrip().endswith(";")
+    raw_parts = [clean_spaces(x) for x in text.split(";") if clean_spaces(x)]
+    if not raw_parts:
         replace_paragraph_text(paragraph, text)
         return []
 
     rebuilt = []
-    for i, part in enumerate(parts):
-        if i < len(parts) - 1:
+    for i, part in enumerate(raw_parts):
+        is_last = i == len(raw_parts) - 1
+        if not is_last:
             rebuilt.append(part + ";")
         else:
-            rebuilt.append(part)
+            rebuilt.append(part + (";" if has_trailing_semicolon else ""))
 
     replace_paragraph_text(paragraph, rebuilt[0])
     inserted = []
@@ -893,69 +889,13 @@ def strip_leading_heading_garbage(text: str) -> str:
     if not t:
         return t
 
-    # Убираем ведущие маркеры/мусор, которые Word мог оставить как текст
-    t = re.sub(r'^\s*[•·▪■◆►→◦●○\-–—]+\s*', '', t)
+    # Убираем только явные маркеры-мусор Word/копипасты,
+    # но НЕ трогаем обычные -, –, —, потому что они могут быть
+    # реальными маркерами списка в основном тексте.
+    t = re.sub(r'^\s*[•·▪■◆►→◦●○]+\s*', '', t)
 
-    # Убираем лишние пробелы после очистки
     t = clean_spaces(t)
     return t
-
-def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_paragraph=None):
-    text = clean_spaces(paragraph.text)
-    if not text:
-        return False
-
-    low = text.lower()
-
-    # Уже распознанный heading1 не трогаем
-    if parse_heading1(text):
-        return False
-
-    # Не трогаем подписи таблиц/рисунков и служебные строки
-    forbidden_prefixes = (
-        "таблица",
-        "табл.",
-        "рисунок",
-        "рис.",
-        "источник:",
-        "составлено по:",
-        "рассчитано по:",
-        "примечание:",
-        "продолжение таблицы",
-        "продолжение табл.",
-    )
-    if low.startswith(forbidden_prefixes):
-        return False
-
-    # Нужна именно Word-автонумерация / numbering
-    if not paragraph_has_numbering(paragraph):
-        return False
-
-    # Если это уже похоже на heading2, не считаем heading1
-    if parse_heading2(text) or parse_broken_heading2(text):
-        return False
-
-    # Запрещённые финальные знаки
-    if text.endswith((":", ";", "?", "!")):
-        return False
-
-    words = text.split()
-    word_limit = 12 if "." in text else 15
-    if len(words) < 1 or len(words) > word_limit:
-        return False
-
-    # Если следующий абзац тоже numbered и тоже короткий,
-    # это больше похоже на список, а не на heading1
-    if next_paragraph is not None:
-        next_text = clean_spaces(next_paragraph.text)
-        if next_text and paragraph_has_numbering(next_paragraph):
-            if not parse_heading1(next_text) and not parse_heading2(next_text):
-                next_words = next_text.split()
-                next_limit = 12 if "." in next_text else 15
-                if 1 <= len(next_words) <= next_limit and not next_text.endswith((":", ";", "?", "!")):
-                    return False
-
-    return True
 
 def is_probable_body_list_item(paragraph, prev_paragraph=None, prev_kind=None):
     """
@@ -1250,6 +1190,14 @@ def set_cell_border(cell, color="000000", size="4", space="0"):
         element.set(qn("w:space"), space)
         element.set(qn("w:color"), color)
 
+def clear_cell_borders(cell):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+
+    tcBorders = tcPr.find(qn("w:tcBorders"))
+    if tcBorders is not None:
+        tcPr.remove(tcBorders)
+
 def force_table_outer_borders_single(table, color="000000", size="4", space="0"):
     """
     Жестко задает таблице одинарные границы и убирает cell spacing,
@@ -1286,11 +1234,13 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
     tblCellSpacing.set(qn("w:type"), "dxa")
 
 def apply_table_borders(table):
+    # Оставляем один источник истины для рамок — tblBorders.
+    # Иначе одновременно tblBorders + tcBorders дают визуально двойной контур.
     force_table_outer_borders_single(table, size="4")
 
     for row in table.rows:
         for cell in row.cells:
-            set_cell_border(cell, size="4")
+            clear_cell_borders(cell)
 
 def force_zero_indent_in_table_paragraph(paragraph):
     """
@@ -1750,11 +1700,11 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         format_body(paragraph)
 
 def compact_references_block(document, body_start):
-    in_references = False
     changed = True
 
     while changed:
         changed = False
+        in_references = False
         paragraphs = document.paragraphs
 
         for idx, p in enumerate(paragraphs):
@@ -2362,11 +2312,11 @@ def remove_extra_empty_after_service_lines(document, body_start):
 
 
 def cleanup_reference_subheadings_layout(document, body_start):
-    in_references = False
     changed = True
 
     while changed:
         changed = False
+        in_references = False
         paragraphs = document.paragraphs
 
         for idx, p in enumerate(paragraphs):
@@ -2398,9 +2348,6 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 format_reference_subheading(p)
 
                 if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                    # Если пустая строка стоит сразу после
-                    # "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
-                    # её сохраняем — она нужна по шаблону.
                     if idx - 2 >= body_start:
                         prev_prev_text = clean_spaces(paragraphs[idx - 2].text)
                         if is_references_heading_text(prev_prev_text):
@@ -2418,8 +2365,7 @@ def cleanup_reference_subheadings_layout(document, body_start):
                     remove_paragraph(paragraphs[idx + 1])
                     changed = True
                     break
-
-
+                    
 def format_empty_paragraph(paragraph):
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
