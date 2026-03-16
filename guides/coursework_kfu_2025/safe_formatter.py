@@ -362,7 +362,25 @@ def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, pre
         return True
 
     return False
+def auto_detect_numbered_heading1(text: str) -> bool:
+    """
+    Определяет заголовок уровня 1 вида:
+    1. ...
+    2. ...
+    3. ...
 
+    Используется для автоопределения глав.
+    """
+    if not text:
+        return False
+
+    text = text.strip()
+
+    # 1. Текст
+    if re.match(r"^\d+\.\s+[A-Za-zА-Яа-яЁё]", text):
+        return True
+
+    return False
 # ===== END PATCH =====
 
 # ===== FINAL PATCH: enforce spacing after structural headings =====
