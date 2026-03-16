@@ -362,34 +362,62 @@ def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, pre
         return True
 
     return False
-def auto_detect_numbered_heading1(text: str) -> bool:
-    """
-    Определяет заголовок уровня 1 вида:
-    1. ...
-    2. ...
-    3. ...
-
-    Используется для автоопределения глав.
-    """
+def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_paragraph=None):
+    text = clean_spaces(paragraph.text)
     if not text:
         return False
 
-    text = text.strip()
+    low = text.lower()
 
-    # 1. Текст
-    if re.match(r"^\d+\.\s+[A-Za-zА-Яа-яЁё]", text):
-        return True
+    # Уже распознанный heading1 не трогаем
+    if parse_heading1(text):
+        return False
 
-    return False
-# ===== END PATCH =====
+    # Не трогаем подписи таблиц/рисунков и служебные строки
+    forbidden_prefixes = (
+        "таблица",
+        "табл.",
+        "рисунок",
+        "рис.",
+        "источник:",
+        "составлено по:",
+        "рассчитано по:",
+        "примечание:",
+        "продолжение таблицы",
+        "продолжение табл.",
+    )
+    if low.startswith(forbidden_prefixes):
+        return False
 
-# ===== FINAL PATCH: enforce spacing after structural headings =====
+    # Нужна именно Word-автонумерация / numbering
+    if not paragraph_has_numbering(paragraph):
+        return False
 
-STRUCTURAL_HEADING_TEXTS = {
-    "ВВЕДЕНИЕ",
-    "ЗАКЛЮЧЕНИЕ",
-    "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
-}
+    # Если это уже похоже на heading2, не считаем heading1
+    if parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    # Запрещённые финальные знаки
+    if text.endswith((":", ";", "?", "!")):
+        return False
+
+    words = text.split()
+    word_limit = 12 if "." in text else 15
+    if len(words) < 1 or len(words) > word_limit:
+        return False
+
+    # Если следующий абзац тоже numbered и тоже короткий,
+    # это больше похоже на список, а не на heading1
+    if next_paragraph is not None:
+        next_text = clean_spaces(next_paragraph.text)
+        if next_text and paragraph_has_numbering(next_paragraph):
+            if not parse_heading1(next_text) and not parse_heading2(next_text):
+                next_words = next_text.split()
+                next_limit = 12 if "." in next_text else 15
+                if 1 <= len(next_words) <= next_limit and not next_text.endswith((":", ";", "?", "!")):
+                    return False
+
+    return True
 
 def is_structural_heading_paragraph(paragraph):
     t = clean_spaces(paragraph.text).upper()
