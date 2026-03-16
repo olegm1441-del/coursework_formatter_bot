@@ -1,3 +1,5 @@
+import re
+
 from docx import Document
 from docx.shared import Pt
 FORMULA_NUMBER_RE = re.compile(r"\((\d+\.\d+\.\d+|\d+\.\d+)\)\s*$")
