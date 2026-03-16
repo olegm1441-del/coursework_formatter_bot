@@ -2180,7 +2180,7 @@ def ensure_front_matter_layout(document, body_start):
     contents_idx = None
     for i in range(body_start):
         t = clean_spaces(paragraphs[i].text).upper()
-        if "СОДЕРЖАН" in t:
+        if ("СОДЕРЖАН" in t) or ("ОГЛАВЛЕН" in t):
             contents_idx = i
             break
 
