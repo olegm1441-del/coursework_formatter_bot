@@ -173,11 +173,14 @@ def _title_section(section):
 def _number_section(section, start_value=None):
     _reset_section_footer_state(section)
 
+    # Для нумеруемых секций не нужен особый футер первой страницы.
+    # Иначе Word может показывать на первой странице секции номер
+    # не с того значения, а старт (например, 3) визуально "съезжает"
+    # на следующую страницу.
+    section.different_first_page_header_footer = False
+
     if start_value is not None:
         _set_page_number_start(section, start_value)
-
-    fp = _get_single_footer_paragraph(section.first_page_footer)
-    _add_page_field_to_paragraph(fp)
 
     dp = _get_single_footer_paragraph(section.footer)
     _add_page_field_to_paragraph(dp)
