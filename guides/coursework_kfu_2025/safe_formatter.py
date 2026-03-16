@@ -60,6 +60,61 @@ def is_formula_block_paragraph_text(text: str) -> bool:
 
     return False
 
+def normalize_formula_explanation_text(text: str, is_first=False) -> str:
+    t = clean_spaces(text)
+
+    if is_first:
+        t = re.sub(r"^\s*где\s*:\s*", "где ", t, flags=re.IGNORECASE)
+        t = re.sub(r"^\s*где\s+", "где ", t, flags=re.IGNORECASE)
+
+    # Нормализуем пробелы вокруг дефиса/тире после обозначения символа:
+    # V- -> V - ; R –цена -> R – цена
+    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*-\s*", r"\1 - ", t)
+    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*–\s*", r"\1 – ", t)
+    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*—\s*", r"\1 — ", t)
+
+    return t
+
+
+def split_formula_explanations_in_paragraph(paragraph, is_first=False):
+    """
+    Если в одном абзаце склеены несколько расшифровок формулы через ';',
+    разбивает их на отдельные абзацы.
+
+    Пример:
+    'V- количество...; R – цена...'
+    ->
+    'V - количество...;'
+    'R – цена...'
+    """
+    text = normalize_formula_explanation_text(paragraph.text, is_first=is_first)
+    if not text:
+        replace_paragraph_text(paragraph, "")
+        return []
+
+    parts = [clean_spaces(x) for x in text.split(";") if clean_spaces(x)]
+    if not parts:
+        replace_paragraph_text(paragraph, text)
+        return []
+
+    rebuilt = []
+    for i, part in enumerate(parts):
+        if i < len(parts) - 1:
+            rebuilt.append(part + ";")
+        else:
+            rebuilt.append(part)
+
+    replace_paragraph_text(paragraph, rebuilt[0])
+    inserted = []
+
+    prev = paragraph
+    for extra in rebuilt[1:]:
+        new_p = insert_paragraph_after(prev, extra)
+        inserted.append(new_p)
+        prev = new_p
+
+    return inserted
+
 def format_formula_paragraph(paragraph):
     text = clean_spaces(paragraph.text)
     m = FORMULA_NUMBER_RE.search(text)
@@ -90,12 +145,8 @@ def format_formula_explanation_paragraph(paragraph, is_first=False):
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     paragraph.paragraph_format.first_line_indent = Cm(0)
 
-    text = clean_spaces(paragraph.text)
-
-    if is_first:
-        text = re.sub(r"^\s*где\s*:\s*", "где ", text, flags=re.IGNORECASE)
-        text = re.sub(r"^\s*где\s+", "где ", text, flags=re.IGNORECASE)
-        replace_paragraph_text(paragraph, text)
+    text = normalize_formula_explanation_text(paragraph.text, is_first=is_first)
+    replace_paragraph_text(paragraph, text)
 
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False)
@@ -106,6 +157,7 @@ def normalize_formula_blocks(document, body_start):
     idx = max(body_start, 0)
 
     while idx < len(paragraphs):
+        paragraphs = document.paragraphs
         p = paragraphs[idx]
         text = clean_spaces(p.text)
 
@@ -136,8 +188,10 @@ def normalize_formula_blocks(document, body_start):
                 format_empty_paragraph(paragraphs[prev_idx])
 
         # 3. Форматируем блок "где ..."
+        paragraphs = document.paragraphs
         j = idx + 1
         first_expl = True
+
         while j < len(paragraphs):
             t = clean_spaces(paragraphs[j].text)
 
@@ -145,14 +199,30 @@ def normalize_formula_blocks(document, body_start):
                 break
 
             if first_expl and is_formula_explanation_start(t):
+                inserted = split_formula_explanations_in_paragraph(paragraphs[j], is_first=True)
                 format_formula_explanation_paragraph(paragraphs[j], is_first=True)
+                for new_p in inserted:
+                    format_formula_explanation_paragraph(new_p, is_first=False)
+
+                if inserted:
+                    changed = True
+                    paragraphs = document.paragraphs
+
                 first_expl = False
-                j += 1
+                j += 1 + len(inserted)
                 continue
 
             if not first_expl and is_formula_explanation_continuation(t):
+                inserted = split_formula_explanations_in_paragraph(paragraphs[j], is_first=False)
                 format_formula_explanation_paragraph(paragraphs[j], is_first=False)
-                j += 1
+                for new_p in inserted:
+                    format_formula_explanation_paragraph(new_p, is_first=False)
+
+                if inserted:
+                    changed = True
+                    paragraphs = document.paragraphs
+
+                j += 1 + len(inserted)
                 continue
 
             break
@@ -179,7 +249,6 @@ def normalize_formula_blocks(document, body_start):
                 paragraphs = document.paragraphs
 
         idx = tail_idx + 2
-        paragraphs = document.paragraphs
 
     return changed
     
@@ -501,6 +570,28 @@ def paragraph_has_drawing(paragraph) -> bool:
         )
     )
 
+def center_image_paragraphs(document, body_start):
+    """
+    Центрирует абзацы, содержащие рисунки (drawing/pict/object).
+
+    Не трогает:
+    - подписи рисунков
+    - таблицы
+    - текст
+    """
+    changed = False
+
+    paragraphs = document.paragraphs
+
+    for idx, paragraph in enumerate(paragraphs):
+        if idx < body_start:
+            continue
+
+        if paragraph_has_drawing(paragraph):
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            changed = True
+
+    return changed
 
 def is_empty_paragraph(paragraph):
     return clean_spaces(paragraph.text) == "" and not paragraph_has_drawing(paragraph)
@@ -2705,7 +2796,12 @@ def process_document(input_path: Path, output_path: Path):
         prev_kind = kind
 
     format_tables(doc)
-
+    run_with_pass_limit(
+        "center_image_paragraphs",
+        center_image_paragraphs,
+        doc,
+        body_start,
+    )
     convert_reference_numbering_to_plain_text(doc, body_start)
 
     run_with_pass_limit(
