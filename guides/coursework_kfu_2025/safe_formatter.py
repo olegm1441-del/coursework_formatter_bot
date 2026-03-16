@@ -309,9 +309,25 @@ def replace_paragraph_text(paragraph, new_text: str):
     paragraph.add_run(new_text)
 
 
-def is_empty_paragraph(paragraph):
-    return clean_spaces(paragraph.text) == ""
+def paragraph_has_drawing(paragraph) -> bool:
+    p = paragraph._element
+    return bool(
+        p.xpath(
+            ".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"
+        )
+    )
 
+
+def is_empty_paragraph(paragraph):
+    return clean_spaces(paragraph.text) == "" and not paragraph_has_drawing(paragraph)
+
+def paragraph_has_drawing(paragraph) -> bool:
+    p = paragraph._element
+    return bool(
+        p.xpath(
+            ".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"
+        )
+    )
 
 def ensure_empty_run(paragraph):
     if not paragraph.runs:
