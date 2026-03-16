@@ -859,6 +859,65 @@ def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_para
                     return False
 
     return True
+
+def is_probable_body_list_item(paragraph, prev_paragraph=None, prev_kind=None):
+    """
+    Обычный список в тексте, который надо сохранить как список, а не
+    превращать в heading и не лишать Word-автонумерации.
+
+    Целевой кейс:
+    - перед списком абзац заканчивается двоеточием;
+    - сам пункт списка начинается со строчной буквы;
+    - у абзаца есть Word-numbering (numPr).
+    Также поддерживаем продолжение такого списка:
+    - если предыдущий непустой абзац уже был body_list_item.
+    """
+    text = clean_spaces(paragraph.text)
+    if not text:
+        return False
+
+    if not paragraph_has_numbering(paragraph):
+        return False
+
+    low = text.lower()
+
+    forbidden_prefixes = (
+        "таблица",
+        "табл.",
+        "рисунок",
+        "рис.",
+        "источник:",
+        "составлено по:",
+        "рассчитано по:",
+        "примечание:",
+        "продолжение таблицы",
+        "продолжение табл.",
+    )
+    if low.startswith(forbidden_prefixes):
+        return False
+
+    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
+        return False
+
+    if TABLE_NUM_RE.match(text) or FIG_RE.match(text) or is_table_continuation_text(text):
+        return False
+
+    # Берём первую буквенную букву, если она есть
+    first_alpha = next((ch for ch in text if ch.isalpha()), "")
+    if not first_alpha or not first_alpha.islower():
+        return False
+
+    # Продолжение уже начавшегося текстового списка
+    if prev_kind == "body_list_item":
+        return True
+
+    # Первый элемент списка сразу после двоеточия
+    if prev_paragraph is not None:
+        prev_text = clean_spaces(prev_paragraph.text)
+        if prev_text.endswith(":"):
+            return True
+
+    return False
     
 def normalize_heading2_artifacts(paragraph):
     text = clean_spaces(paragraph.text)
@@ -944,18 +1003,32 @@ def format_empty_paragraphs_in_body(document, body_start):
         if is_empty_paragraph(paragraph):
             format_empty_paragraph(paragraph)
 
-def format_body(paragraph):
+def format_body(paragraph, preserve_numbering=False):
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
-    remove_paragraph_numbering(paragraph)
 
-    hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
+    if not preserve_numbering:
+        remove_paragraph_numbering(paragraph)
+        hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
+    else:
+        # Для настоящих Word-списков не трогаем numbering и не сбрасываем
+        # list-отступы, иначе список визуально ломается.
+        remove_page_break_artifacts_from_paragraph(paragraph)
+        force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+        fmt = paragraph.paragraph_format
+        fmt.space_before = Pt(0)
+        fmt.space_after = Pt(0)
+        fmt.line_spacing = LINE_SPACING_BODY
+        fmt.keep_together = False
+        fmt.keep_with_next = False
+        fmt.page_break_before = False
+        fmt.widow_control = False
+
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
-
-
 def format_heading1(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
     remove_paragraph_numbering(paragraph)
@@ -2485,6 +2558,14 @@ def process_document(input_path: Path, output_path: Path):
             replace_paragraph_text(paragraph, text)
 
         kind = detect_kind_from_paragraph_object(paragraph, text, prev_kind=prev_kind)
+        prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
+        is_body_list_item = is_probable_body_list_item(
+            paragraph,
+            prev_paragraph=prev_paragraph_obj,
+            prev_kind=prev_kind,
+        )
+        if is_body_list_item:
+            kind = "body_list_item"
 
         parsed_h1 = parse_heading1(text)
         if parsed_h1:
@@ -2534,7 +2615,7 @@ def process_document(input_path: Path, output_path: Path):
                 text = clean_spaces(paragraph.text)
                 kind = "heading2"
 
-        if kind != "table_continuation" and (
+        if kind not in {"table_continuation", "body_list_item"} and (
             kind == "heading2"
             or auto_detect_heading2(
                 paragraph,
@@ -2564,6 +2645,7 @@ def process_document(input_path: Path, output_path: Path):
         if kind not in {
             "heading1",
             "heading2",
+            "body_list_item",
             "table_caption",
             "table_continuation",
             "table_title",
@@ -2609,7 +2691,8 @@ def process_document(input_path: Path, output_path: Path):
 
         elif kind == "source_line":
             format_source_line(paragraph)
-
+        elif kind == "body_list_item":
+            format_body(paragraph, preserve_numbering=True)
         elif kind == "reference_subheading":
             canonical = canonical_reference_subheading_text(text)
             if canonical:
@@ -2721,7 +2804,15 @@ def process_document(input_path: Path, output_path: Path):
         text = strip_leading_heading_garbage(text)
         if text != clean_spaces(paragraph.text):
             replace_paragraph_text(paragraph, text)
-
+        prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
+        if is_probable_body_list_item(
+            paragraph,
+            prev_paragraph=prev_paragraph_obj,
+            prev_kind=prev_nonempty_kind,
+        ):
+            format_body(paragraph, preserve_numbering=True)
+            prev_nonempty_kind = "body_list_item"
+            continue
         if parse_heading1(text):
             smart_repair_heading1(paragraph, text)
             format_heading1(paragraph)
