@@ -7,6 +7,11 @@ from docx.oxml.ns import qn
 TITLE_FOOTER_TEXT = "Казань – 2026 г."
 
 
+def _is_contents_heading(text: str) -> bool:
+    t = (text or "").strip().upper()
+    return ("СОДЕРЖАН" in t) or ("ОГЛАВЛЕН" in t)
+
+
 def _clear_xml_children(el):
     for child in list(el):
         el.remove(child)
@@ -200,14 +205,14 @@ def apply_page_numbering_policy(document):
     _reset_all_footer_state(document)
 
     body_texts = [p.text.strip().upper() for p in document.paragraphs]
-    has_contents = any("СОДЕРЖАН" in t for t in body_texts)
+    has_contents = any(_is_contents_heading(t) for t in body_texts)
 
     # секция 1 = титул
     _title_section(sections[0])
 
     if has_contents:
         if len(sections) >= 2:
-            _blank_section(sections[1])   # секция 2 = содержание
+            _blank_section(sections[1])   # секция 2 = содержание / оглавление
         if len(sections) >= 3:
             _number_section(sections[2], start_value=3)  # секция 3 = введение
         for section in sections[3:]:
