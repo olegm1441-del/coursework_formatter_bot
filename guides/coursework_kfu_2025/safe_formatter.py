@@ -38,6 +38,28 @@ def is_formula_explanation_continuation(text: str) -> bool:
     # строка расшифровки символов: "V - ...", "R – ..."
     return bool(re.match(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*\s*[-–—=]\s*.+$", t))
 
+def is_formula_block_paragraph_text(text: str) -> bool:
+    """
+    Возвращает True для любой строки, принадлежащей формульному блоку:
+    - сама формула с номером справа: C = V*R (1.1.1)
+    - первая строка пояснения: где C - ...
+    - продолжение пояснений: V - ..., R – ...
+    """
+    t = clean_spaces(text)
+    if not t:
+        return False
+
+    if is_formula_paragraph_text(t):
+        return True
+
+    if is_formula_explanation_start(t):
+        return True
+
+    if is_formula_explanation_continuation(t):
+        return True
+
+    return False
+
 def format_formula_paragraph(paragraph):
     text = clean_spaces(paragraph.text)
     m = FORMULA_NUMBER_RE.search(text)
@@ -1779,6 +1801,13 @@ def remove_single_empty_between_body_paragraphs(document, body_start):
             prev_text = clean_spaces(paragraphs[prev_idx].text)
             next_text = clean_spaces(paragraphs[next_idx].text)
 
+            # ВАЖНО:
+            # Не трогаем пустую строку рядом с формульным блоком.
+            # Иначе сначала normalize_formula_blocks() вставит нужный отступ,
+            # а потом этот проход его снесёт.
+            if is_formula_block_paragraph_text(prev_text) or is_formula_block_paragraph_text(next_text):
+                continue
+
             prev_prev_kind = None
             for j in range(body_start, prev_idx):
                 t = clean_spaces(paragraphs[j].text)
@@ -1796,7 +1825,6 @@ def remove_single_empty_between_body_paragraphs(document, body_start):
                 break
 
     return changed
-
 def ensure_empty_after_source_and_note(document, body_start):
     changed = True
     while changed:
