@@ -1101,15 +1101,9 @@ def format_empty_paragraphs_in_body(document, body_start):
             format_empty_paragraph(paragraph)
 
 def format_body(paragraph, preserve_numbering=False):
-    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
-    clear_paragraph_outline_level(paragraph)
-
-    if not preserve_numbering:
-        remove_paragraph_numbering(paragraph)
-        hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
-    else:
-        # Для настоящих Word-списков не трогаем numbering и не сбрасываем
-        # list-отступы, иначе список визуально ломается.
+    if preserve_numbering:
+        # Для реальных Word-списков нельзя сбрасывать стиль в Normal
+        # и нельзя трогать numbering/layout списка.
         remove_page_break_artifacts_from_paragraph(paragraph)
         force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
@@ -1122,6 +1116,17 @@ def format_body(paragraph, preserve_numbering=False):
         fmt.page_break_before = False
         fmt.widow_control = False
 
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+        for run in paragraph.runs:
+            set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+        return
+
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
     for run in paragraph.runs:
@@ -2906,6 +2911,20 @@ def process_document(input_path: Path, output_path: Path):
         text = strip_leading_heading_garbage(text)
         if text != clean_spaces(paragraph.text):
             replace_paragraph_text(paragraph, text)
+        if is_formula_paragraph_text(text):
+            format_formula_paragraph(paragraph)
+            prev_nonempty_kind = "formula"
+            continue
+
+        if is_formula_explanation_start(text):
+            format_formula_explanation_paragraph(paragraph, is_first=True)
+            prev_nonempty_kind = "formula_explanation"
+            continue
+
+        if prev_nonempty_kind in {"formula", "formula_explanation"} and is_formula_explanation_continuation(text):
+            format_formula_explanation_paragraph(paragraph, is_first=False)
+            prev_nonempty_kind = "formula_explanation"
+            continue
         prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
         if is_probable_body_list_item(
             paragraph,
