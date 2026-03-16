@@ -1,4 +1,162 @@
+FORMULA_NUMBER_RE = re.compile(r"\((\d+\.\d+\.\d+|\d+\.\d+)\)\s*$")
+FORMULA_EXPLANATION_RE = re.compile(r"^\s*где\b", re.IGNORECASE)
 
+MATH_TOKEN_RE = re.compile(r"[=+\-*/×÷^(){}\[\]<>]|[A-Za-zА-Яа-яЁё]\s*=")
+
+
+def is_formula_paragraph_text(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t:
+        return False
+
+    if not FORMULA_NUMBER_RE.search(t):
+        return False
+
+    # До номера должен быть не обычный текст, а выражение
+    left = FORMULA_NUMBER_RE.sub("", t).strip()
+    if len(left) > 120:
+        return False
+
+    # Формула должна содержать математический маркер
+    return bool(MATH_TOKEN_RE.search(left))
+
+
+def is_formula_explanation_start(text: str) -> bool:
+    return bool(FORMULA_EXPLANATION_RE.match(clean_spaces(text)))
+
+
+def is_formula_explanation_continuation(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t:
+        return False
+    if is_formula_explanation_start(t):
+        return True
+    # строка расшифровки символов: "V - ...", "R – ..."
+    return bool(re.match(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*\s*[-–—=]\s*.+$", t))
+
+def format_formula_paragraph(paragraph):
+    text = clean_spaces(paragraph.text)
+    m = FORMULA_NUMBER_RE.search(text)
+    if not m:
+        return
+
+    number = m.group(0)
+    expr = text[:m.start()].rstrip()
+
+    if expr and not expr.endswith(","):
+        expr = expr + ","
+
+    replace_paragraph_text(paragraph, f"{expr}\t{number}")
+
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+
+    tabs = paragraph.paragraph_format.tab_stops
+    tabs.clear_all()
+    tabs.add_tab_stop(Cm(16), WD_TAB_ALIGNMENT.RIGHT)
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False)
+
+def format_formula_explanation_paragraph(paragraph, is_first=False):
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+
+    text = clean_spaces(paragraph.text)
+
+    if is_first:
+        text = re.sub(r"^\s*где\s*:\s*", "где ", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*где\s+", "где ", text, flags=re.IGNORECASE)
+        replace_paragraph_text(paragraph, text)
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False)
+
+def normalize_formula_blocks(document, body_start):
+    changed = False
+    paragraphs = document.paragraphs
+    idx = max(body_start, 0)
+
+    while idx < len(paragraphs):
+        p = paragraphs[idx]
+        text = clean_spaces(p.text)
+
+        if not is_formula_paragraph_text(text):
+            idx += 1
+            continue
+
+        # 1. Форматируем строку формулы
+        format_formula_paragraph(p)
+
+        # 2. Перед формулой должна быть ровно одна пустая строка
+        if idx > body_start:
+            prev_idx = idx - 1
+            if not is_empty_paragraph(paragraphs[prev_idx]):
+                new_p = insert_paragraph_after(paragraphs[prev_idx], "")
+                format_empty_paragraph(new_p)
+                changed = True
+                paragraphs = document.paragraphs
+                idx += 1
+                p = paragraphs[idx]
+            else:
+                while prev_idx - 1 >= body_start and is_empty_paragraph(paragraphs[prev_idx - 1]):
+                    remove_paragraph(paragraphs[prev_idx - 1])
+                    changed = True
+                    paragraphs = document.paragraphs
+                    idx -= 1
+                    prev_idx -= 1
+                format_empty_paragraph(paragraphs[prev_idx])
+
+        # 3. Форматируем блок "где ..."
+        j = idx + 1
+        first_expl = True
+        while j < len(paragraphs):
+            t = clean_spaces(paragraphs[j].text)
+
+            if not t:
+                break
+
+            if first_expl and is_formula_explanation_start(t):
+                format_formula_explanation_paragraph(paragraphs[j], is_first=True)
+                first_expl = False
+                j += 1
+                continue
+
+            if not first_expl and is_formula_explanation_continuation(t):
+                format_formula_explanation_paragraph(paragraphs[j], is_first=False)
+                j += 1
+                continue
+
+            break
+
+        # 4. После формулы/пояснений должна быть ровно одна пустая строка
+        tail_idx = j - 1 if j > idx + 1 else idx
+        paragraphs = document.paragraphs
+
+        if tail_idx + 1 >= len(paragraphs):
+            new_p = insert_paragraph_after(paragraphs[tail_idx], "")
+            format_empty_paragraph(new_p)
+            changed = True
+            paragraphs = document.paragraphs
+        elif not is_empty_paragraph(paragraphs[tail_idx + 1]):
+            new_p = insert_paragraph_after(paragraphs[tail_idx], "")
+            format_empty_paragraph(new_p)
+            changed = True
+            paragraphs = document.paragraphs
+        else:
+            format_empty_paragraph(paragraphs[tail_idx + 1])
+            while tail_idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[tail_idx + 2]):
+                remove_paragraph(paragraphs[tail_idx + 2])
+                changed = True
+                paragraphs = document.paragraphs
+
+        idx = tail_idx + 2
+        paragraphs = document.paragraphs
+
+    return changed
+    
 def clear_paragraph_outline_level(paragraph):
     try:
         pPr = paragraph._element.get_or_add_pPr()
@@ -167,7 +325,7 @@ from pathlib import Path
 import re
 from copy import deepcopy
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, Cm, Mm, RGBColor, RGBColor
@@ -320,14 +478,6 @@ def paragraph_has_drawing(paragraph) -> bool:
 
 def is_empty_paragraph(paragraph):
     return clean_spaces(paragraph.text) == "" and not paragraph_has_drawing(paragraph)
-
-def paragraph_has_drawing(paragraph) -> bool:
-    p = paragraph._element
-    return bool(
-        p.xpath(
-            ".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"
-        )
-    )
 
 def ensure_empty_run(paragraph):
     if not paragraph.runs:
@@ -2442,6 +2592,13 @@ def process_document(input_path: Path, output_path: Path):
     format_tables(doc)
 
     convert_reference_numbering_to_plain_text(doc, body_start)
+
+    run_with_pass_limit(
+        "normalize_formula_blocks",
+        normalize_formula_blocks,
+        doc,
+        body_start,
+    )
 
     run_with_pass_limit(
         "compact_references_block",
