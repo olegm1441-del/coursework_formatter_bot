@@ -325,7 +325,7 @@ from pathlib import Path
 import re
 from copy import deepcopy
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, Cm, Mm, RGBColor, RGBColor
@@ -478,14 +478,6 @@ def paragraph_has_drawing(paragraph) -> bool:
 
 def is_empty_paragraph(paragraph):
     return clean_spaces(paragraph.text) == "" and not paragraph_has_drawing(paragraph)
-
-def paragraph_has_drawing(paragraph) -> bool:
-    p = paragraph._element
-    return bool(
-        p.xpath(
-            ".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"
-        )
-    )
 
 def ensure_empty_run(paragraph):
     if not paragraph.runs:
@@ -2600,6 +2592,13 @@ def process_document(input_path: Path, output_path: Path):
     format_tables(doc)
 
     convert_reference_numbering_to_plain_text(doc, body_start)
+
+    run_with_pass_limit(
+        "normalize_formula_blocks",
+        normalize_formula_blocks,
+        doc,
+        body_start,
+    )
 
     run_with_pass_limit(
         "compact_references_block",
