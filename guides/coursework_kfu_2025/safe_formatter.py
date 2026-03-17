@@ -1246,8 +1246,9 @@ def clear_cell_borders(cell):
 
 def force_table_outer_borders_single(table, color="000000", size="4", space="0"):
     """
-    Жестко задает таблице только один набор границ и убирает те XML-узлы,
-    из-за которых Word может визуально рисовать двойной внешний контур.
+    Полностью очищает table-level border XML, чтобы Word не рисовал
+    внешний/внутренний контур через tblBorders.
+    После этого рамки будут задаваться только на уровне ячеек.
     """
     tbl = table._tbl
     tblPr = tbl.tblPr
@@ -1255,8 +1256,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         tblPr = OxmlElement("w:tblPr")
         tbl.insert(0, tblPr)
 
-    # Убираем style/look-метаданные таблицы, которые Word может
-    # продолжать применять поверх наших явных tblBorders.
+    # Убираем style/look-метаданные
     for tag in (
         "w:tblStyle",
         "w:tblLook",
@@ -1267,28 +1267,18 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         if node is not None:
             tblPr.remove(node)
 
-    # Убираем table indentation, чтобы не было побочных визуальных артефактов по краям
+    # Убираем table indentation
     tblInd = tblPr.find(qn("w:tblInd"))
     if tblInd is not None:
         tblPr.remove(tblInd)
 
+    # КЛЮЧЕВОЕ:
+    # полностью убираем tblBorders, чтобы не было второго источника рамок
     tblBorders = tblPr.find(qn("w:tblBorders"))
-    if tblBorders is None:
-        tblBorders = OxmlElement("w:tblBorders")
-        tblPr.append(tblBorders)
+    if tblBorders is not None:
+        tblPr.remove(tblBorders)
 
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        element = tblBorders.find(qn(f"w:{edge}"))
-        if element is None:
-            element = OxmlElement(f"w:{edge}")
-            tblBorders.append(element)
-
-        element.set(qn("w:val"), "single")
-        element.set(qn("w:sz"), size)
-        element.set(qn("w:space"), space)
-        element.set(qn("w:color"), color)
-
-    # Жестко убираем межъячеечный spacing, который часто и дает эффект "двойной линии"
+    # Убираем межъячеечный spacing
     tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
     if tblCellSpacing is None:
         tblCellSpacing = OxmlElement("w:tblCellSpacing")
@@ -1297,8 +1287,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
     tblCellSpacing.set(qn("w:w"), "0")
     tblCellSpacing.set(qn("w:type"), "dxa")
 
-    # На всякий случай убираем исключения строк, если они есть:
-    # именно row-level exceptions иногда дают внешний контур поверх общего.
+    # Убираем row-level overrides
     for row in table.rows:
         trPr = row._tr.trPr
         if trPr is not None:
@@ -1306,28 +1295,46 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
             if tblPrEx is not None:
                 trPr.remove(tblPrEx)
 
-    # И убираем локальные границы/spacing на уровне ячеек,
-    # чтобы у таблицы остался один источник истины — tblBorders.
-    for row in table.rows:
-        for cell in row.cells:
+def apply_table_borders(table):
+    """
+    Ставим рамки ТОЛЬКО через tcBorders у ячеек.
+    Это самый стабильный вариант для Word, если tblBorders
+    визуально даёт двойной внешний контур.
+    """
+    force_table_outer_borders_single(table, size="4")
+
+    rows = table.rows
+    row_count = len(rows)
+
+    for r_idx, row in enumerate(rows):
+        col_count = len(row.cells)
+
+        for c_idx, cell in enumerate(row.cells):
             tc = cell._tc
             tcPr = tc.get_or_add_tcPr()
 
+            # Сначала чистим старые tcBorders
             tcBorders = tcPr.find(qn("w:tcBorders"))
             if tcBorders is not None:
                 tcPr.remove(tcBorders)
 
-            tcMar = tcPr.find(qn("w:tcMar"))
-            if tcMar is not None:
-                tcPr.remove(tcMar)
+            tcBorders = OxmlElement("w:tcBorders")
+            tcPr.append(tcBorders)
 
-def apply_table_borders(table):
-    # Оставляем один источник истины для рамок — tblBorders на уровне таблицы.
-    force_table_outer_borders_single(table, size="4")
+            def add_edge(edge_name):
+                edge = OxmlElement(f"w:{edge_name}")
+                edge.set(qn("w:val"), "single")
+                edge.set(qn("w:sz"), "4")
+                edge.set(qn("w:space"), "0")
+                edge.set(qn("w:color"), "000000")
+                tcBorders.append(edge)
 
-    for row in table.rows:
-        for cell in row.cells:
-            clear_cell_borders(cell)
+            # Всегда ставим все 4 стороны.
+            # Для Word это стабильнее, чем смешивать tblBorders и tcBorders.
+            add_edge("top")
+            add_edge("left")
+            add_edge("bottom")
+            add_edge("right")
             
 def force_zero_indent_in_table_paragraph(paragraph):
     """
