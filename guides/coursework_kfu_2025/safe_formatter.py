@@ -1339,16 +1339,156 @@ def force_table_run_plain(run):
             node = OxmlElement(tag)
             rPr.append(node)
         node.set(qn("w:val"), "0")
-        
+
+TABLE_PURE_NUMBER_RE = re.compile(r"^\s*\d+(?:[.,]\d+)?\s*$")
+
+
+def _normalize_table_numeric_text(text: str) -> str | None:
+    """
+    Возвращает нормализованное число как строку или None, если это не "чисто число".
+
+    Поддерживает:
+    - 10
+    - 12,3
+    - 12.3
+    - 16 000
+    - 16 000,5
+
+    Не считает числом:
+    - 8-10
+    - 7–12
+    - 8—15
+    - 12%
+    - 12 тыс.
+    - текст с буквами
+    """
+    t = clean_spaces(text)
+    if not t:
+        return None
+
+    # Убираем обычные пробелы между разрядами: 16 000 -> 16000
+    t = re.sub(r"\s+", "", t)
+
+    # Диапазоны / интервалы / "не чистое число" сразу отсекаем
+    if any(ch in t for ch in ("-", "–", "—")):
+        return None
+
+    if not re.fullmatch(r"\d+(?:[.,]\d+)?", t):
+        return None
+
+    # Для унификации внутри кода храним с точкой
+    return t.replace(",", ".")
+
+
+def _get_table_cell_text(cell) -> str:
+    parts = []
+    for p in cell.paragraphs:
+        txt = clean_spaces(p.text)
+        if txt:
+            parts.append(txt)
+    return " ".join(parts).strip()
+
+
+def _table_cell_is_pure_number(cell) -> bool:
+    return _normalize_table_numeric_text(_get_table_cell_text(cell)) is not None
+
+
+def _get_table_numeric_column_scales(table) -> dict[int, int]:
+    """
+    Для каждого столбца определяет минимально нужное число знаков после запятой,
+    которое надо применить к целым числам, если в столбце есть дробные значения.
+
+    Логика:
+    - если в столбце только целые -> scale = 0
+    - если есть 12,3 -> scale = 1
+    - если есть 12,34 -> scale = 2
+    Берём максимум фактически встреченных дробных знаков в "чистых числах".
+    """
+    scales: dict[int, int] = {}
+
+    for row in table.rows:
+        for col_idx, cell in enumerate(row.cells):
+            raw = _normalize_table_numeric_text(_get_table_cell_text(cell))
+            if raw is None:
+                continue
+
+            if "." in raw:
+                frac_len = len(raw.split(".", 1)[1])
+            else:
+                frac_len = 0
+
+            scales[col_idx] = max(scales.get(col_idx, 0), frac_len)
+
+    return scales
+
+
+def _format_table_number_for_column(text: str, scale: int) -> str | None:
+    """
+    Приводит число к нужному виду для конкретного столбца.
+    Возвращает строку с запятой как десятичным разделителем.
+    """
+    raw = _normalize_table_numeric_text(text)
+    if raw is None:
+        return None
+
+    if "." in raw:
+        int_part, frac_part = raw.split(".", 1)
+    else:
+        int_part, frac_part = raw, ""
+
+    if scale <= 0:
+        # если столбец целочисленный — убираем дробную часть только если она нулевая/отсутствует
+        if frac_part and any(ch != "0" for ch in frac_part):
+            return f"{int_part},{frac_part}"
+        return int_part
+
+    # scale > 0
+    frac_part = frac_part[:scale].ljust(scale, "0")
+    return f"{int_part},{frac_part}"
+
+
+def _replace_cell_text(cell, new_text: str) -> None:
+    """
+    Безопасная замена текста в ячейке.
+    Не трогаем структуру таблицы, только содержимое абзацев.
+    """
+    if not cell.paragraphs:
+        return
+
+    first = cell.paragraphs[0]
+    replace_paragraph_text(first, new_text)
+
+    for p in cell.paragraphs[1:]:
+        replace_paragraph_text(p, "")
+
+
+def _set_table_paragraph_alignment(paragraph, alignment) -> None:
+    paragraph.alignment = alignment
+    fmt = paragraph.paragraph_format
+    fmt.first_line_indent = Cm(0)
+    fmt.left_indent = Cm(0)
+    fmt.right_indent = Cm(0)
+    
 def format_tables(document):
     for table in document.tables:
         apply_table_borders(table)
 
-        for row in table.rows:
-            for cell in row.cells:
+        column_scales = _get_table_numeric_column_scales(table)
+
+        for row_idx, row in enumerate(table.rows):
+            for col_idx, cell in enumerate(row.cells):
+                cell_text = _get_table_cell_text(cell)
+                normalized_number = _format_table_number_for_column(
+                    cell_text,
+                    column_scales.get(col_idx, 0),
+                )
+
+                # Если это числовая ячейка не в первой строке — нормализуем текст
+                if row_idx != 0 and normalized_number is not None:
+                    _replace_cell_text(cell, normalized_number)
+
                 for paragraph in cell.paragraphs:
                     force_paragraph_xml_spacing(paragraph, line_rule="auto")
-
                     fmt = paragraph.paragraph_format
                     fmt.first_line_indent = Cm(0)
                     fmt.left_indent = Cm(0)
@@ -1361,12 +1501,25 @@ def format_tables(document):
                     fmt.page_break_before = False
                     fmt.widow_control = False
 
-                    # Жестко обнуляем отступы и на уровне XML тоже
-                    force_zero_indent_in_table_paragraph(paragraph)
+                    # Логика выравнивания:
+                    # 1) первая строка таблицы -> по центру
+                    # 2) числовые ячейки ниже -> вправо
+                    # 3) всё остальное -> по ширине
+                    if row_idx == 0:
+                        _set_table_paragraph_alignment(paragraph, WD_ALIGN_PARAGRAPH.CENTER)
+                    elif normalized_number is not None:
+                        _set_table_paragraph_alignment(paragraph, WD_ALIGN_PARAGRAPH.RIGHT)
+                    else:
+                        _set_table_paragraph_alignment(paragraph, WD_ALIGN_PARAGRAPH.JUSTIFY)
 
                     for run in paragraph.runs:
-                        # Жестко убираем жирность и нормализуем шрифт
-                        force_table_run_plain(run)
+                        set_run_font(
+                            run,
+                            size_pt=TABLE_FONT_SIZE_PT,
+                            bold=False,
+                            italic=False,
+                            all_caps=False,
+                        )
                         
 def smart_repair_heading1(paragraph, text: str):
     cleaned = strip_leading_heading_garbage(text)
