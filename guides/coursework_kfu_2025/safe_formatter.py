@@ -1517,14 +1517,81 @@ def _set_table_paragraph_alignment(paragraph, alignment) -> None:
     fmt.first_line_indent = Cm(0)
     fmt.left_indent = Cm(0)
     fmt.right_indent = Cm(0)
-    
-def format_tables(document):
-    for table in document.tables:
-        apply_table_borders(table)
+
+
+def _set_table_fixed_widths_from_grid(table):
+    """
+    Жестко переносит ширины из tblGrid в tblW и tcW,
+    чтобы Word не пересчитывал геометрию таблицы как auto.
+    Это снижает риск визуально "двойных" линий.
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        return
+
+    grid = tbl.find(qn("w:tblGrid"))
+    if grid is None:
+        return
+
+    grid_cols = grid.findall(qn("w:gridCol"))
+    if not grid_cols:
+        return
+
+    grid_widths = []
+    for gc in grid_cols:
+        w = gc.get(qn("w:w"))
         try:
-            table.autofit = False
+            grid_widths.append(int(w))
         except Exception:
-            pass
+            return
+
+    total_width = sum(grid_widths)
+
+    tblW = tblPr.find(qn("w:tblW"))
+    if tblW is None:
+        tblW = OxmlElement("w:tblW")
+        tblPr.insert(0, tblW)
+
+    tblW.set(qn("w:w"), str(total_width))
+    tblW.set(qn("w:type"), "dxa")
+
+    for row in table.rows:
+        logical_col_idx = 0
+
+        for cell in row.cells:
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+
+            grid_span = 1
+            gridSpan = tcPr.find(qn("w:gridSpan"))
+            if gridSpan is not None:
+                try:
+                    grid_span = int(gridSpan.get(qn("w:val")))
+                except Exception:
+                    grid_span = 1
+
+            span_width = sum(grid_widths[logical_col_idx: logical_col_idx + grid_span])
+
+            tcW = tcPr.find(qn("w:tcW"))
+            if tcW is None:
+                tcW = OxmlElement("w:tcW")
+                tcPr.append(tcW)
+
+            tcW.set(qn("w:w"), str(span_width))
+            tcW.set(qn("w:type"), "dxa")
+
+            logical_col_idx += grid_span
+            
+for table in document.tables:
+    apply_table_borders(table)
+
+    try:
+        table.autofit = False
+    except Exception:
+        pass
+
+    _set_table_fixed_widths_from_grid(table)
         column_scales = _get_table_numeric_column_scales(table)
 
         for row_idx, row in enumerate(table.rows):
