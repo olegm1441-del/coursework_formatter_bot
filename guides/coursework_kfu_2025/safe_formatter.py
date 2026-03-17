@@ -1270,9 +1270,13 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 
     # Ключевой момент:
     # не оставляем tblCellSpacing вообще, а удаляем его полностью.
-    node = tblPr.find(qn("w:tblCellSpacing"))
-    if node is not None:
-        tblPr.remove(node)
+    tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
+    if tblCellSpacing is None:
+        tblCellSpacing = OxmlElement("w:tblCellSpacing")
+        tblPr.append(tblCellSpacing)
+
+    tblCellSpacing.set(qn("w:w"), "0")
+    tblCellSpacing.set(qn("w:type"), "dxa")
 
     # И дополнительно убираем tblCellMar,
     # чтобы не было лишнего визуального "внутреннего отступа контура" в Word.
@@ -1315,9 +1319,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
             if tcBorders is not None:
                 tcPr.remove(tcBorders)
 
-            tcMar = tcPr.find(qn("w:tcMar"))
-            if tcMar is not None:
-                tcPr.remove(tcMar)
+
 
 def apply_table_borders(table):
     # Один источник истины для рамок — tblBorders на уровне таблицы.
