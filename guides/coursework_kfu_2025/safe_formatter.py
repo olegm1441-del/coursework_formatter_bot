@@ -2330,7 +2330,8 @@ def ensure_compact_heading2_spacing(document, body_start):
     Normalize spacing around heading2 in one pass.
 
     Rules:
-      - no empty paragraph immediately before heading2;
+      - exactly one empty paragraph immediately before heading2,
+        except when the previous non-empty paragraph is heading1;
       - exactly one empty paragraph immediately after heading2.
 
     Returns True if any changes were made, otherwise False.
@@ -2367,39 +2368,57 @@ def ensure_compact_heading2_spacing(document, body_start):
             idx += 1
             continue
 
-        while idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-            remove_paragraph(paragraphs[idx - 1])
-            paragraphs = document.paragraphs
-            idx -= 1
-            changed = True
-            
-        next_is_heading2 = False
-        if idx + 1 < len(paragraphs):
-            next_text = clean_spaces(paragraphs[idx + 1].text)
-            next_is_heading2 = classify_paragraph(next_text, prev_kind="heading2") == "heading2"
+        # Ищем предыдущий непустой абзац
+        prev_nonempty_idx = idx - 1
+        while prev_nonempty_idx >= body_start and is_empty_paragraph(paragraphs[prev_nonempty_idx]):
+            prev_nonempty_idx -= 1
 
+        prev_nonempty_kind = None
+        if prev_nonempty_idx >= body_start:
+            prev_nonempty_text = clean_spaces(paragraphs[prev_nonempty_idx].text)
+            prev_nonempty_kind = classify_paragraph(prev_nonempty_text, prev_kind=None)
 
-
-        if next_is_heading2:
-            while idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-                remove_paragraph(paragraphs[idx + 1])
+        # ПЕРЕД heading2:
+        # - если сверху heading1 -> пустой строки быть не должно
+        # - иначе должна быть ровно одна пустая строка
+        if prev_nonempty_kind == "heading1":
+            while idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
+                remove_paragraph(paragraphs[idx - 1])
                 paragraphs = document.paragraphs
+                idx -= 1
                 changed = True
         else:
-            if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
+            if idx - 1 < body_start or not is_empty_paragraph(paragraphs[idx - 1]):
                 new_p = OxmlElement("w:p")
-                p._element.addnext(new_p)
+                p._element.addprevious(new_p)
                 paragraphs = document.paragraphs
-                changed = True
-                
-            while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
-                remove_paragraph(paragraphs[idx + 2])
-                paragraphs = document.paragraphs
+                idx += 1
                 changed = True
 
-            if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
-                hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
+            while idx - 2 >= body_start and is_empty_paragraph(paragraphs[idx - 2]):
+                remove_paragraph(paragraphs[idx - 2])
+                paragraphs = document.paragraphs
+                idx -= 1
+                changed = True
 
+            if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
+                hard_reset_paragraph_format(paragraphs[idx - 1], first_line_indent_cm=None)
+
+        # ПОСЛЕ heading2:
+        # всегда ровно одна пустая строка
+        if idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[idx + 1]):
+            new_p = OxmlElement("w:p")
+            p._element.addnext(new_p)
+            paragraphs = document.paragraphs
+            changed = True
+
+        while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+            remove_paragraph(paragraphs[idx + 2])
+            paragraphs = document.paragraphs
+            changed = True
+
+        if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+            hard_reset_paragraph_format(paragraphs[idx + 1], first_line_indent_cm=None)
 
         prev_kind = kind
         idx += 1
