@@ -1246,11 +1246,8 @@ def clear_cell_borders(cell):
 
 def force_table_outer_borders_single(table, color="000000", size="4", space="0"):
     """
-    Жестко задает таблице одинарные границы и убирает всё,
-    что в Word может визуально давать двойной контур:
-    - tblCellSpacing
-    - стили таблицы (tblStyle / tblLook)
-    - локальные границы ячеек
+    Жестко задает таблице только один набор границ и убирает те XML-узлы,
+    из-за которых Word может визуально рисовать двойной внешний контур.
     """
     tbl = table._tbl
     tblPr = tbl.tblPr
@@ -1258,8 +1255,8 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         tblPr = OxmlElement("w:tblPr")
         tbl.insert(0, tblPr)
 
-    # 1) Убираем стиль таблицы и look-настройки,
-    # потому что Word может дорисовывать границы из table style
+    # Убираем style/look-метаданные таблицы, которые Word может
+    # продолжать применять поверх наших явных tblBorders.
     for tag in (
         "w:tblStyle",
         "w:tblLook",
@@ -1270,7 +1267,11 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         if node is not None:
             tblPr.remove(node)
 
-    # 2) Жестко задаем единые tblBorders
+    # Убираем table indentation, чтобы не было побочных визуальных артефактов по краям
+    tblInd = tblPr.find(qn("w:tblInd"))
+    if tblInd is not None:
+        tblPr.remove(tblInd)
+
     tblBorders = tblPr.find(qn("w:tblBorders"))
     if tblBorders is None:
         tblBorders = OxmlElement("w:tblBorders")
@@ -1287,7 +1288,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         element.set(qn("w:space"), space)
         element.set(qn("w:color"), color)
 
-    # 3) Убираем cell spacing, который часто дает эффект двойных линий
+    # Жестко убираем межъячеечный spacing, который часто и дает эффект "двойной линии"
     tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
     if tblCellSpacing is None:
         tblCellSpacing = OxmlElement("w:tblCellSpacing")
@@ -1296,13 +1297,17 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
     tblCellSpacing.set(qn("w:w"), "0")
     tblCellSpacing.set(qn("w:type"), "dxa")
 
-    # 4) На всякий случай убираем table indentation
-    tblInd = tblPr.find(qn("w:tblInd"))
-    if tblInd is not None:
-        tblPr.remove(tblInd)
+    # На всякий случай убираем исключения строк, если они есть:
+    # именно row-level exceptions иногда дают внешний контур поверх общего.
+    for row in table.rows:
+        trPr = row._tr.trPr
+        if trPr is not None:
+            tblPrEx = trPr.find(qn("w:tblPrEx"))
+            if tblPrEx is not None:
+                trPr.remove(tblPrEx)
 
-    # 5) Жестко прибиваем локальные borders/cell spacing у ячеек,
-    # чтобы ничего не приехало из старого документа
+    # И убираем локальные границы/spacing на уровне ячеек,
+    # чтобы у таблицы остался один источник истины — tblBorders.
     for row in table.rows:
         for cell in row.cells:
             tc = cell._tc
@@ -1314,22 +1319,16 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 
             tcMar = tcPr.find(qn("w:tcMar"))
             if tcMar is not None:
-                # поля ячейки не трогаем полностью, только оставляем как есть
-                pass
-
-            noWrap = tcPr.find(qn("w:noWrap"))
-            if noWrap is not None:
-                tcPr.remove(noWrap)
+                tcPr.remove(tcMar)
 
 def apply_table_borders(table):
-    # Оставляем один источник истины для рамок — tblBorders.
-    # Иначе одновременно tblBorders + tcBorders дают визуально двойной контур.
+    # Оставляем один источник истины для рамок — tblBorders на уровне таблицы.
     force_table_outer_borders_single(table, size="4")
 
     for row in table.rows:
         for cell in row.cells:
             clear_cell_borders(cell)
-
+            
 def force_zero_indent_in_table_paragraph(paragraph):
     """
     Жестко сбрасывает любые абзацные отступы внутри таблицы:
