@@ -1246,8 +1246,11 @@ def clear_cell_borders(cell):
 
 def force_table_outer_borders_single(table, color="000000", size="4", space="0"):
     """
-    Жестко задает таблице одинарные границы и убирает cell spacing,
-    из-за которого в Word могут визуально появляться двойные линии.
+    Жестко задает таблице одинарные границы и убирает всё,
+    что в Word может визуально давать двойной контур:
+    - tblCellSpacing
+    - стили таблицы (tblStyle / tblLook)
+    - локальные границы ячеек
     """
     tbl = table._tbl
     tblPr = tbl.tblPr
@@ -1255,6 +1258,19 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         tblPr = OxmlElement("w:tblPr")
         tbl.insert(0, tblPr)
 
+    # 1) Убираем стиль таблицы и look-настройки,
+    # потому что Word может дорисовывать границы из table style
+    for tag in (
+        "w:tblStyle",
+        "w:tblLook",
+        "w:tblStyleRowBandSize",
+        "w:tblStyleColBandSize",
+    ):
+        node = tblPr.find(qn(tag))
+        if node is not None:
+            tblPr.remove(node)
+
+    # 2) Жестко задаем единые tblBorders
     tblBorders = tblPr.find(qn("w:tblBorders"))
     if tblBorders is None:
         tblBorders = OxmlElement("w:tblBorders")
@@ -1271,6 +1287,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         element.set(qn("w:space"), space)
         element.set(qn("w:color"), color)
 
+    # 3) Убираем cell spacing, который часто дает эффект двойных линий
     tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
     if tblCellSpacing is None:
         tblCellSpacing = OxmlElement("w:tblCellSpacing")
@@ -1278,6 +1295,31 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 
     tblCellSpacing.set(qn("w:w"), "0")
     tblCellSpacing.set(qn("w:type"), "dxa")
+
+    # 4) На всякий случай убираем table indentation
+    tblInd = tblPr.find(qn("w:tblInd"))
+    if tblInd is not None:
+        tblPr.remove(tblInd)
+
+    # 5) Жестко прибиваем локальные borders/cell spacing у ячеек,
+    # чтобы ничего не приехало из старого документа
+    for row in table.rows:
+        for cell in row.cells:
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+
+            tcBorders = tcPr.find(qn("w:tcBorders"))
+            if tcBorders is not None:
+                tcPr.remove(tcBorders)
+
+            tcMar = tcPr.find(qn("w:tcMar"))
+            if tcMar is not None:
+                # поля ячейки не трогаем полностью, только оставляем как есть
+                pass
+
+            noWrap = tcPr.find(qn("w:noWrap"))
+            if noWrap is not None:
+                tcPr.remove(noWrap)
 
 def apply_table_borders(table):
     # Оставляем один источник истины для рамок — tblBorders.
