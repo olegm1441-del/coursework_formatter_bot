@@ -1583,15 +1583,17 @@ def _set_table_fixed_widths_from_grid(table):
 
             logical_col_idx += grid_span
             
-for table in document.tables:
-    apply_table_borders(table)
+def format_tables(document):
+    for table in document.tables:
+        apply_table_borders(table)
 
-    try:
-        table.autofit = False
-    except Exception:
-        pass
+        try:
+            table.autofit = False
+        except Exception:
+            pass
 
-    _set_table_fixed_widths_from_grid(table)
+        _set_table_fixed_widths_from_grid(table)
+
         column_scales = _get_table_numeric_column_scales(table)
 
         for row_idx, row in enumerate(table.rows):
@@ -1620,10 +1622,6 @@ for table in document.tables:
                     fmt.page_break_before = False
                     fmt.widow_control = False
 
-                    # Логика выравнивания:
-                    # 1) первая строка таблицы -> по центру
-                    # 2) числовые ячейки ниже -> вправо
-                    # 3) всё остальное -> по ширине
                     if row_idx == 0:
                         _set_table_paragraph_alignment(paragraph, WD_ALIGN_PARAGRAPH.CENTER)
                     elif normalized_number is not None:
