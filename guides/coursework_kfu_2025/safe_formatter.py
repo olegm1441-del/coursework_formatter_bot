@@ -1277,7 +1277,15 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 
     tblCellSpacing.set(qn("w:w"), "0")
     tblCellSpacing.set(qn("w:type"), "dxa")
+    # Жестко фиксируем layout таблицы.
+    # Без этого Word может автоподбирать ширины столбцов и визуально
+    # давать "двойные" линии из-за дробной геометрии рендера.
+    tblLayout = tblPr.find(qn("w:tblLayout"))
+    if tblLayout is None:
+        tblLayout = OxmlElement("w:tblLayout")
+        tblPr.append(tblLayout)
 
+    tblLayout.set(qn("w:type"), "fixed")
     # И дополнительно убираем tblCellMar,
     # чтобы не было лишнего визуального "внутреннего отступа контура" в Word.
     node = tblPr.find(qn("w:tblCellMar"))
@@ -1513,7 +1521,10 @@ def _set_table_paragraph_alignment(paragraph, alignment) -> None:
 def format_tables(document):
     for table in document.tables:
         apply_table_borders(table)
-
+        try:
+            table.autofit = False
+        except Exception:
+            pass
         column_scales = _get_table_numeric_column_scales(table)
 
         for row_idx, row in enumerate(table.rows):
