@@ -1954,6 +1954,13 @@ def split_table_captions_prepass(document, body_start):
 
 
 def convert_reference_numbering_to_plain_text(document, body_start):
+    """
+    Приводит список источников к плоскому тексту и всегда строит
+    СКВОЗНУЮ нумерацию заново по всем разделам списка.
+
+    Разделы ("Официальные материалы", "Статистические материалы" и т.д.)
+    не нумеруются, а обычные записи получают 1., 2., 3. ... без перезапуска.
+    """
     in_references = False
     ref_counter = 1
 
@@ -1980,19 +1987,21 @@ def convert_reference_numbering_to_plain_text(document, body_start):
             in_references = False
             continue
 
-        # Подзаголовки внутри списка источников
+        # Подзаголовки разделов внутри списка источников:
+        # не нумеруем, просто нормализуем и форматируем.
         if canonical:
             replace_paragraph_text(paragraph, canonical)
             remove_paragraph_numbering(paragraph)
             remove_page_break_artifacts_from_paragraph(paragraph)
-
             format_reference_subheading(paragraph)
             continue
 
         if is_empty_paragraph(paragraph):
             continue
 
-        # Любой обычный источник в блоке литературы
+        # Любой обычный источник в блоке литературы:
+        # полностью снимаем Word-numbering и видимую кривую нумерацию,
+        # затем строим свою сквозную.
         remove_paragraph_numbering(paragraph)
         remove_page_break_artifacts_from_paragraph(paragraph)
         set_paragraph_style_safe(paragraph, "Normal", "Обычный")
@@ -2000,16 +2009,20 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
         clean = clean_spaces(paragraph.text)
 
-        # Если видимый номер уже есть — сохраняем его
-        m = re.match(r"^\s*(\d+)\.\s+(.+)$", clean)
-        if m:
-            number = int(m.group(1))
-            source_text = clean_spaces(m.group(2))
-            normalized = f"{number}. {source_text}"
-            ref_counter = number + 1
-        else:
-            normalized = f"{ref_counter}. {clean}"
-            ref_counter += 1
+        # Снимаем видимый номер в начале строки, если он уже есть:
+        # 1. ...
+        # 12. ...
+        clean = re.sub(r"^\s*\d+\.\s+", "", clean)
+
+        # Снимаем маркеры/буллеты, если они вдруг приехали из исходника
+        clean = re.sub(r"^\s*[•·▪■◆►→\-–—]+\s*", "", clean)
+        clean = clean_spaces(clean)
+
+        if not clean:
+            continue
+
+        normalized = f"{ref_counter}. {clean}"
+        ref_counter += 1
 
         normalized = smart_normalize_reference_line_case(normalized)
         replace_paragraph_text(paragraph, normalized)
