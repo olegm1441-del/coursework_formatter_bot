@@ -3197,6 +3197,11 @@ def process_document(input_path: Path, output_path: Path):
         if idx < body_start:
             continue
 
+        if paragraph_has_drawing(paragraph):
+            if paragraph.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            prev_nonempty_kind = "body_text"
+            continue
         text = clean_spaces(paragraph.text)
 
         if not text:
