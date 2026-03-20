@@ -1305,13 +1305,17 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         element.set(qn("w:space"), space)
         element.set(qn("w:color"), color)
 
-    # Убираем row-level overrides, если они приехали из исходника
+    # Убираем row-level overrides и row-level spacing, если они приехали из исходника.
     for row in table.rows:
         trPr = row._tr.trPr
         if trPr is not None:
             tblPrEx = trPr.find(qn("w:tblPrEx"))
             if tblPrEx is not None:
                 trPr.remove(tblPrEx)
+
+            trCellSpacing = trPr.find(qn("w:tblCellSpacing"))
+            if trCellSpacing is not None:
+                trPr.remove(trCellSpacing)
 
     # У ячеек оставляем без собственных borders/margins,
     # чтобы источник истины был только один — tblBorders.
