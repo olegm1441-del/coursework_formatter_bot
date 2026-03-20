@@ -37,7 +37,7 @@ def _get_single_footer_paragraph(footer):
 
 def _set_run_font(run):
     run.font.name = "Times New Roman"
-    run.font.size = Pt(12)
+    run.font.size = Pt(14)
     run.font.color.rgb = RGBColor(0, 0, 0)
 
     rPr = run._element.get_or_add_rPr()
@@ -52,18 +52,18 @@ def _set_run_font(run):
     rFonts.set(qn("w:cs"), "Times New Roman")
     rFonts.set(qn("w:eastAsia"), "Times New Roman")
 
+    # 14 pt = 28 (half-points)
     sz = rPr.find(qn("w:sz"))
     if sz is None:
         sz = OxmlElement("w:sz")
         rPr.append(sz)
-    sz.set(qn("w:val"), "24")
+    sz.set(qn("w:val"), "28")
 
     szCs = rPr.find(qn("w:szCs"))
     if szCs is None:
         szCs = OxmlElement("w:szCs")
         rPr.append(szCs)
-    szCs.set(qn("w:val"), "24")
-
+    szCs.set(qn("w:val"), "28")
 
 def _clear_paragraph(paragraph):
     p = paragraph._element
