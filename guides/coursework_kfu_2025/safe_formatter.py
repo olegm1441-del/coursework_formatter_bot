@@ -1268,15 +1268,12 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         if node is not None:
             tblPr.remove(node)
 
-    # Ключевой момент:
-    # не оставляем tblCellSpacing вообще, а удаляем его полностью.
+    # tblCellSpacing вообще не должен оставаться в XML.
+    # Даже при w:w="0" Word может продолжать рендерить контур так,
+    # будто между ячейками/внешней рамкой есть зазор.
     tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
-    if tblCellSpacing is None:
-        tblCellSpacing = OxmlElement("w:tblCellSpacing")
-        tblPr.append(tblCellSpacing)
-
-    tblCellSpacing.set(qn("w:w"), "0")
-    tblCellSpacing.set(qn("w:type"), "dxa")
+    if tblCellSpacing is not None:
+        tblPr.remove(tblCellSpacing)
     # Жестко фиксируем layout таблицы.
     # Без этого Word может автоподбирать ширины столбцов и визуально
     # давать "двойные" линии из-за дробной геометрии рендера.
