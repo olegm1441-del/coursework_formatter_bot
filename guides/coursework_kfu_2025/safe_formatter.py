@@ -2307,7 +2307,7 @@ def ensure_empty_after_source_and_note(document, body_start):
                 prev_kind = "body_text"
                 continue
 
-            kind = classify_paragraph(text, prev_kind=prev_kind)
+            kind = detect_kind_from_paragraph_object(p, text, prev_kind=prev_kind)
             is_note_line = bool(re.match(r"^\s*примечание\s*:", text, re.IGNORECASE))
 
             # ===== FIGURE CAPTION LOGIC =====
