@@ -2293,7 +2293,6 @@ def ensure_empty_after_source_and_note(document, body_start):
                 continue
 
             text = clean_spaces(p.text)
-            low = text.lower()
 
             if is_references_heading_text(text):
                 in_references = True
@@ -2311,10 +2310,56 @@ def ensure_empty_after_source_and_note(document, body_start):
             kind = classify_paragraph(text, prev_kind=prev_kind)
             is_note_line = bool(re.match(r"^\s*примечание\s*:", text, re.IGNORECASE))
 
+            # ===== FIGURE CAPTION LOGIC =====
+            # После подписи рисунка:
+            # - если дальше идёт Источник:/Примечание: -> пустую строку НЕ вставляем
+            # - иначе должна быть ровно одна пустая строка
+            if kind == "figure_caption":
+                if idx + 1 >= len(paragraphs):
+                    new_p = insert_paragraph_after(p, "")
+                    format_empty_paragraph(new_p)
+                    changed = True
+                    break
+
+                next_text = clean_spaces(paragraphs[idx + 1].text)
+                next_is_service = bool(
+                    re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", next_text, re.IGNORECASE)
+                )
+
+                if next_is_service:
+                    # Между подписью рисунка и Источником/Примечанием пустой строки быть не должно
+                    if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
+                        remove_paragraph(paragraphs[idx + 1])
+                        changed = True
+                        break
+
+                    prev_kind = kind
+                    continue
+
+                # Иначе после подписи рисунка нужна ровно одна пустая строка
+                if not is_empty_paragraph(paragraphs[idx + 1]):
+                    new_p = insert_paragraph_after(p, "")
+                    format_empty_paragraph(new_p)
+                    changed = True
+                    break
+
+                if (
+                    idx + 2 < len(paragraphs)
+                    and is_empty_paragraph(paragraphs[idx + 1])
+                    and is_empty_paragraph(paragraphs[idx + 2])
+                ):
+                    remove_paragraph(paragraphs[idx + 2])
+                    changed = True
+                    break
+
+                format_empty_paragraph(paragraphs[idx + 1])
+                prev_kind = kind
+                continue
+
             # ===== SOURCE LINE LOGIC =====
             if kind == "source_line":
 
-                # 1) Если сразу после источника идёт пустая строка,
+                # Если сразу после Источника идёт пустая строка,
                 # а после неё Примечание: -> удалить эту пустую строку
                 if (
                     idx + 2 < len(paragraphs)
@@ -2325,14 +2370,14 @@ def ensure_empty_after_source_and_note(document, body_start):
                     changed = True
                     break
 
-                # 2) Если сразу после источника идёт Примечание: -> ничего не вставляем
+                # Если сразу после Источника идёт Примечание: -> ничего не вставляем
                 if idx + 1 < len(paragraphs):
                     next_text = clean_spaces(paragraphs[idx + 1].text)
                     if re.match(r"^\s*примечание\s*:", next_text, re.IGNORECASE):
                         prev_kind = kind
                         continue
 
-                # 3) Во всех остальных случаях после источника должна быть ровно одна пустая строка
+                # Во всех остальных случаях после Источника должна быть ровно одна пустая строка
                 if idx + 1 >= len(paragraphs):
                     new_p = insert_paragraph_after(p, "")
                     format_empty_paragraph(new_p)
@@ -2360,43 +2405,29 @@ def ensure_empty_after_source_and_note(document, body_start):
 
             # ===== NOTE LINE LOGIC =====
             if is_note_line:
-                # Ищем предыдущий непустой абзац
-                prev_nonempty_idx = idx - 1
-                while prev_nonempty_idx >= body_start and is_empty_paragraph(paragraphs[prev_nonempty_idx]):
-                    prev_nonempty_idx -= 1
+                # После Примечания должна быть ровно одна пустая строка
+                if idx + 1 >= len(paragraphs):
+                    new_p = insert_paragraph_after(p, "")
+                    format_empty_paragraph(new_p)
+                    changed = True
+                    break
 
-                prev_nonempty_kind = None
-                if prev_nonempty_idx >= body_start:
-                    prev_nonempty_text = clean_spaces(paragraphs[prev_nonempty_idx].text)
-                    prev_nonempty_kind = classify_paragraph(prev_nonempty_text, prev_kind=None)
+                if not is_empty_paragraph(paragraphs[idx + 1]):
+                    new_p = insert_paragraph_after(p, "")
+                    format_empty_paragraph(new_p)
+                    changed = True
+                    break
 
-                # Логику после Примечания применяем только если перед ним реально был Источник
-                if prev_nonempty_kind == "source_line":
+                if (
+                    idx + 2 < len(paragraphs)
+                    and is_empty_paragraph(paragraphs[idx + 1])
+                    and is_empty_paragraph(paragraphs[idx + 2])
+                ):
+                    remove_paragraph(paragraphs[idx + 2])
+                    changed = True
+                    break
 
-                    # После примечания должна быть ровно одна пустая строка
-                    if idx + 1 >= len(paragraphs):
-                        new_p = insert_paragraph_after(p, "")
-                        format_empty_paragraph(new_p)
-                        changed = True
-                        break
-
-                    if not is_empty_paragraph(paragraphs[idx + 1]):
-                        new_p = insert_paragraph_after(p, "")
-                        format_empty_paragraph(new_p)
-                        changed = True
-                        break
-
-                    if (
-                        idx + 2 < len(paragraphs)
-                        and is_empty_paragraph(paragraphs[idx + 1])
-                        and is_empty_paragraph(paragraphs[idx + 2])
-                    ):
-                        remove_paragraph(paragraphs[idx + 2])
-                        changed = True
-                        break
-
-                    format_empty_paragraph(paragraphs[idx + 1])
-
+                format_empty_paragraph(paragraphs[idx + 1])
                 prev_kind = "body_text"
                 continue
 
