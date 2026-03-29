@@ -459,9 +459,9 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         await update.message.reply_text(
             (
-                "Документ принят в очередь на оформление.\n"
+                "Файл получен и поставлен в очередь на оформление.\n"
                 f"Номер заявки: {request.id}\n\n"
-                "Когда обработка завершится, результат будет отправлен автоматически."
+                "Когда всё будет готово, я автоматически пришлю оформленный .docx обратно в этот чат."
             ),
             reply_markup=get_main_menu_keyboard(),
         )
@@ -595,7 +595,8 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     await update.message.reply_text(
-        "Можно нажать кнопку в меню или отправить .docx-файл на обработку.",
+        "Отправь .docx-файл прямо сюда — я проверю и оформлю его по активной методичке.\n\n"
+        "Если хочешь, сначала можешь выбрать методичку или открыть тарифы в меню.",
         reply_markup=get_main_menu_keyboard(),
     )
 
