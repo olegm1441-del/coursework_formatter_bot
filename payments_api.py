@@ -69,7 +69,11 @@ def _parse_paid_at(value: str | None) -> datetime:
         return datetime.utcnow()
 
 
-def _apply_first_payment_referral_bonus(db: Session, invited_user_id: int, paid_at: datetime) -> None:
+def _apply_first_payment_referral_bonus(
+    db: Session,
+    invited_user_id: int,
+    paid_at: datetime,
+) -> int | None:
     referral = (
         db.query(Referral)
         .filter(
@@ -79,7 +83,7 @@ def _apply_first_payment_referral_bonus(db: Session, invited_user_id: int, paid_
         .first()
     )
     if not referral:
-        return
+        return None
 
     referral.first_payment_at = paid_at
 
@@ -92,6 +96,8 @@ def _apply_first_payment_referral_bonus(db: Session, invited_user_id: int, paid_
         idempotency_key=f"referral:first_payment:{invited_user_id}",
     )
     db.add(inviter_bonus)
+
+    return referral.inviter_user_id
 
 
 @app.get("/payment-success")
@@ -247,9 +253,11 @@ async def tribute_webhook(request: Request):
                 text=(
                     f"✅ Оплата получена!\n\n"
                     f"Начислено: {credits} оформлений.\n"
-                    f"Ваш баланс: {balance} оформлений."
-                ),
-            )
+                    f"Ваш баланс: {balance} оформлений.\n\n"
+                    "Можно сразу отправить следующий .docx-файл в этот чат.\n"
+                    "Или пригласить друга по реферальной ссылке и получить ещё бонус."
+             ),
+        )
         except Exception as e:
             logger.error("payment_notification_failed %s", e)
 
