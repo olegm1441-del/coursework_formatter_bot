@@ -68,7 +68,14 @@ async def send_document(
             caption=caption,
         )
 
-
+async def send_referral_bonus_notification(
+    bot_token: str,
+    inviter_telegram_id: int,
+    text: str,
+) -> None:
+    bot = Bot(token=bot_token)
+    await bot.send_message(chat_id=inviter_telegram_id, text=text)
+    
 def _formatter_process_target(
     guide_code: str,
     input_path: str,
@@ -377,7 +384,29 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
         )
 
-        services.grant_referral_upload_bonus_if_needed(db, user.id)
+        inviter_user_id = services.grant_referral_upload_bonus_if_needed(db, user.id)
+
+        if inviter_user_id:
+            inviter = db.query(User).filter(User.id == inviter_user_id).first()
+            if inviter:
+                inviter_balance = services.get_user_credit_balance(db, inviter.id)
+                bonus_text = services.build_referral_bonus_notification_text(
+                    balance=inviter_balance,
+                    trigger="upload",
+            )
+                try:
+                    asyncio.run(
+                        send_referral_bonus_notification(
+                            bot_token=bot_token,
+                            inviter_telegram_id=inviter.telegram_id,
+                            text=bonus_text,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "referral_upload_bonus_notification_failed inviter_user_id=%s",
+                        inviter.id,
+                    )
 
         logger.info(
             "formatting_done request_id=%s user_id=%s output_path=%s",
