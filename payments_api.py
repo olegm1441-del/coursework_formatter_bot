@@ -52,6 +52,7 @@ def _resolve_tariff(
 
     return None, 0
 
+
 def _create_payment_link(tariff_code: str) -> tuple[str | None, int]:
     if tariff_code == "three_formats":
         return BUY3_LINK, 362
@@ -69,7 +70,11 @@ def _parse_paid_at(value: str | None) -> datetime:
         return datetime.utcnow()
 
 
-def _apply_first_payment_referral_bonus(db: Session, invited_user_id: int, paid_at: datetime) -> None:
+def _apply_first_payment_referral_bonus(
+    db: Session,
+    invited_user_id: int,
+    paid_at: datetime,
+) -> int | None:
     referral = (
         db.query(Referral)
         .filter(
@@ -79,7 +84,7 @@ def _apply_first_payment_referral_bonus(db: Session, invited_user_id: int, paid_
         .first()
     )
     if not referral:
-        return
+        return None
 
     referral.first_payment_at = paid_at
 
@@ -92,6 +97,8 @@ def _apply_first_payment_referral_bonus(db: Session, invited_user_id: int, paid_
         idempotency_key=f"referral:first_payment:{invited_user_id}",
     )
     db.add(inviter_bonus)
+
+    return referral.inviter_user_id
 
 
 @app.get("/payment-success")
@@ -125,7 +132,7 @@ async def tribute_webhook(request: Request):
     check = hmac.new(
         TRIBUTE_API_KEY.encode(),
         body,
-        hashlib.sha256
+        hashlib.sha256,
     ).hexdigest()
 
     if signature != check:
@@ -151,7 +158,11 @@ async def tribute_webhook(request: Request):
     paid_at = _parse_paid_at(payload.get("purchase_created_at"))
 
     if not purchase_id or not telegram_user_id:
-        logger.info("webhook_missing_required_fields purchase_id=%s telegram_user_id=%s", purchase_id, telegram_user_id)
+        logger.info(
+            "webhook_missing_required_fields purchase_id=%s telegram_user_id=%s",
+            purchase_id,
+            telegram_user_id,
+        )
         return {"status": "ignored"}
 
     tariff_code, credits = _resolve_tariff(amount, currency, product_name, product_id)
@@ -171,7 +182,11 @@ async def tribute_webhook(request: Request):
     try:
         user = db.query(User).filter(User.telegram_id == int(telegram_user_id)).first()
         if not user:
-            logger.info("payment_user_not_found telegram_user_id=%s purchase_id=%s", telegram_user_id, purchase_id)
+            logger.info(
+                "payment_user_not_found telegram_user_id=%s purchase_id=%s",
+                telegram_user_id,
+                purchase_id,
+            )
             return {"status": "user_not_found"}
 
         existing_payment = db.query(Payment).filter(
@@ -209,7 +224,7 @@ async def tribute_webhook(request: Request):
         )
         db.add(credit)
 
-        _apply_first_payment_referral_bonus(db, user.id, paid_at)
+        inviter_user_id = _apply_first_payment_referral_bonus(db, user.id, paid_at)
 
         try:
             db.commit()
@@ -229,10 +244,14 @@ async def tribute_webhook(request: Request):
             ).first()
 
             if duplicate_payment or duplicate_credit:
-                logger.info("payment_already_processed_by_constraint purchase_id=%s", purchase_id)
+                logger.info(
+                    "payment_already_processed_by_constraint purchase_id=%s",
+                    purchase_id,
+                )
                 return {"status": "already_processed"}
 
             raise
+
         balance = (
             db.query(CreditLedger)
             .filter(CreditLedger.user_id == user.id)
@@ -247,9 +266,32 @@ async def tribute_webhook(request: Request):
                 text=(
                     f"✅ Оплата получена!\n\n"
                     f"Начислено: {credits} оформлений.\n"
-                    f"Ваш баланс: {balance} оформлений."
+                    f"Ваш баланс: {balance} оформлений.\n\n"
+                    "Можно сразу отправить следующий .docx-файл в этот чат.\n"
+                    "Или пригласить друга по реферальной ссылке и получить ещё бонус."
                 ),
             )
+
+            if inviter_user_id:
+                inviter = db.query(User).filter(User.id == inviter_user_id).first()
+                if inviter:
+                    inviter_balance = (
+                        db.query(CreditLedger)
+                        .filter(CreditLedger.user_id == inviter.id)
+                        .with_entities(func.sum(CreditLedger.amount))
+                        .scalar()
+                    ) or 0
+
+                    await bot.send_message(
+                        chat_id=inviter.telegram_id,
+                        text=(
+                            "🎉 Начислен реферальный бонус!\n\n"
+                            "Причина: приглашённый пользователь впервые оплатил.\n"
+                            "Вы получили +1 оформление.\n"
+                            f"Ваш баланс: {inviter_balance} оформлений."
+                        ),
+                    )
+
         except Exception as e:
             logger.error("payment_notification_failed %s", e)
 
