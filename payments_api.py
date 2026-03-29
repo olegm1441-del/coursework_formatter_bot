@@ -215,7 +215,7 @@ async def tribute_webhook(request: Request):
         )
         db.add(credit)
 
-        _apply_first_payment_referral_bonus(db, user.id, paid_at)
+        inviter_user_id = _apply_first_payment_referral_bonus(db, user.id, paid_at)
 
         try:
             db.commit()
@@ -258,9 +258,29 @@ async def tribute_webhook(request: Request):
                     "Или пригласить друга по реферальной ссылке и получить ещё бонус."
              ),
         )
-        except Exception as e:
-            logger.error("payment_notification_failed %s", e)
+                 if inviter_user_id:
+                 inviter = db.query(User).filter(User.id == inviter_user_id).first()
+                 if inviter:
+                     inviter_balance = (
+                         db.query(CreditLedger)
+                         .filter(CreditLedger.user_id == inviter.id)
+                         .with_entities(func.sum(CreditLedger.amount))
+                         .scalar()
+                     ) or 0
 
+                     try:
+                         await bot.send_message(
+                             chat_id=inviter.telegram_id,
+                             text=(
+                            "🎉 Начислен реферальный бонус!\n\n"
+                            "Причина: приглашённый пользователь впервые оплатил.\n"
+                            "Вы получили +1 оформление.\n"
+                            f"Ваш баланс: {inviter_balance} оформлений."
+                        ),
+                    )
+                     except Exception as e:
+                         logger.error("referral_payment_notification_failed %s", e)
+        
         logger.info(
             "payment_processed purchase_id=%s user_id=%s tariff=%s credits=%s",
             purchase_id,
