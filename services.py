@@ -187,13 +187,28 @@ def get_referral_link(bot_username: str, referral_code: str) -> str:
 def build_referral_text(bot_username: str, user: User) -> str:
     referral_link = get_referral_link(bot_username, user.referral_code)
     return (
-        "Твоя реферальная ссылка:\n"
+        "Пригласи друга по своей ссылке:\n"
         f"{referral_link}\n\n"
-        "Бонусы:\n"
-        "• +1 оформление, если приглашённый пользователь впервые загрузит документ\n"
-        "• +1 оформление, если приглашённый пользователь впервые оплатит"
+        "Ты получишь:\n"
+        "• +1 оформление, когда друг впервые загрузит документ\n"
+        "• ещё +1 оформление, когда друг впервые оплатит\n\n"
+        "Отправь ссылку одногруппнику, которому тоже скоро сдавать курсовую."
     )
+    
+def build_referral_bonus_notification_text(balance: int, trigger: str) -> str:
+    if trigger == "upload":
+        reason = "приглашённый пользователь впервые загрузил документ"
+    elif trigger == "payment":
+        reason = "приглашённый пользователь впервые оплатил"
+    else:
+        reason = "сработал реферальный бонус"
 
+    return (
+        "🎉 Начислен реферальный бонус!\n\n"
+        f"Причина: {reason}.\n"
+        "Вы получили +1 оформление.\n"
+        f"Ваш баланс: {balance} оформлений."
+    )
 
 # =========================
 # Баланс и кредиты
@@ -277,7 +292,7 @@ def grant_admin_bonus(db, target_user_id: int, amount: int, admin_source_id: str
     return get_user_credit_balance(db, target_user_id)
 
 
-def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
+def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | None:
     referral = (
         db.query(Referral)
         .filter(Referral.invited_user_id == invited_user_id)
@@ -286,7 +301,7 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
     )
 
     if not referral:
-        return
+        return None
 
     existing_bonus = (
         db.query(CreditLedger)
@@ -294,7 +309,7 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
         .first()
     )
     if existing_bonus:
-        return
+        return None
 
     bonus = CreditLedger(
         user_id=referral.inviter_user_id,
@@ -308,6 +323,7 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> None:
     referral.qualified_upload_at = datetime.utcnow()
     db.commit()
 
+    return referral.inviter_user_id
 
 def grant_referral_payment_bonus_if_needed(db, invited_user_id: int) -> None:
     referral = (
