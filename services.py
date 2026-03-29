@@ -516,8 +516,8 @@ def build_start_text(balance: int, is_new: bool, active_guide_title: str) -> str
         f"Доступно оформлений: {balance}\n\n"
         "Бесплатное оформление уже использовано.\n\n"
         f"{build_tariffs_text()}\n\n"
-        "Можно купить оформления или пригласить друга и получить бонус."
-    )
+        "Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им реферальную ссылку. Ты получишь +1 оформление, когда они загрузят файл.."
+        )
 
 
 def build_balance_text(user: User, balance: int, bot_username: str) -> str:
