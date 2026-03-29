@@ -1,7 +1,7 @@
 from telegram import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 
 BTN_REFERRAL = "Реферальная ссылка"
-BTN_TOP_UP_BALANCE = "Пополнить баланс"
+BTN_TOP_UP_BALANCE = "Купить оформления"
 BTN_SELECT_GUIDE = "Выбрать методичку"
 BTN_CONTACT = "Контакт"
 
