@@ -188,8 +188,8 @@ async def top_up_balance_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(
         "Тарифы:\n"
-        "• 1 оформление — 179 ₽\n"
-        "• 3 оформления — 479 ₽\n\n"
+        "• 1 оформление — 200 ₽\n"
+        "• 3 оформления — 500 ₽\n\n"
         "Бонусы:\n"
         "• +1 оформление, если приглашённый пользователь впервые загрузит документ\n"
         "• +1 оформление, если приглашённый пользователь впервые оплатит",
@@ -262,7 +262,7 @@ async def buy1_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         update=update,
         context=context,
         tariff_code="one_format",
-        button_text="💳 Оплатить 179 ₽",
+        button_text="💳 Оплатить 200 ₽",
         reply_text="Ссылка на оплату 1 оформления:",
     )
 
@@ -272,7 +272,7 @@ async def buy3_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         update=update,
         context=context,
         tariff_code="three_formats",
-        button_text="📦 Оплатить 479 ₽",
+        button_text="📦 Оплатить 500 ₽",
         reply_text="Ссылка на оплату пакета из 3 оформлений:",
     )
 
