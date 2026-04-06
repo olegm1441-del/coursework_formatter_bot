@@ -39,12 +39,12 @@ DEFAULT_GUIDE_CODE = "kfu_coursework_2025"
 TARIFFS = {
     "one": {
         "title": "1 оформление",
-        "price_rub": 179,
+        "price_rub": 200,
         "credits": 1,
     },
     "three": {
         "title": "3 оформления",
-        "price_rub": 479,
+        "price_rub": 500,
         "credits": 3,
     },
 }
