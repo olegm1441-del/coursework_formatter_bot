@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 TRIBUTE_API_KEY = os.getenv("TRIBUTE_API_KEY")
 SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL")
 FAIL_URL = os.getenv("PAYMENT_FAIL_URL")
+
+VK_SECRET = os.getenv("VK_SECRET")
+VK_CONFIRMATION_CODE = os.getenv("VK_CONFIRMATION_CODE")
+VK_GROUP_ID = os.getenv("VK_GROUP_ID")
+VK_GROUP_TOKEN = os.getenv("VK_GROUP_TOKEN")
+VK_API_VERSION = os.getenv("VK_API_VERSION", "5.199")
 
 # Готовые ссылки на товары Tribute
 BUY1_LINK = "https://t.me/tribute/app?startapp=psvI"
@@ -330,3 +336,28 @@ async def create_payment(user_id: int, tariff_code: str = "one_format"):
         "tariff_code": tariff_code,
         "amount_rub": amount_rub,
     }
+
+@app.post("/vk/webhook")
+async def vk_webhook(request: Request):
+    data = await request.json()
+
+    logger.info("vk_webhook_received type=%s", data.get("type"))
+
+    if data.get("type") == "confirmation":
+        return PlainTextResponse(VK_CONFIRMATION_CODE or "")
+
+    if data.get("secret") != VK_SECRET:
+        logger.warning("vk_webhook_invalid_secret")
+        return PlainTextResponse("forbidden", status_code=403)
+
+    if data.get("type") == "message_new":
+        message_obj = ((data.get("object") or {}).get("message") or {})
+        logger.info(
+            "vk_message_new from_id=%s text=%s",
+            message_obj.get("from_id"),
+            message_obj.get("text"),
+        )
+        return PlainTextResponse("ok")
+
+    return PlainTextResponse("ok")
+
