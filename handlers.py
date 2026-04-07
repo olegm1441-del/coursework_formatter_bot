@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 from pathlib import Path
 
 import httpx
@@ -32,6 +34,10 @@ import services
 logger = logging.getLogger(__name__)
 
 PAYMENTS_API_BASE_URL = "https://courseworkformatterbot-production.up.railway.app"
+
+_ADMIN_IDS: set[int] = {
+    int(x) for x in os.getenv("ADMIN_TELEGRAM_IDS", "").split(",") if x.strip()
+}
 
 
 def _extract_referral_code_from_start(text: str | None) -> str | None:
@@ -415,7 +421,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             event_name="file_uploaded",
             user_id=user.id,
             source="telegram_docx",
-            payload_json=f'{{"document_id": {doc_record.id}, "filename": "{filename}"}}',
+            payload_json=json.dumps({"document_id": doc_record.id, "filename": filename}),
         )
 
         request = services.create_formatting_request(
@@ -515,6 +521,9 @@ async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.message:
         return
 
+    if update.effective_user.id not in _ADMIN_IDS:
+        return
+
     if len(context.args) != 2:
         await update.message.reply_text("Формат: /givecredits user_id amount")
         return
@@ -543,6 +552,9 @@ async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def markpaid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
+        return
+
+    if update.effective_user.id not in _ADMIN_IDS:
         return
 
     if len(context.args) != 2:

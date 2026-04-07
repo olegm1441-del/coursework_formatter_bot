@@ -14,6 +14,7 @@ class User(Base):
     last_name = Column(String(255), nullable=True)
     referral_code = Column(String(64), unique=True, nullable=False, index=True)
     referred_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    selected_guide_code = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

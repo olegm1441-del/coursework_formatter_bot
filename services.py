@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from db import SessionLocal
@@ -215,8 +216,12 @@ def build_referral_bonus_notification_text(balance: int, trigger: str) -> str:
 # =========================
 
 def get_user_credit_balance(db, user_id: int) -> int:
-    rows = db.query(CreditLedger).filter(CreditLedger.user_id == user_id).all()
-    return sum(row.amount for row in rows)
+    total = (
+        db.query(func.sum(CreditLedger.amount))
+        .filter(CreditLedger.user_id == user_id)
+        .scalar()
+    )
+    return total or 0
 
 
 def debit_one_credit(db, user_id: int, source_id: str) -> bool:
