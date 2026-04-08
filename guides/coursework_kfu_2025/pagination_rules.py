@@ -73,14 +73,30 @@ def _apply_rule3(paragraphs: list, kinds: list[str]) -> int:
 
 def _apply_rule5(paragraphs: list, kinds: list[str]) -> int:
     """
-    Set keep_with_next=True on heading1 and heading2 paragraphs.
-    Word will not allow the heading to be the last line of a page.
+    Set keep_with_next=True on heading1/heading2 AND any immediately following
+    empty paragraphs, so the chain reaches the first real body paragraph.
+
+    Without propagating through empties, Word keeps heading+empty together but
+    the empty paragraph still breaks before the body text — heading appears to
+    hang alone at the bottom of the page.
     """
     count = 0
-    for p, kind in zip(paragraphs, kinds):
-        if kind in ("heading1", "heading2"):
-            _set_keep_with_next(p)
+    n = len(paragraphs)
+    for i, (p, kind) in enumerate(zip(paragraphs, kinds)):
+        if kind not in ("heading1", "heading2"):
+            continue
+
+        _set_keep_with_next(p)
+        count += 1
+
+        # Propagate through trailing empty paragraphs so the chain reaches
+        # the first non-empty paragraph below the heading.
+        j = i + 1
+        while j < n and kinds[j] == "empty_paragraph":
+            _set_keep_with_next(paragraphs[j])
             count += 1
+            j += 1
+
     return count
 
 
