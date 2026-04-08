@@ -654,7 +654,7 @@ def format_document_by_guide(guide_code: str, input_path: str, output_path: str)
 def build_processing_paths(original_filename: str) -> tuple[str, Path, Path]:
     job_id = str(uuid.uuid4())
     original_name = Path(original_filename)
-    safe_name = f"{original_name.stem}_safe.docx"
+    safe_name = f"{original_name.stem}.docx"
 
     input_path = TEMP_DIR / f"{job_id}_input.docx"
     output_path = TEMP_DIR / safe_name

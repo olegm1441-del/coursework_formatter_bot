@@ -128,7 +128,7 @@ def run_format_with_timeout(
 def build_worker_output_path(request_id: int, original_filename: str) -> Path:
     original_name = Path(original_filename)
     safe_stem = original_name.stem or f"request_{request_id}"
-    safe_name = f"{safe_stem}_safe.docx"
+    safe_name = f"{safe_stem}.docx"
     return services.TEMP_DIR / f"{request_id}_{safe_name}"
 
 

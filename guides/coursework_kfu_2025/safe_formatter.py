@@ -69,10 +69,9 @@ def normalize_formula_explanation_text(text: str, is_first=False) -> str:
         t = re.sub(r"^\s*где\s+", "где ", t, flags=re.IGNORECASE)
 
     # Нормализуем пробелы вокруг дефиса/тире после обозначения символа:
-    # V- -> V - ; R –цена -> R – цена
-    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*-\s*", r"\1 - ", t)
-    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*–\s*", r"\1 – ", t)
-    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*—\s*", r"\1 — ", t)
+    # V- -> V – ; R –цена -> R – цена
+    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*-\s*", r"\1 – ", t)
+    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*[—–]\s*", r"\1 – ", t)
 
     return t
 
@@ -840,6 +839,80 @@ def normalize_quotes_in_document(document, body_start=0):
                 for paragraph in cell.paragraphs:
                     normalize_quotes_in_paragraph_runs(paragraph, quote_state)
 
+def normalize_dashes_in_runs(paragraph):
+    for run in paragraph.runs:
+        if '\u2014' in run.text:
+            run.text = run.text.replace('\u2014', '\u2013')
+
+
+def normalize_dashes_in_document(document, body_start):
+    in_references = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+            continue
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+        if in_references:
+            continue
+        normalize_dashes_in_runs(paragraph)
+
+
+_WORD_RE = re.compile(r'[А-ЯЁа-яё]+')
+
+
+def normalize_yo_in_text(text: str) -> str:
+    def replace_word(m):
+        word = m.group(0)
+        if word[0].isupper():
+            return word
+        return word.replace('ё', 'е')
+    return _WORD_RE.sub(replace_word, text)
+
+
+def normalize_yo_in_runs(paragraph):
+    for run in paragraph.runs:
+        if 'ё' in run.text:
+            run.text = normalize_yo_in_text(run.text)
+
+
+def normalize_yo_in_document(document, body_start):
+    in_references = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+            continue
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+        if in_references:
+            continue
+        normalize_yo_in_runs(paragraph)
+
+
+def normalize_semicolons_in_document(document, body_start):
+    in_references = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+            continue
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+        if in_references:
+            continue
+        for run in paragraph.runs:
+            if ';' in run.text:
+                run.text = run.text.replace(';', ',')
+
+
 def canonical_reference_subheading_text(text: str):
     t = clean_spaces(text)
     if not t:
@@ -1118,6 +1191,122 @@ def format_body(paragraph, preserve_numbering=False):
 
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+NUMERIC_NUM_FMTS = {"decimal", "decimalZero", "ordinal", "decimalEnclosedParen", "decimalEnclosedCircle"}
+
+BULLET_CHARS_RE = re.compile(r'^[•·▪■◆►→◦●○\u2013\u2014\-]+\s*')
+
+
+def _get_num_fmt_for_paragraph(paragraph):
+    """Returns numFmt val string like 'decimal', 'bullet', 'lowerLetter', etc. or None."""
+    try:
+        pPr = paragraph._element.pPr
+        if pPr is None:
+            return None
+        numPr = pPr.find(qn("w:numPr"))
+        if numPr is None:
+            return None
+        numId_el = numPr.find(qn("w:numId"))
+        ilvl_el = numPr.find(qn("w:ilvl"))
+        if numId_el is None:
+            return None
+        num_id_val = numId_el.get(qn("w:val"))
+        ilvl_val = ilvl_el.get(qn("w:val"), "0") if ilvl_el is not None else "0"
+
+        numbering_part = paragraph.part.numbering_part
+        if numbering_part is None:
+            return None
+
+        numbering_el = numbering_part._element
+
+        num_el = None
+        for n in numbering_el.findall(qn("w:num")):
+            if n.get(qn("w:numId")) == num_id_val:
+                num_el = n
+                break
+        if num_el is None:
+            return None
+
+        abstract_num_id_el = num_el.find(qn("w:abstractNumId"))
+        if abstract_num_id_el is None:
+            return None
+        abstract_num_id_val = abstract_num_id_el.get(qn("w:val"))
+
+        abstract_num_el = None
+        for an in numbering_el.findall(qn("w:abstractNum")):
+            if an.get(qn("w:abstractNumId")) == abstract_num_id_val:
+                abstract_num_el = an
+                break
+        if abstract_num_el is None:
+            return None
+
+        for lvl in abstract_num_el.findall(qn("w:lvl")):
+            if lvl.get(qn("w:ilvl")) == ilvl_val:
+                num_fmt_el = lvl.find(qn("w:numFmt"))
+                if num_fmt_el is not None:
+                    return num_fmt_el.get(qn("w:val"))
+                break
+        return None
+    except Exception:
+        return None
+
+
+def format_body_list_item(paragraph):
+    """Format a list item paragraph: numeric lists stay as-is; bullet lists become en-dash."""
+    num_fmt = _get_num_fmt_for_paragraph(paragraph)
+    is_numeric = num_fmt in NUMERIC_NUM_FMTS
+
+    if is_numeric:
+        format_body(paragraph, preserve_numbering=True)
+        return
+
+    # Маркированный список -> дефисный формат
+    remove_page_break_artifacts_from_paragraph(paragraph)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    text = clean_spaces(paragraph.text)
+    text = BULLET_CHARS_RE.sub('', text)
+    text = clean_spaces(text)
+
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    new_text = f"\u2013 {text}"
+    replace_paragraph_text(paragraph, new_text)
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    fmt.right_indent = Cm(0)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Hanging indent через XML: маркер на ~1.25cm, текст на ~1.25cm + ширина "– "
+    pPr = paragraph._element.get_or_add_pPr()
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        pPr.append(ind)
+
+    if ind.get(qn("w:firstLine")) is not None:
+        del ind.attrib[qn("w:firstLine")]
+
+    # left = 906 twips (≈1.60cm): маркер начинается на 906-198=708 twips (≈1.25cm)
+    # hanging = 198 twips (≈0.35cm): ширина "– "
+    ind.set(qn("w:left"), "906")
+    ind.set(qn("w:hanging"), "198")
+    ind.set(qn("w:right"), "0")
+
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
 def format_heading1(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
     remove_paragraph_numbering(paragraph)
@@ -2959,6 +3148,9 @@ def process_document(input_path: Path, output_path: Path):
     split_manual_dash_lists(doc, body_start)
     split_table_captions_prepass(doc, body_start)
     normalize_quotes_in_document(doc, body_start or 0)
+    normalize_dashes_in_document(doc, body_start)
+    normalize_yo_in_document(doc, body_start)
+    normalize_semicolons_in_document(doc, body_start)
     # Преднормализация только тела работы; содержание не трогаем
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
@@ -3120,7 +3312,7 @@ def process_document(input_path: Path, output_path: Path):
         elif kind == "source_line":
             format_source_line(paragraph)
         elif kind == "body_list_item":
-            format_body(paragraph, preserve_numbering=True)
+            format_body_list_item(paragraph)
         elif kind == "reference_subheading":
             canonical = canonical_reference_subheading_text(text)
             if canonical:
@@ -3262,7 +3454,7 @@ def process_document(input_path: Path, output_path: Path):
             prev_paragraph=prev_paragraph_obj,
             prev_kind=prev_nonempty_kind,
         ):
-            format_body(paragraph, preserve_numbering=True)
+            format_body_list_item(paragraph)
             prev_nonempty_kind = "body_list_item"
             continue
         if parse_heading1(text):
