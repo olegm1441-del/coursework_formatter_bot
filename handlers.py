@@ -43,11 +43,14 @@ _ADMIN_IDS: set[int] = {
 def _is_admin(update: Update, db) -> bool:
     """Проверяет права администратора по Telegram ID ИЛИ по внутреннему user_id."""
     if not _ADMIN_IDS:
+        logger.warning("admin_check_failed: ADMIN_TELEGRAM_IDS is empty")
         return False
     tg_id = update.effective_user.id
+    logger.info("admin_check tg_id=%s admin_ids=%s", tg_id, _ADMIN_IDS)
     if tg_id in _ADMIN_IDS:
         return True
     user = services.get_user_by_telegram_id(db, tg_id)
+    logger.info("admin_check user=%s user_id=%s", user, getattr(user, "id", None))
     if user and user.id in _ADMIN_IDS:
         return True
     return False
