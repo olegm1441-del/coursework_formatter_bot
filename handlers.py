@@ -40,6 +40,19 @@ _ADMIN_IDS: set[int] = {
 }
 
 
+def _is_admin(update: Update, db) -> bool:
+    """Проверяет права администратора по Telegram ID ИЛИ по внутреннему user_id."""
+    if not _ADMIN_IDS:
+        return False
+    tg_id = update.effective_user.id
+    if tg_id in _ADMIN_IDS:
+        return True
+    user = services.get_user_by_telegram_id(db, tg_id)
+    if user and user.id in _ADMIN_IDS:
+        return True
+    return False
+
+
 def _extract_referral_code_from_start(text: str | None) -> str | None:
     if not text:
         return None
@@ -521,22 +534,22 @@ async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.message:
         return
 
-    if update.effective_user.id not in _ADMIN_IDS:
-        return
-
-    if len(context.args) != 2:
-        await update.message.reply_text("Формат: /givecredits user_id amount")
-        return
-
-    try:
-        target_user_id = int(context.args[0])
-        amount = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("Формат: /givecredits user_id amount")
-        return
-
     db = SessionLocal()
     try:
+        if not _is_admin(update, db):
+            return
+
+        if len(context.args) != 2:
+            await update.message.reply_text("Формат: /givecredits user_id amount")
+            return
+
+        try:
+            target_user_id = int(context.args[0])
+            amount = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("Формат: /givecredits user_id amount")
+            return
+
         balance = services.grant_admin_bonus(
             db,
             target_user_id=target_user_id,
@@ -554,22 +567,22 @@ async def markpaid_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message:
         return
 
-    if update.effective_user.id not in _ADMIN_IDS:
-        return
-
-    if len(context.args) != 2:
-        await update.message.reply_text("Формат: /markpaid user_id credits")
-        return
-
-    try:
-        paid_user_id = int(context.args[0])
-        credits = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("Формат: /markpaid user_id credits")
-        return
-
     db = SessionLocal()
     try:
+        if not _is_admin(update, db):
+            return
+
+        if len(context.args) != 2:
+            await update.message.reply_text("Формат: /markpaid user_id credits")
+            return
+
+        try:
+            paid_user_id = int(context.args[0])
+            credits = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("Формат: /markpaid user_id credits")
+            return
+
         services.apply_successful_payment(
             db,
             paid_user_id=paid_user_id,
