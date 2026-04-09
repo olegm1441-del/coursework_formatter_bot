@@ -13,6 +13,7 @@ import httpx
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from telegram import Bot
+from telegram.request import HTTPXRequest
 
 from db import Base, SessionLocal, engine
 import models  # noqa: F401
@@ -59,7 +60,8 @@ async def send_document(
     filename: str,
     caption: str,
 ) -> None:
-    bot = Bot(token=bot_token)
+    request = HTTPXRequest(write_timeout=60, connect_timeout=30, read_timeout=60)
+    bot = Bot(token=bot_token, request=request)
     with open(path, "rb") as f:
         await bot.send_document(
             chat_id=chat_id,
