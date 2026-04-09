@@ -14,6 +14,7 @@ student coursework document where tables rarely exceed 2 pages.
 from __future__ import annotations
 
 import copy
+from copy import deepcopy  # used in _merge_tables and _split_table
 import logging
 import math
 import re
@@ -308,6 +309,137 @@ def _split_table(tbl_elem, split_after_row: int, table_num: str) -> bool:
     return True
 
 
+# ── Table merging (pre-existing student splits) ───────────────────────────────
+
+_CONT_RE = re.compile(r"продолжени", re.IGNORECASE)
+_TBL_WORD_RE = re.compile(r"таблиц", re.IGNORECASE)
+
+
+def _is_student_continuation(text: str) -> bool:
+    """True if paragraph text looks like a student-written 'Продолжение таблицы X'."""
+    return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
+
+
+def _rows_match(row1, row2) -> bool:
+    """Compare cell texts of two table rows (True if identical)."""
+    cells1 = [c.text.strip() for c in row1.cells]
+    cells2 = [c.text.strip() for c in row2.cells]
+    return cells1 == cells2
+
+
+def _merge_tables(tbl1_elem, tbl1_obj, tbl2_elem, tbl2_obj) -> None:
+    """
+    Append all rows from tbl2 into tbl1.
+    If the first row of tbl2 is identical to the first row of tbl1 (duplicate
+    header), skip it.
+    """
+    rows1 = tbl1_obj.rows
+    rows2 = tbl2_obj.rows
+
+    if not rows2:
+        return
+
+    start_row = 0
+    if rows1 and rows2 and _rows_match(rows1[0], rows2[0]):
+        start_row = 1   # skip duplicate header
+
+    for row in rows2[start_row:]:
+        tbl1_elem.append(deepcopy(row._tr))
+
+    logger.debug("_merge_tables: appended %d row(s) from tbl2", len(rows2) - start_row)
+
+
+def apply_table_merging(doc: Document) -> int:
+    """
+    Phase 3 pre-pass — detect tables that the student manually split with a
+    "Продолжение таблицы X.Y.Z" paragraph and merge them back into a single table.
+
+    After merging, apply_table_continuation will re-split any table that genuinely
+    overflows the page and insert a correctly formatted continuation paragraph.
+
+    Returns the number of merges performed.
+    """
+    body_elems = list(_iter_body(doc))
+    n = len(body_elems)
+
+    # Collect merge jobs:
+    # (cont_para_indices, tbl2_index, tbl1_index)
+    merge_jobs: list[tuple[list[int], int, int]] = []
+
+    # Track the index of the most recent table
+    last_tbl_idx: int | None = None
+
+    i = 0
+    while i < n:
+        kind, xml_elem, py_obj = body_elems[i]
+
+        if kind == "table":
+            last_tbl_idx = i
+
+        elif kind == "paragraph":
+            text = (py_obj.text or "").strip()
+            if _is_student_continuation(text) and last_tbl_idx is not None:
+                # Collect the continuation paragraph + any trailing empty paras
+                cont_indices = [i]
+                j = i + 1
+                while j < n:
+                    k2, _, po2 = body_elems[j]
+                    if k2 != "paragraph":
+                        break
+                    t2 = (po2.text or "").strip()
+                    if t2:
+                        break   # non-empty non-table element — stop
+                    cont_indices.append(j)
+                    j += 1
+
+                # j must now point to the second table part
+                if j < n and body_elems[j][0] == "table":
+                    merge_jobs.append((cont_indices, j, last_tbl_idx))
+                    # Skip past everything we just catalogued
+                    i = j + 1
+                    last_tbl_idx = i - 1  # tbl2 is now the "last table"
+                    continue
+
+        i += 1
+
+    if not merge_jobs:
+        logger.info("table_merging: no pre-existing splits found")
+        return 0
+
+    # Apply in reverse order so indices remain valid
+    merged = 0
+    for cont_indices, tbl2_idx, tbl1_idx in reversed(merge_jobs):
+        try:
+            _, tbl1_xml, tbl1_obj = body_elems[tbl1_idx]
+            _, tbl2_xml, tbl2_obj = body_elems[tbl2_idx]
+            _merge_tables(tbl1_xml, tbl1_obj, tbl2_xml, tbl2_obj)
+
+            # Remove continuation paragraphs
+            for ci in cont_indices:
+                xe = body_elems[ci][1]
+                parent = xe.getparent()
+                if parent is not None:
+                    parent.remove(xe)
+
+            # Remove the second table element
+            parent = tbl2_xml.getparent()
+            if parent is not None:
+                parent.remove(tbl2_xml)
+
+            merged += 1
+            logger.info(
+                "table_merging: merged tbl@%d ← tbl@%d (removed %d cont para(s))",
+                tbl1_idx, tbl2_idx, len(cont_indices),
+            )
+        except Exception:
+            logger.exception(
+                "table_merging: failed to merge tbl@%d ← tbl@%d", tbl1_idx, tbl2_idx
+            )
+
+    logger.info("table_merging: %d merge(s) applied", merged)
+    return merged
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def apply_table_continuation(doc: Document) -> int:
@@ -323,7 +455,6 @@ def apply_table_continuation(doc: Document) -> int:
 
     current_h = 0.0          # running height on the current page
     last_tbl_num: str | None = None   # table number from the most recent caption
-    last_para_kind: str | None = None  # kind of the most recent paragraph
     splits: list[tuple] = []  # (tbl_xml, split_after_row, table_num)
 
     for kind, xml_elem, py_obj in body_elems:
@@ -334,10 +465,6 @@ def apply_table_continuation(doc: Document) -> int:
             if num:
                 last_tbl_num = num
 
-            # Detect existing "Продолжение таблицы" paragraph written by the student
-            is_continuation = bool(_TBL_NUM_RE.search(text) and "продолжение" in text.lower())
-            last_para_kind = "table_continuation" if is_continuation else ("empty" if not text else "other")
-
             h = _estimate_para_height(py_obj)
             current_h += h
             if current_h > body_h:
@@ -345,20 +472,6 @@ def apply_table_continuation(doc: Document) -> int:
 
         elif kind == "table":
             rows = py_obj.rows
-
-            # If the immediately preceding paragraph is an existing
-            # "Продолжение таблицы" written by the student, this table is
-            # already a manually split continuation — skip it entirely so
-            # we don't double-split or insert a second continuation header.
-            if last_para_kind == "table_continuation":
-                logger.debug(
-                    "table_continuation: skipping table (preceded by existing continuation para)"
-                )
-                last_para_kind = None
-                current_h += sum(_estimate_row_height(r, body_w) for r in rows)
-                continue
-
-            last_para_kind = None
 
             if len(rows) < 2:
                 # Single-row tables never need splitting
@@ -544,12 +657,17 @@ def apply_rule2_trailing_empties(doc: Document) -> int:
                         next_is_heading = _looks_like_heading(t_next)
 
                 if next_is_heading:
-                    # Check: does the run land near the page bottom?
-                    # "near" = current_h after the run would be close to body_h
                     run_total_h = sum(rh for _, rh in run_elems)
-                    end_h = run_h_start + run_total_h
-                    near_bottom = end_h >= (body_h - _BOTTOM_TOLERANCE_PT)
-                    if near_bottom:
+                    heading_h = _estimate_para_height(po_next)
+
+                    # Only remove if the heading lands on the SAME page.
+                    # If the empty run already pushes past body_h → heading is on
+                    # the next page → the empties are harmless bottom-of-page padding,
+                    # leave them alone (user confirmed this is acceptable).
+                    heading_on_next_page = (
+                        run_h_start + run_total_h + heading_h > body_h
+                    )
+                    if not heading_on_next_page:
                         for xe, _ in run_elems:
                             to_remove.append(xe)
                         current_h = run_h_start   # pretend the run wasn't there
