@@ -8,7 +8,6 @@ from .pagination_rules import apply_pagination_rules
 from .table_continuation import (
     apply_table_merging,
     apply_table_continuation,
-    apply_rule2_trailing_empties,
     apply_rule4_empty_first_lines,
 )
 
@@ -45,14 +44,12 @@ def format_docx(input_path: str, output_path: str) -> str:
         doc = Document(str(output_path))
         n_merged  = apply_table_merging(doc)        # merge pre-existing student splits
         n_splits  = apply_table_continuation(doc)   # re-split overflowing tables
-        n_rule2   = apply_rule2_trailing_empties(doc)
         n_rule4   = apply_rule4_empty_first_lines(doc)
-        if n_merged > 0 or n_splits > 0 or n_rule2 > 0 or n_rule4 > 0:
+        if n_merged > 0 or n_splits > 0 or n_rule4 > 0:
             doc.save(str(output_path))
             logger.info(
-                "format_docx: phase3 merged=%d splits=%d "
-                "trailing_empties=%d empty_first_lines=%d",
-                n_merged, n_splits, n_rule2, n_rule4,
+                "format_docx: phase3 merged=%d splits=%d empty_first_lines=%d",
+                n_merged, n_splits, n_rule4,
             )
         else:
             logger.info("format_docx: phase3 no changes")

@@ -111,9 +111,42 @@ def _estimate_para_height(p) -> float:
     return n_lines * line_h + sb + sa
 
 
-def _estimate_row_height(row, body_width_pt: float) -> float:
+def _tbl_col_widths_pt(tbl_elem) -> list[float]:
+    """
+    Read actual column widths (in pt) from w:tblGrid / w:gridCol w:w (twips).
+    Returns an empty list if not present.
+    """
+    tblGrid = tbl_elem.find(qn("w:tblGrid"))
+    if tblGrid is None:
+        return []
+    widths = []
+    for gc in tblGrid.findall(qn("w:gridCol")):
+        w_val = gc.get(qn("w:w"))
+        if w_val and w_val.isdigit():
+            widths.append(_twip_pt(int(w_val)))
+    return widths
+
+
+def _cell_font_size_pt(cell) -> float:
+    """
+    Read font size (pt) from the first run in the first paragraph of a cell.
+    Falls back to _TABLE_LINE_PT (12 pt) if not found.
+    """
+    for p in cell._element.findall(qn("w:p")):
+        for r in p.findall(qn("w:r")):
+            rPr = r.find(qn("w:rPr"))
+            if rPr is not None:
+                sz = rPr.find(qn("w:sz"))
+                if sz is not None:
+                    val = sz.get(qn("w:val"))
+                    if val and val.isdigit():
+                        return int(val) / 2  # half-points → points
+    return _TABLE_LINE_PT
+
+
+def _estimate_row_height(row, body_width_pt: float, col_widths_pt: list[float] | None = None) -> float:
     """Estimated rendered height of a table row in points."""
-    # 1. Explicit height from XML (twips)
+    # 1. Explicit height from XML (twips) — most reliable
     tr = row._tr
     trPr = tr.find(qn("w:trPr"))
     if trPr is not None:
@@ -128,22 +161,42 @@ def _estimate_row_height(row, body_width_pt: float) -> float:
     # 2. Estimate from cell content
     cells = row.cells
     if not cells:
-        return _TABLE_LINE_PT
+        return _TABLE_LINE_PT + _CELL_PADDING_PT
 
     num_cols = len(cells)
-    col_w_pt = max(20.0, body_width_pt / num_cols)
-    chars_per_col = max(8, int(col_w_pt / _PT_PER_CHAR_TABLE))
 
-    max_h = _TABLE_LINE_PT
+    # Build per-cell column width: prefer actual w:tblGrid widths, else equal split
+    if col_widths_pt and len(col_widths_pt) >= num_cols:
+        col_ws = col_widths_pt
+    else:
+        equal_w = max(20.0, body_width_pt / num_cols)
+        col_ws = [equal_w] * num_cols
+
+    max_h = 0.0
     seen: set[int] = set()
+    col_idx = 0
     for cell in cells:
         cid = id(cell._element)
         if cid in seen:
+            col_idx += 1
             continue
         seen.add(cid)
+
+        col_w_pt = col_ws[col_idx] if col_idx < len(col_ws) else max(20.0, body_width_pt / num_cols)
+
+        # Use actual font size for this cell
+        font_pt = _cell_font_size_pt(cell)
+        # pt-per-char: TNR proportional font, empirically ~0.42 × font_pt per avg char
+        pt_per_char = font_pt * 0.42
+        chars_per_line = max(4, int(col_w_pt / pt_per_char))
+        line_h = font_pt  # single-spaced table cell
+
         text = (cell.text or "").strip()
-        n = max(1, math.ceil(len(text) / chars_per_col)) if text else 1
-        max_h = max(max_h, n * _TABLE_LINE_PT)
+        n_lines = max(1, math.ceil(len(text) / chars_per_line)) if text else 1
+        cell_h = n_lines * line_h
+        max_h = max(max_h, cell_h)
+
+        col_idx += 1
 
     return max_h + _CELL_PADDING_PT
 
@@ -316,7 +369,15 @@ _TBL_WORD_RE = re.compile(r"таблиц", re.IGNORECASE)
 
 
 def _is_student_continuation(text: str) -> bool:
-    """True if paragraph text looks like a student-written 'Продолжение таблицы X'."""
+    """
+    True if paragraph text looks like a student-written standalone
+    'Продолжение таблицы X.Y.Z' header.
+
+    Guard: text must be short (≤100 chars) — long paragraphs are prose
+    that merely happen to contain those words mid-sentence.
+    """
+    if len(text) > 100:
+        return False
     return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
 
 
@@ -479,7 +540,8 @@ def apply_table_continuation(doc: Document) -> int:
                 continue
 
             table_num = last_tbl_num or "?"
-            row_hs = [_estimate_row_height(r, body_w) for r in rows]
+            col_widths = _tbl_col_widths_pt(xml_elem)
+            row_hs = [_estimate_row_height(r, body_w, col_widths) for r in rows]
             split_after = -1
 
             for row_idx, rh in enumerate(row_hs):
@@ -562,7 +624,8 @@ def apply_rule4_empty_first_lines(doc: Document) -> int:
 
         elif kind == "table":
             rows = py_obj.rows
-            for rh in (_estimate_row_height(r, body_w) for r in rows):
+            col_widths = _tbl_col_widths_pt(xml_elem)
+            for rh in (_estimate_row_height(r, body_w, col_widths) for r in rows):
                 current_h += rh
                 if current_h > body_h:
                     current_h = rh
