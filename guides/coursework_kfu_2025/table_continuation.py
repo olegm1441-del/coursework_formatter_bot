@@ -281,8 +281,8 @@ def _estimate_cell_height(cell, col_w_pt: float) -> float:
         line_h  = _para_line_height_pt(p_elem, font_pt)
         sb, sa  = _para_spacing_pt(p_elem)
 
-        # TNR avg char width ≈ 0.42 × font size (empirical for mixed-case Russian/Latin)
-        pt_per_char  = font_pt * 0.42
+        # TNR avg char width ≈ 0.50 × font size (conservative — Cyrillic glyphs are wider than Latin)
+        pt_per_char  = font_pt * 0.50
         chars_per_line = max(4, int(col_w_pt / pt_per_char))
 
         # Gather text from all runs (preserves multi-run paragraphs)
@@ -412,6 +412,8 @@ def _make_continuation_para(table_num: str) -> OxmlElement:
     spacing = OxmlElement("w:spacing")
     spacing.set(qn("w:before"), "0")
     spacing.set(qn("w:after"), "0")
+    spacing.set(qn("w:line"), "360")       # 1.5× line spacing (360 / 240 = 1.5)
+    spacing.set(qn("w:lineRule"), "auto")
     pPr.append(spacing)
 
     # keep_with_next so "Продолжение" doesn't hang alone without the table
