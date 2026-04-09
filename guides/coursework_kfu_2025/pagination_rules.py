@@ -61,7 +61,7 @@ def _apply_rule3(paragraphs: list, kinds: list[str]) -> int:
     """
     count = 0
     for p, kind in zip(paragraphs, kinds):
-        if kind in ("table_caption", "table_title"):
+        if kind in ("table_caption", "table_title", "table_continuation"):
             _set_keep_with_next(p)
             count += 1
     return count
