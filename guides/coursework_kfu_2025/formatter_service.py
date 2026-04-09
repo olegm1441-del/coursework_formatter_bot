@@ -8,7 +8,9 @@ from .pagination_rules import apply_pagination_rules
 from .table_continuation import (
     apply_table_merging,
     apply_table_continuation,
+    apply_rule3_table_orphan,
     apply_rule4_empty_first_lines,
+    apply_rule6_figure_orphan,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,17 +41,19 @@ def format_docx(input_path: str, output_path: str) -> str:
     except Exception:
         logger.exception("format_docx: phase2 failed, skipping (phase1 result preserved)")
 
-    # Phase 3: table merging → continuation → Rule 2 → Rule 4 (geometry, no LO)
+    # Phase 3: table merging → continuation → Rule 3 → Rule 4 → Rule 6 (geometry, no LO)
     try:
         doc = Document(str(output_path))
         n_merged  = apply_table_merging(doc)        # merge pre-existing student splits
-        n_splits  = apply_table_continuation(doc)   # re-split overflowing tables
-        n_rule4   = apply_rule4_empty_first_lines(doc)
-        if n_merged > 0 or n_splits > 0 or n_rule4 > 0:
+        n_splits  = apply_table_continuation(doc)   # Rule 1: re-split overflowing tables
+        n_rule3   = apply_rule3_table_orphan(doc)   # Rule 3: table caption orphan
+        n_rule4   = apply_rule4_empty_first_lines(doc)  # Rule 4: empty first lines (iterative)
+        n_rule6   = apply_rule6_figure_orphan(doc)  # Rule 6: figure caption orphan
+        if n_merged > 0 or n_splits > 0 or n_rule3 > 0 or n_rule4 > 0 or n_rule6 > 0:
             doc.save(str(output_path))
             logger.info(
-                "format_docx: phase3 merged=%d splits=%d empty_first_lines=%d",
-                n_merged, n_splits, n_rule4,
+                "format_docx: phase3 merged=%d splits=%d rule3=%d rule4=%d rule6=%d",
+                n_merged, n_splits, n_rule3, n_rule4, n_rule6,
             )
         else:
             logger.info("format_docx: phase3 no changes")

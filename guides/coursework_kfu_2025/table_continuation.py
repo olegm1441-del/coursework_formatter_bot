@@ -479,6 +479,17 @@ def _split_table(tbl_elem, split_after_row: int, table_num: str) -> bool:
     # Deep-copy entire table → becomes the second (continuation) table
     tbl2 = copy.deepcopy(tbl_elem)
 
+    # ── Strip stale LRPB markers from tbl2 ────────────────────────────────
+    # The rows moved to tbl2 carry w:lastRenderedPageBreak elements that
+    # reflect the ORIGINAL document layout.  After the split, those page
+    # boundaries are no longer valid.  Removing them prevents a second
+    # formatter pass from treating them as fresh split signals and
+    # re-splitting the continuation table.
+    for lrpb_elem in list(tbl2.findall(".//" + _LRPB_TAG)):
+        parent = lrpb_elem.getparent()
+        if parent is not None:
+            parent.remove(lrpb_elem)
+
     # ── Trim tbl1: remove rows after the split ─────────────────────────────
     tbl1_rows = tbl_elem.findall(qn("w:tr"))
     for row in tbl1_rows[split_after_row + 1:]:
@@ -534,6 +545,23 @@ def _is_student_continuation(text: str) -> bool:
     if len(text) > 27:
         return False
     return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
+
+
+def _is_formatter_continuation(para) -> bool:
+    """
+    True if this paragraph is a formatter-inserted 'Продолжение таблицы' paragraph
+    (right-aligned — our format).  Student-written continuation lines are typically
+    left-aligned or centred, so alignment is a reliable discriminator.
+    """
+    try:
+        pPr = para._element.find(qn("w:pPr"))
+        if pPr is not None:
+            jc = pPr.find(qn("w:jc"))
+            if jc is not None and jc.get(qn("w:val")) == "right":
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _rows_match(row1, row2) -> bool:
@@ -594,7 +622,9 @@ def apply_table_merging(doc: Document) -> int:
 
         elif kind == "paragraph":
             text = (py_obj.text or "").strip()
-            if _is_student_continuation(text) and last_tbl_idx is not None:
+            if (_is_student_continuation(text)
+                    and not _is_formatter_continuation(py_obj)
+                    and last_tbl_idx is not None):
                 # Collect the continuation paragraph + any trailing empty paras
                 cont_indices = [i]
                 j = i + 1
@@ -752,34 +782,83 @@ def apply_table_continuation(doc: Document) -> int:
     return n_splits
 
 
+# Only trust a w:lastRenderedPageBreak calibration signal when we have already
+# accumulated at least this fraction of the page.  LRPB markers that fire at
+# very low cumulative heights are stale artefacts from the ORIGINAL layout that
+# no longer reflect page boundaries in the MODIFIED document (e.g. a paragraph
+# that was the first on a page in the source but is now mid-page after a table
+# split was inserted above it).
+_LRPB_TRUST_RATIO = 0.25   # 25 % of body height ≈ ~178 pt for a KFU page
+
+
+def _lrpb_calibrate(xml_elem, current_h: float, body_h: float) -> float:
+    """
+    Return the new current_h after applying an optional LRPB calibration.
+
+    Resets to 0.0 only when:
+      1. The paragraph contains a w:lastRenderedPageBreak, AND
+      2. current_h >= body_h * _LRPB_TRUST_RATIO
+         (enough content has been seen that the LRPB is likely genuine).
+    """
+    if _para_has_lrpb(xml_elem) and current_h >= body_h * _LRPB_TRUST_RATIO:
+        return 0.0
+    return current_h
+
+
+# ── Helpers for geometry-based page-break rules ───────────────────────────────
+
+_TABLE_CAP_RE_GEOM = re.compile(
+    r"^\s*(таблица|table)\s+\d+(?:\.\d+){0,2}",
+    re.IGNORECASE,
+)
+_FIGURE_CAP_RE_GEOM = re.compile(
+    r"^\s*(рис\.|рисунок|figure|fig\.)\s*\d+",
+    re.IGNORECASE,
+)
+
+
+def _para_has_image(p_elem) -> bool:
+    """True if the paragraph XML element contains an inline drawing or picture."""
+    return bool(
+        p_elem.findall(".//" + qn("w:drawing"))
+        or p_elem.findall(".//" + qn("w:pict"))
+    )
+
+
+def _set_page_break_before(para_elem) -> None:
+    """Add w:pageBreakBefore to a paragraph's pPr (idempotent)."""
+    pPr = para_elem.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        para_elem.insert(0, pPr)
+    if pPr.find(qn("w:pageBreakBefore")) is None:
+        pb = OxmlElement("w:pageBreakBefore")
+        pPr.append(pb)
+
+
 # ── Rule 4: no empty first line of page ──────────────────────────────────────
 
-def apply_rule4_empty_first_lines(doc: Document) -> int:
+def _apply_rule4_pass(doc: Document) -> int:
     """
-    Rule 4 — Remove empty paragraphs that land at the very top of a page.
-
-    Strategy: same geometry tracker as apply_table_continuation.
-    When the running height crosses the page boundary and the next body
-    element is an empty paragraph, mark it for deletion.
+    Single pass of Rule 4 — remove empty paragraphs at the very top of a page.
 
     Conservative: only removes paragraphs with no text AND no meaningful
     spacing (space_before ≤ 2 pt). This avoids deleting intentional
     visual separators.
 
-    Returns the number of paragraphs removed.
+    Returns the number of paragraphs removed in this pass.
     """
     body_h = _body_height_pt(doc)
     body_w = _body_width_pt(doc)
 
     body_elems = list(_iter_body(doc))
     current_h = 0.0
-    to_remove: list = []   # xml elements to delete
+    to_remove: list = []
 
     for kind, xml_elem, py_obj in body_elems:
         if kind == "paragraph":
-            # LRPB calibration — same as in apply_table_continuation
-            if _para_has_lrpb(xml_elem):
-                current_h = 0.0
+            # LRPB calibration — only trust when enough page content was seen
+            current_h = _lrpb_calibrate(xml_elem, current_h, body_h)
 
             h = _estimate_para_height(py_obj)
 
@@ -812,7 +891,6 @@ def apply_rule4_empty_first_lines(doc: Document) -> int:
                 if current_h > body_h:
                     current_h = rh
 
-    # Remove from bottom to top so parent indices stay valid
     removed = 0
     for elem in reversed(to_remove):
         parent = elem.getparent()
@@ -820,8 +898,212 @@ def apply_rule4_empty_first_lines(doc: Document) -> int:
             parent.remove(elem)
             removed += 1
 
-    logger.info("rule4: removed %d empty first-line paragraph(s)", removed)
     return removed
+
+
+def apply_rule4_empty_first_lines(doc: Document) -> int:
+    """
+    Rule 4 — Remove empty paragraphs that land at the very top of a page.
+
+    Runs iteratively until convergence: each removal can shift subsequent
+    page boundaries, potentially exposing new violations that the first
+    pass missed (stale LRPB calibration + cascading removals).
+
+    Returns total number of paragraphs removed across all passes.
+    """
+    total = 0
+    for _ in range(5):   # cap at 5 iterations to prevent infinite loops
+        n = _apply_rule4_pass(doc)
+        total += n
+        if n == 0:
+            break
+    logger.info("rule4: removed %d empty first-line paragraph(s) total", total)
+    return total
+
+
+# ── Rule 3: no orphan table caption at page bottom ────────────────────────────
+
+def apply_rule3_table_orphan(doc: Document) -> int:
+    """
+    Rule 3 (geometry) — Prevent table caption from hanging alone at page bottom.
+
+    If a table_caption paragraph (optionally followed by a short title line)
+    fits on the current page but the table's first data row does not,
+    set w:pageBreakBefore on the caption so the caption and table land
+    together on the next page.
+
+    Returns the number of captions given a pageBreakBefore.
+    """
+    body_h = _body_height_pt(doc)
+    body_w = _body_width_pt(doc)
+    body_elems = list(_iter_body(doc))
+    n = len(body_elems)
+    current_h = 0.0
+    count = 0
+
+    i = 0
+    while i < n:
+        kind, xml_elem, py_obj = body_elems[i]
+
+        if kind == "paragraph":
+            current_h = _lrpb_calibrate(xml_elem, current_h, body_h)
+
+            text = (py_obj.text or "").strip()
+            h = _estimate_para_height(py_obj)
+
+            if not _TABLE_CAP_RE_GEOM.match(text):
+                if current_h + h > body_h:
+                    current_h = h
+                else:
+                    current_h += h
+                i += 1
+                continue
+
+            # Found a table caption — collect caption + possible title lines
+            cap_start_h = current_h
+            cap_items: list[tuple] = [(xml_elem, h)]   # (xml_elem, height)
+
+            j = i + 1
+            while j < n:
+                k2, xe2, po2 = body_elems[j]
+                if k2 != "paragraph":
+                    break
+                t2 = (po2.text or "").strip()
+                # Stop at: empty para, very long line (body text), another caption
+                if not t2 or len(t2) > 200 or _TABLE_CAP_RE_GEOM.match(t2):
+                    break
+                cap_items.append((xe2, _estimate_para_height(po2)))
+                j += 1
+
+            cap_total_h = sum(h2 for _, h2 in cap_items)
+
+            # j should point to the table element
+            if j < n and body_elems[j][0] == "table":
+                tbl_py = body_elems[j][2]
+                tbl_xml = body_elems[j][1]
+                rows = tbl_py.rows
+                if rows:
+                    col_widths = _tbl_col_widths_pt(tbl_xml)
+                    first_row_h = _estimate_row_height(rows[0], body_w, col_widths)
+
+                    caption_fits     = (cap_start_h + cap_total_h <= body_h)
+                    first_row_orphan = (cap_start_h + cap_total_h + first_row_h > body_h)
+                    fits_fresh       = (cap_total_h + first_row_h <= body_h)
+
+                    if caption_fits and first_row_orphan and fits_fresh:
+                        _set_page_break_before(cap_items[0][0])
+                        count += 1
+                        logger.info(
+                            "rule3: pageBreakBefore on table caption [%s]",
+                            text[:50],
+                        )
+                        current_h = cap_total_h
+                        i = j      # resume from the table element
+                        continue
+
+            # No action — advance geometry past caption + title
+            current_h = cap_start_h + cap_total_h
+            if current_h > body_h:
+                current_h = cap_items[-1][1]
+            i = j
+            continue
+
+        elif kind == "table":
+            rows = py_obj.rows
+            col_widths = _tbl_col_widths_pt(xml_elem)
+            for row in rows:
+                rh = _estimate_row_height(row, body_w, col_widths)
+                if current_h + rh > body_h:
+                    current_h = rh
+                else:
+                    current_h += rh
+
+        i += 1
+
+    logger.info("rule3: %d table caption(s) given pageBreakBefore", count)
+    return count
+
+
+# ── Rule 6: figure must stay with its caption ─────────────────────────────────
+
+def apply_rule6_figure_orphan(doc: Document) -> int:
+    """
+    Rule 6 (geometry) — Prevent figure caption from being stranded at the
+    top of the next page while the figure itself is on the current page.
+
+    If an image paragraph fits on the current page but the immediately
+    following figure_caption does not, set w:pageBreakBefore on the image
+    so both the image and caption land on the next page together.
+
+    Returns the number of images given a pageBreakBefore.
+    """
+    body_h = _body_height_pt(doc)
+    body_w = _body_width_pt(doc)
+    body_elems = list(_iter_body(doc))
+    n = len(body_elems)
+    current_h = 0.0
+    count = 0
+
+    i = 0
+    while i < n:
+        kind, xml_elem, py_obj = body_elems[i]
+
+        if kind == "paragraph":
+            current_h = _lrpb_calibrate(xml_elem, current_h, body_h)
+
+            h = _estimate_para_height(py_obj)
+
+            if not _para_has_image(xml_elem):
+                if current_h + h > body_h:
+                    current_h = h
+                else:
+                    current_h += h
+                i += 1
+                continue
+
+            # Image paragraph — check if the next paragraph is a figure caption
+            if i + 1 < n:
+                nk, nxe, npo = body_elems[i + 1]
+                if nk == "paragraph":
+                    next_text = (npo.text or "").strip()
+                    if _FIGURE_CAP_RE_GEOM.match(next_text):
+                        caption_h   = _estimate_para_height(npo)
+                        img_fits    = (current_h + h <= body_h)
+                        cap_orphan  = (current_h + h + caption_h > body_h)
+                        fits_fresh  = (h + caption_h <= body_h)
+
+                        if img_fits and cap_orphan and fits_fresh:
+                            _set_page_break_before(xml_elem)
+                            count += 1
+                            logger.info(
+                                "rule6: pageBreakBefore on image before [%s]",
+                                next_text[:50],
+                            )
+                            # Both now start fresh on next page
+                            current_h = h + caption_h
+                            i += 2
+                            continue
+
+            # Normal advance
+            if current_h + h > body_h:
+                current_h = h
+            else:
+                current_h += h
+
+        elif kind == "table":
+            rows = py_obj.rows
+            col_widths = _tbl_col_widths_pt(xml_elem)
+            for row in rows:
+                rh = _estimate_row_height(row, body_w, col_widths)
+                if current_h + rh > body_h:
+                    current_h = rh
+                else:
+                    current_h += rh
+
+        i += 1
+
+    logger.info("rule6: %d figure(s) given pageBreakBefore", count)
+    return count
 
 
 # ── Rule 2: no trailing empty lines at page bottom before a heading ───────────
