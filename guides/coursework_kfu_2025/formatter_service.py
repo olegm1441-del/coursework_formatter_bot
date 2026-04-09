@@ -5,7 +5,11 @@ from docx import Document
 
 from .safe_formatter import process_document
 from .pagination_rules import apply_pagination_rules
-from .table_continuation import apply_table_continuation, apply_rule4_empty_first_lines
+from .table_continuation import (
+    apply_table_continuation,
+    apply_rule4_empty_first_lines,
+    apply_rule2_trailing_empties,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +39,18 @@ def format_docx(input_path: str, output_path: str) -> str:
     except Exception:
         logger.exception("format_docx: phase2 failed, skipping (phase1 result preserved)")
 
-    # Phase 3: table continuation + Rule 4 (geometry-based, no LibreOffice)
+    # Phase 3: table continuation + Rule 2 + Rule 4 (geometry-based, no LibreOffice)
     try:
         doc = Document(str(output_path))
-        n_splits = apply_table_continuation(doc)
-        n_removed = apply_rule4_empty_first_lines(doc)
-        if n_splits > 0 or n_removed > 0:
+        n_splits  = apply_table_continuation(doc)
+        n_rule2   = apply_rule2_trailing_empties(doc)
+        n_rule4   = apply_rule4_empty_first_lines(doc)
+        if n_splits > 0 or n_rule2 > 0 or n_rule4 > 0:
             doc.save(str(output_path))
             logger.info(
-                "format_docx: phase3 splits=%d empty_first_lines_removed=%d",
-                n_splits, n_removed,
+                "format_docx: phase3 splits=%d trailing_empties_removed=%d "
+                "empty_first_lines_removed=%d",
+                n_splits, n_rule2, n_rule4,
             )
         else:
             logger.info("format_docx: phase3 no changes")

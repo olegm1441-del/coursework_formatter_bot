@@ -55,11 +55,16 @@ def _body_width_pt(doc: Document) -> float:
 _BODY_LINE_PT  = 14 * 1.5
 # Table cells: Times New Roman 12 pt, 1.0 line spacing → ~12 pt/line
 _TABLE_LINE_PT = 12 * 1.0
-# Empirical chars-per-line for 14 pt TNR in a 17 cm body column
-_BODY_CHARS_PER_LINE = 68
+# Empirical chars-per-line for 14 pt TNR in a 17 cm body column.
+# Lowered from 68 → 62 to avoid underestimating multi-line paragraphs
+# (shorter effective measure due to first-line indent + word-wrap).
+_BODY_CHARS_PER_LINE = 62
 
 # Approx pt per char for 12 pt TNR (used to derive chars-per-column)
 _PT_PER_CHAR_TABLE = 6.0
+
+# Top+bottom cell padding in pt (default Word cell margins ≈ 2.25 pt each side)
+_CELL_PADDING_PT = 4.5
 
 
 def _estimate_para_height(p) -> float:
@@ -69,11 +74,26 @@ def _estimate_para_height(p) -> float:
 
     line_h = _BODY_LINE_PT
     try:
-        ls = p.paragraph_format.line_spacing
+        pf = p.paragraph_format
+        ls = pf.line_spacing
+        ls_rule = pf.line_spacing_rule   # None | WD_LINE_SPACING (0=auto,1=exact,2=atLeast,…)
         if ls is not None:
-            if isinstance(ls, (int, float)):
+            # ls_rule == 1 means "Exactly" — ls is stored in EMU, not as a multiplier
+            if ls_rule is not None and int(ls_rule) == 1:
+                # Exact rule: ls is an Emu object → .pt gives the fixed line height
+                if hasattr(ls, "pt"):
+                    line_h = ls.pt
+                else:
+                    # Fallback: raw int = EMU
+                    try:
+                        line_h = int(ls) / EMU_PER_PT
+                    except (TypeError, ValueError):
+                        pass
+            elif isinstance(ls, (int, float)):
+                # Multiplier (e.g. 1.5)
                 line_h = 14 * float(ls)
             elif hasattr(ls, "pt"):
+                # Fixed spacing stored as Emu (atLeast / exact via old API)
                 line_h = ls.pt
     except Exception:
         pass
@@ -124,7 +144,7 @@ def _estimate_row_height(row, body_width_pt: float) -> float:
         n = max(1, math.ceil(len(text) / chars_per_col)) if text else 1
         max_h = max(max_h, n * _TABLE_LINE_PT)
 
-    return max_h
+    return max_h + _CELL_PADDING_PT
 
 
 # ── Body element iteration ────────────────────────────────────────────────────
@@ -303,6 +323,7 @@ def apply_table_continuation(doc: Document) -> int:
 
     current_h = 0.0          # running height on the current page
     last_tbl_num: str | None = None   # table number from the most recent caption
+    last_para_kind: str | None = None  # kind of the most recent paragraph
     splits: list[tuple] = []  # (tbl_xml, split_after_row, table_num)
 
     for kind, xml_elem, py_obj in body_elems:
@@ -313,6 +334,10 @@ def apply_table_continuation(doc: Document) -> int:
             if num:
                 last_tbl_num = num
 
+            # Detect existing "Продолжение таблицы" paragraph written by the student
+            is_continuation = bool(_TBL_NUM_RE.search(text) and "продолжение" in text.lower())
+            last_para_kind = "table_continuation" if is_continuation else ("empty" if not text else "other")
+
             h = _estimate_para_height(py_obj)
             current_h += h
             if current_h > body_h:
@@ -320,6 +345,21 @@ def apply_table_continuation(doc: Document) -> int:
 
         elif kind == "table":
             rows = py_obj.rows
+
+            # If the immediately preceding paragraph is an existing
+            # "Продолжение таблицы" written by the student, this table is
+            # already a manually split continuation — skip it entirely so
+            # we don't double-split or insert a second continuation header.
+            if last_para_kind == "table_continuation":
+                logger.debug(
+                    "table_continuation: skipping table (preceded by existing continuation para)"
+                )
+                last_para_kind = None
+                current_h += sum(_estimate_row_height(r, body_w) for r in rows)
+                continue
+
+            last_para_kind = None
+
             if len(rows) < 2:
                 # Single-row tables never need splitting
                 current_h += sum(_estimate_row_height(r, body_w) for r in rows)
@@ -423,4 +463,125 @@ def apply_rule4_empty_first_lines(doc: Document) -> int:
             removed += 1
 
     logger.info("rule4: removed %d empty first-line paragraph(s)", removed)
+    return removed
+
+
+# ── Rule 2: no trailing empty lines at page bottom before a heading ───────────
+
+_HEADING_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)*\.?\s",   # matches "1. …" / "1.1. …" / "1.1.1. …"
+)
+
+
+def _looks_like_heading(text: str) -> bool:
+    return bool(_HEADING_RE.match(text))
+
+
+def apply_rule2_trailing_empties(doc: Document) -> int:
+    """
+    Rule 2 — Remove empty paragraphs that sit at the very bottom of a page
+    when the next non-empty element is a heading (heading1 / heading2).
+
+    These ghost lines appear because the geometry estimator places them
+    mid-page, but Word's real line-breaking pushes them to page bottom,
+    so Rule 4 (which only catches first-on-page empties) never fires.
+
+    Strategy:
+      Walk body elements in order.  Collect runs of consecutive empty
+      paragraphs.  When the run is followed by a heading-like paragraph
+      AND the geometry says the run straddles or is near the page
+      boundary (within _BOTTOM_TOLERANCE_PT), mark the empties for removal.
+
+    Conservative: requires the very next non-empty paragraph to be a heading
+    so we don't accidentally eat intentional visual separators between sections.
+
+    Returns the number of paragraphs removed.
+    """
+    body_h = _body_height_pt(doc)
+    body_w = _body_width_pt(doc)
+    _BOTTOM_TOLERANCE_PT = _BODY_LINE_PT * 3   # empty lines within last ~3 lines
+
+    body_elems = list(_iter_body(doc))
+    n = len(body_elems)
+
+    current_h = 0.0
+    to_remove: list = []
+
+    i = 0
+    while i < n:
+        kind, xml_elem, py_obj = body_elems[i]
+
+        if kind == "paragraph":
+            text = (py_obj.text or "").strip()
+            h = _estimate_para_height(py_obj)
+
+            if current_h + h > body_h:
+                current_h = h   # new page
+
+            if not text:
+                # Start of a potential empty-paragraph run
+                run_start = i
+                run_elems = [(xml_elem, h)]
+                run_h_start = current_h   # height at start of run
+
+                j = i + 1
+                while j < n:
+                    k2, xe2, po2 = body_elems[j]
+                    if k2 != "paragraph":
+                        break
+                    t2 = (po2.text or "").strip()
+                    if t2:
+                        break
+                    run_elems.append((xe2, _estimate_para_height(po2)))
+                    j += 1
+
+                # j now points to the first non-empty element after the run
+                next_is_heading = False
+                if j < n:
+                    k_next, _, po_next = body_elems[j]
+                    if k_next == "paragraph":
+                        t_next = (po_next.text or "").strip()
+                        next_is_heading = _looks_like_heading(t_next)
+
+                if next_is_heading:
+                    # Check: does the run land near the page bottom?
+                    # "near" = current_h after the run would be close to body_h
+                    run_total_h = sum(rh for _, rh in run_elems)
+                    end_h = run_h_start + run_total_h
+                    near_bottom = end_h >= (body_h - _BOTTOM_TOLERANCE_PT)
+                    if near_bottom:
+                        for xe, _ in run_elems:
+                            to_remove.append(xe)
+                        current_h = run_h_start   # pretend the run wasn't there
+                        i = j
+                        continue
+
+                # Otherwise just advance normally through the run
+                for _, rh in run_elems:
+                    current_h += rh
+                    if current_h > body_h:
+                        current_h = rh
+                i = j
+                continue
+
+            else:
+                current_h += h
+
+        elif kind == "table":
+            rows = py_obj.rows
+            for rh in (_estimate_row_height(r, body_w) for r in rows):
+                current_h += rh
+                if current_h > body_h:
+                    current_h = rh
+
+        i += 1
+
+    removed = 0
+    for elem in reversed(to_remove):
+        parent = elem.getparent()
+        if parent is not None:
+            parent.remove(elem)
+            removed += 1
+
+    logger.info("rule2: removed %d trailing empty paragraph(s) before headings", removed)
     return removed
