@@ -357,3 +357,70 @@ def apply_table_continuation(doc: Document) -> int:
 
     logger.info("table_continuation: %d split(s) applied", n_splits)
     return n_splits
+
+
+# ── Rule 4: no empty first line of page ──────────────────────────────────────
+
+def apply_rule4_empty_first_lines(doc: Document) -> int:
+    """
+    Rule 4 — Remove empty paragraphs that land at the very top of a page.
+
+    Strategy: same geometry tracker as apply_table_continuation.
+    When the running height crosses the page boundary and the next body
+    element is an empty paragraph, mark it for deletion.
+
+    Conservative: only removes paragraphs with no text AND no meaningful
+    spacing (space_before ≤ 2 pt). This avoids deleting intentional
+    visual separators.
+
+    Returns the number of paragraphs removed.
+    """
+    body_h = _body_height_pt(doc)
+    body_w = _body_width_pt(doc)
+
+    body_elems = list(_iter_body(doc))
+    current_h = 0.0
+    to_remove: list = []   # xml elements to delete
+
+    for kind, xml_elem, py_obj in body_elems:
+        if kind == "paragraph":
+            h = _estimate_para_height(py_obj)
+
+            page_overflow = (current_h + h > body_h)
+            if page_overflow:
+                current_h = 0.0   # new page starts
+
+            text = (py_obj.text or "").strip()
+            is_empty = not text
+
+            if page_overflow and is_empty:
+                # Check it's not a meaningful spacer (large space_before)
+                try:
+                    sb = py_obj.paragraph_format.space_before
+                    if sb and sb.pt > 2:
+                        current_h += h
+                        continue
+                except Exception:
+                    pass
+                to_remove.append(xml_elem)
+                # current_h stays 0 — next element is still first on page
+            else:
+                current_h += h
+
+        elif kind == "table":
+            rows = py_obj.rows
+            for rh in (_estimate_row_height(r, body_w) for r in rows):
+                current_h += rh
+                if current_h > body_h:
+                    current_h = rh
+
+    # Remove from bottom to top so parent indices stay valid
+    removed = 0
+    for elem in reversed(to_remove):
+        parent = elem.getparent()
+        if parent is not None:
+            parent.remove(elem)
+            removed += 1
+
+    logger.info("rule4: removed %d empty first-line paragraph(s)", removed)
+    return removed
