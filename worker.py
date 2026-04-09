@@ -60,7 +60,7 @@ async def send_document(
     filename: str,
     caption: str,
 ) -> None:
-    request = HTTPXRequest(write_timeout=60, connect_timeout=30, read_timeout=60)
+    request = HTTPXRequest(write_timeout=120, connect_timeout=30, read_timeout=120)
     bot = Bot(token=bot_token, request=request)
     with open(path, "rb") as f:
         await bot.send_document(
@@ -417,6 +417,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             output_path,
         )
 
+        logger.info("send_document_start request_id=%s", request.id)
         asyncio.run(
             send_document(
                 bot_token,
