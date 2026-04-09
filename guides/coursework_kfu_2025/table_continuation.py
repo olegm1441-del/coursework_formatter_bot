@@ -1,14 +1,17 @@
 """
-Phase 3, Rule 1 — Table continuation (geometry-based, no LibreOffice).
+Phase 3, Rule 1 — Table continuation (hybrid: LRPB + geometry fallback).
 
-For every table that overflows its page:
-  1. Split it just before the row that would cross the page boundary.
-  2. Insert "Продолжение таблицы X.Y.Z" (right-aligned, 14 pt, not bold).
-  3. Prepend a copy of the header row to the continuation table.
+Primary signal — w:lastRenderedPageBreak (LRPB):
+  Word writes these elements into the XML every time it saves after rendering.
+  They mark the exact position of page breaks in the last Word render.
+  For table rows: if a row contains LRPB, that row straddles a page break
+  → we split just before that row.
+  For body paragraphs: LRPB resets our cumulative-height tracker, preventing
+  error accumulation across pages.
 
-Geometry is estimated from font/spacing constants and cell text length.
-Accuracy: ±1–2 rows vs real Word rendering — acceptable for the typical
-student coursework document where tables rarely exceed 2 pages.
+Geometry fallback (for tables with no LRPB in their rows):
+  Estimated from font/spacing constants and cell text length.
+  Used only when LRPB data is absent or insufficient.
 """
 
 from __future__ import annotations
@@ -32,6 +35,31 @@ TWIP_PER_PT = 20      # 1 pt  = 20 twips    (w:trHeight val is in twips)
 
 def _emu_pt(v: int) -> float: return v / EMU_PER_PT
 def _twip_pt(v: int) -> float: return v / TWIP_PER_PT
+
+
+# ── w:lastRenderedPageBreak helpers ──────────────────────────────────────────
+
+_LRPB_TAG = qn("w:lastRenderedPageBreak")
+
+
+def _para_has_lrpb(p_elem) -> bool:
+    """True if this paragraph contains w:lastRenderedPageBreak."""
+    return p_elem.find(".//" + _LRPB_TAG) is not None
+
+
+def _row_lrpb_index(rows) -> int:
+    """
+    Return the index of the first row (after the header, index > 0) that
+    contains w:lastRenderedPageBreak, or -1 if none found.
+    A positive result means the page break is WITHIN that row — we should
+    split just BEFORE it (split_after = index - 1).
+    """
+    for i, row in enumerate(rows):
+        if i == 0:
+            continue   # header row — never split before it
+        if row._tr.find(".//" + _LRPB_TAG) is not None:
+            return i
+    return -1
 
 # ── Page geometry ─────────────────────────────────────────────────────────────
 
@@ -653,6 +681,12 @@ def apply_table_continuation(doc: Document) -> int:
             if num:
                 last_tbl_num = num
 
+            # LRPB in a body paragraph → Word broke a page here in the last
+            # render.  Reset the cumulative height so errors don't accumulate
+            # across many pages.
+            if _para_has_lrpb(xml_elem):
+                current_h = 0.0
+
             h = _estimate_para_height(py_obj)
             current_h += h
             if current_h > body_h:
@@ -662,12 +696,32 @@ def apply_table_continuation(doc: Document) -> int:
             rows = py_obj.rows
 
             if len(rows) < 2:
-                # Single-row tables never need splitting
-                current_h += sum(_estimate_row_height(r, body_w) for r in rows)
+                current_h += sum(
+                    _estimate_row_height(r, body_w) for r in rows
+                )
                 continue
 
             table_num = last_tbl_num or "?"
             col_widths = _tbl_col_widths_pt(xml_elem)
+
+            # ── Primary signal: w:lastRenderedPageBreak inside rows ───────
+            lrpb_row = _row_lrpb_index(rows)
+            if lrpb_row > 0:
+                split_after = lrpb_row - 1   # keep entire LRPB row on next page
+                split_after = max(_MIN_DATA_ROWS, split_after)
+                splits.append((xml_elem, split_after, table_num))
+                logger.info(
+                    "table_continuation: LRPB split '%s' before row %d",
+                    table_num, lrpb_row,
+                )
+                # Update geometry: remaining rows go on the new page
+                row_hs = [_estimate_row_height(r, body_w, col_widths) for r in rows]
+                current_h = row_hs[0] + sum(row_hs[lrpb_row:])
+                if current_h > body_h:
+                    current_h = row_hs[0]
+                continue
+
+            # ── Fallback: geometry estimation (no LRPB in table rows) ────
             row_hs = [_estimate_row_height(r, body_w, col_widths) for r in rows]
             split_after = -1
 
@@ -675,19 +729,16 @@ def apply_table_continuation(doc: Document) -> int:
                 current_h += rh
                 if current_h > body_h:
                     if row_idx == 0:
-                        # Header row alone overflows — just start a new page
                         current_h = rh
                         continue
 
-                    split_after = row_idx - 1   # last row that fit
+                    split_after = row_idx - 1
                     splits.append((xml_elem, split_after, table_num))
-
-                    # Continue geometry tracking: new page starts with
-                    # header row copy + the current (overflowing) row
+                    logger.info(
+                        "table_continuation: geometry split '%s' after row %d",
+                        table_num, split_after,
+                    )
                     current_h = row_hs[0] + rh
-                    # For very long tables spanning 3+ pages we'd need to
-                    # continue the inner loop here — skipped in this version
-                    # because it is rare in student coursework.
                     break
 
     # Apply splits (each operates on an independent tbl XML element, so
@@ -726,6 +777,10 @@ def apply_rule4_empty_first_lines(doc: Document) -> int:
 
     for kind, xml_elem, py_obj in body_elems:
         if kind == "paragraph":
+            # LRPB calibration — same as in apply_table_continuation
+            if _para_has_lrpb(xml_elem):
+                current_h = 0.0
+
             h = _estimate_para_height(py_obj)
 
             page_overflow = (current_h + h > body_h)
