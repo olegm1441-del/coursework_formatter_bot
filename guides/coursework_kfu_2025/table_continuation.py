@@ -127,45 +127,183 @@ def _tbl_col_widths_pt(tbl_elem) -> list[float]:
     return widths
 
 
-def _cell_font_size_pt(cell) -> float:
+def _cell_margins_pt(cell_elem) -> float:
     """
-    Read font size (pt) from the first run in the first paragraph of a cell.
-    Falls back to _TABLE_LINE_PT (12 pt) if not found.
+    Return total vertical cell margin (top + bottom) in pt from w:tcPr/w:tcMar.
+    Falls back to _CELL_PADDING_PT if not specified.
     """
-    for p in cell._element.findall(qn("w:p")):
-        for r in p.findall(qn("w:r")):
-            rPr = r.find(qn("w:rPr"))
-            if rPr is not None:
-                sz = rPr.find(qn("w:sz"))
-                if sz is not None:
-                    val = sz.get(qn("w:val"))
-                    if val and val.isdigit():
-                        return int(val) / 2  # half-points → points
-    return _TABLE_LINE_PT
+    tcPr = cell_elem.find(qn("w:tcPr"))
+    if tcPr is None:
+        return _CELL_PADDING_PT
+    tcMar = tcPr.find(qn("w:tcMar"))
+    if tcMar is None:
+        return _CELL_PADDING_PT
+    total = 0.0
+    found = False
+    for side in ("w:top", "w:bottom"):
+        el = tcMar.find(qn(side))
+        if el is not None:
+            w_type = el.get(qn("w:type"), "dxa")
+            val = el.get(qn("w:w"), "0")
+            if val.lstrip("-").isdigit():
+                if w_type == "dxa":
+                    total += _twip_pt(int(val))
+                elif w_type == "nil":
+                    pass   # zero
+            found = True
+    return total if found else _CELL_PADDING_PT
+
+
+def _para_font_size_pt(p_elem) -> float:
+    """
+    Read font size (pt) from the paragraph's rPr or its first run's rPr.
+    Checks paragraph-level rPr first (w:pPr/w:rPr), then first w:r/w:rPr.
+    Falls back to _TABLE_LINE_PT.
+    """
+    # Paragraph-level run properties (pPr > rPr)
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is not None:
+        rPr = pPr.find(qn("w:rPr"))
+        if rPr is not None:
+            sz = rPr.find(qn("w:sz"))
+            if sz is not None:
+                val = sz.get(qn("w:val"))
+                if val and val.isdigit():
+                    return int(val) / 2
+
+    # First run's rPr
+    for r in p_elem.findall(qn("w:r")):
+        rPr = r.find(qn("w:rPr"))
+        if rPr is not None:
+            sz = rPr.find(qn("w:sz"))
+            if sz is not None:
+                val = sz.get(qn("w:val"))
+                if val and val.isdigit():
+                    return int(val) / 2
+
+    return _TABLE_LINE_PT   # default: 12 pt
+
+
+def _para_line_height_pt(p_elem, font_pt: float) -> float:
+    """
+    Resolve actual single-line rendered height (pt) for a paragraph,
+    reading w:spacing w:line + w:lineRule from the paragraph's pPr.
+    """
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is None:
+        return font_pt
+    spacing = pPr.find(qn("w:spacing"))
+    if spacing is None:
+        return font_pt
+
+    line_val = spacing.get(qn("w:line"))
+    line_rule = spacing.get(qn("w:lineRule"), "auto")
+
+    if line_val and line_val.lstrip("-").isdigit():
+        lv = int(line_val)
+        if line_rule == "exact":
+            # Exact: value is in twips
+            return _twip_pt(lv)
+        elif line_rule == "atLeast":
+            # At-least: value in twips, but could be taller
+            return max(font_pt, _twip_pt(lv))
+        else:
+            # "auto" (default): value is in 240ths of a line
+            # 240 = single spacing; 360 = 1.5x
+            return font_pt * (lv / 240.0)
+
+    return font_pt
+
+
+def _para_spacing_pt(p_elem) -> tuple[float, float]:
+    """Return (space_before_pt, space_after_pt) for a paragraph."""
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is None:
+        return 0.0, 0.0
+    spacing = pPr.find(qn("w:spacing"))
+    if spacing is None:
+        return 0.0, 0.0
+    sb = sa = 0.0
+    before = spacing.get(qn("w:before"))
+    after  = spacing.get(qn("w:after"))
+    if before and before.lstrip("-").isdigit():
+        sb = _twip_pt(int(before))
+    if after and after.lstrip("-").isdigit():
+        sa = _twip_pt(int(after))
+    return sb, sa
+
+
+def _estimate_cell_height(cell, col_w_pt: float) -> float:
+    """
+    Estimate total height of a table cell in points.
+
+    Accounts for:
+    - All paragraphs in the cell (not just concatenated text)
+    - Per-paragraph font size, line spacing, space_before, space_after
+    - Proportional TNR character width for line-wrap estimation
+    - Cell top+bottom margins from w:tcMar
+    """
+    p_elems = cell._element.findall(qn("w:p"))
+    if not p_elems:
+        return _TABLE_LINE_PT + _CELL_PADDING_PT
+
+    total_h = 0.0
+    for p_elem in p_elems:
+        font_pt = _para_font_size_pt(p_elem)
+        line_h  = _para_line_height_pt(p_elem, font_pt)
+        sb, sa  = _para_spacing_pt(p_elem)
+
+        # TNR avg char width ≈ 0.42 × font size (empirical for mixed-case Russian/Latin)
+        pt_per_char  = font_pt * 0.42
+        chars_per_line = max(4, int(col_w_pt / pt_per_char))
+
+        # Gather text from all runs (preserves multi-run paragraphs)
+        text = "".join(
+            (r.find(qn("w:t")).text or "")
+            for r in p_elem.findall(qn("w:r"))
+            if r.find(qn("w:t")) is not None
+        ).strip()
+
+        n_lines = max(1, math.ceil(len(text) / chars_per_line)) if text else 1
+        total_h += n_lines * line_h + sb + sa
+
+    # Cell top+bottom margins
+    cell_margin = _cell_margins_pt(cell._element)
+    return total_h + cell_margin
 
 
 def _estimate_row_height(row, body_width_pt: float, col_widths_pt: list[float] | None = None) -> float:
-    """Estimated rendered height of a table row in points."""
-    # 1. Explicit height from XML (twips) — most reliable
+    """
+    Estimated rendered height of a table row in points.
+
+    Priority:
+    1. Explicit w:trHeight (hRule=exact) → use as-is
+    2. Explicit w:trHeight (hRule=atLeast) → use as minimum
+    3. Estimate from cell content via _estimate_cell_height
+    """
     tr = row._tr
     trPr = tr.find(qn("w:trPr"))
+    explicit_min = 0.0
     if trPr is not None:
         trH = trPr.find(qn("w:trHeight"))
         if trH is not None:
             val = trH.get(qn("w:val"))
-            if val and val.isdigit():
+            h_rule = trH.get(qn("w:hRule"), "atLeast")
+            if val and val.lstrip("-").isdigit():
                 h = _twip_pt(int(val))
                 if h > 2:
-                    return h
+                    if h_rule == "exact":
+                        return h   # exact → trust it completely
+                    else:
+                        explicit_min = h   # atLeast → use as lower bound
 
-    # 2. Estimate from cell content
     cells = row.cells
     if not cells:
-        return _TABLE_LINE_PT + _CELL_PADDING_PT
+        return max(explicit_min, _TABLE_LINE_PT + _CELL_PADDING_PT)
 
     num_cols = len(cells)
 
-    # Build per-cell column width: prefer actual w:tblGrid widths, else equal split
+    # Per-cell column width: actual XML widths preferred
     if col_widths_pt and len(col_widths_pt) >= num_cols:
         col_ws = col_widths_pt
     else:
@@ -183,22 +321,11 @@ def _estimate_row_height(row, body_width_pt: float, col_widths_pt: list[float] |
         seen.add(cid)
 
         col_w_pt = col_ws[col_idx] if col_idx < len(col_ws) else max(20.0, body_width_pt / num_cols)
-
-        # Use actual font size for this cell
-        font_pt = _cell_font_size_pt(cell)
-        # pt-per-char: TNR proportional font, empirically ~0.42 × font_pt per avg char
-        pt_per_char = font_pt * 0.42
-        chars_per_line = max(4, int(col_w_pt / pt_per_char))
-        line_h = font_pt  # single-spaced table cell
-
-        text = (cell.text or "").strip()
-        n_lines = max(1, math.ceil(len(text) / chars_per_line)) if text else 1
-        cell_h = n_lines * line_h
+        cell_h = _estimate_cell_height(cell, col_w_pt)
         max_h = max(max_h, cell_h)
-
         col_idx += 1
 
-    return max_h + _CELL_PADDING_PT
+    return max(explicit_min, max_h)
 
 
 # ── Body element iteration ────────────────────────────────────────────────────
@@ -376,7 +503,7 @@ def _is_student_continuation(text: str) -> bool:
     Guard: text must be short (≤100 chars) — long paragraphs are prose
     that merely happen to contain those words mid-sentence.
     """
-    if len(text) > 100:
+    if len(text) > 27:
         return False
     return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
 
