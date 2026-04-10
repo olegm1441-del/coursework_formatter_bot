@@ -67,6 +67,10 @@ def _row_lrpb_index(rows) -> int:
 # Accounts for rounding + minor rendering differences between LO and Word.
 _PAGE_BUFFER_PT = 36
 
+# Minimum column width (pt) for column-width optimisation.
+# Columns narrower than this are "phantom" or overly squeezed.
+_MIN_COL_PT = 36.0   # ≈ 1.27 cm
+
 
 def _body_height_pt(doc: Document) -> float:
     s = doc.sections[0]
@@ -607,6 +611,105 @@ def _merge_tables(tbl1_elem, tbl1_obj, tbl2_elem, tbl2_obj) -> None:
     logger.debug("_merge_tables: appended %d row(s) from tbl2", len(rows2) - start_row)
 
 
+def _tbl_has_lrpb(tbl_obj) -> bool:
+    """True if any row (after row 0) in the table contains w:lastRenderedPageBreak."""
+    return _row_lrpb_index(tbl_obj.rows) > 0
+
+
+def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
+    """
+    Ensure no column is narrower than _MIN_COL_PT and total width ≤ body_width_pt.
+
+    Algorithm:
+      1. Scale all columns down proportionally if total > body_width_pt.
+      2. Identify undersized columns; redistribute deficit from wider donor columns.
+
+    Updates both w:tblGrid/w:gridCol and each w:tc/w:tcPr/w:tcW (honouring
+    w:gridSpan for merged cells).
+
+    Returns True if any width was changed.
+    """
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is None:
+        return False
+    gridcols = grid.findall(qn("w:gridCol"))
+    if not gridcols:
+        return False
+
+    widths = [int(c.get(qn("w:w"), 0)) / TWIP_PER_PT for c in gridcols]
+    n = len(widths)
+    total = sum(widths)
+    if total < 1:
+        return False
+
+    changed = False
+
+    # Step 1: scale down if total exceeds body width
+    if total > body_width_pt + 0.5:
+        scale = body_width_pt / total
+        widths = [w * scale for w in widths]
+        total = sum(widths)
+        changed = True
+
+    # Step 2: redistribute to fix undersized columns (up to n iterations)
+    for _ in range(n):
+        undersized = [(i, _MIN_COL_PT - widths[i]) for i in range(n)
+                      if widths[i] < _MIN_COL_PT - 0.5]
+        if not undersized:
+            break
+        donors = [i for i in range(n) if widths[i] > _MIN_COL_PT + 0.5]
+        if not donors:
+            break
+        total_deficit = sum(d for _, d in undersized)
+        total_donor_excess = sum(widths[i] - _MIN_COL_PT for i in donors)
+        take_frac = min(1.0, total_donor_excess / total_deficit)
+
+        for i, deficit in undersized:
+            widths[i] += deficit * take_frac
+        actual_taken = total_deficit * take_frac
+        for i in donors:
+            donor_excess = widths[i] - _MIN_COL_PT
+            widths[i] -= actual_taken * (donor_excess / total_donor_excess)
+        changed = True
+
+    if not changed:
+        return False
+
+    # Round to integer twips, keep total consistent
+    twip_widths = [max(1, round(w * TWIP_PER_PT)) for w in widths]
+
+    # Apply to grid
+    for col_el, tw in zip(gridcols, twip_widths):
+        col_el.set(qn("w:w"), str(tw))
+
+    # Apply to each row's cells (respecting gridSpan)
+    for tr in tbl_xml.findall(qn("w:tr")):
+        col_idx = 0
+        for tc in tr.findall(qn("w:tc")):
+            if col_idx >= n:
+                break
+            tcPr = tc.find(qn("w:tcPr"))
+            gridSpan_el = tcPr.find(qn("w:gridSpan")) if tcPr is not None else None
+            span = int(gridSpan_el.get(qn("w:val"), 1)) if gridSpan_el is not None else 1
+            span = max(1, min(span, n - col_idx))
+
+            cell_tw = sum(twip_widths[col_idx: col_idx + span])
+
+            if tcPr is None:
+                tcPr = OxmlElement("w:tcPr")
+                tc.insert(0, tcPr)
+            tcW = tcPr.find(qn("w:tcW"))
+            if tcW is None:
+                tcW = OxmlElement("w:tcW")
+                tcPr.append(tcW)
+            tcW.set(qn("w:w"), str(cell_tw))
+            tcW.set(qn("w:type"), "dxa")
+
+            col_idx += span
+
+    return True
+
+
 def apply_table_merging(doc: Document) -> int:
     """
     Phase 3 pre-pass — detect tables that the student manually split with a
@@ -646,12 +749,21 @@ def apply_table_merging(doc: Document) -> int:
                     for k, _, po in inter
                 )
                 if not has_content:
-                    _, tbl1_xml, _ = body_elems[last_tbl_idx]
+                    _, tbl1_xml, tbl1_obj = body_elems[last_tbl_idx]
+                    tbl2_obj = py_obj
                     tbl1_grid = tbl1_xml.find(qn("w:tblGrid"))
                     tbl2_grid = xml_elem.find(qn("w:tblGrid"))
                     tbl1_cols = len(tbl1_grid.findall(qn("w:gridCol"))) if tbl1_grid is not None else 0
                     tbl2_cols = len(tbl2_grid.findall(qn("w:gridCol"))) if tbl2_grid is not None else 0
                     if tbl1_cols > 0 and tbl1_cols == tbl2_cols:
+                        # Only merge if at least one part has LRPB — guarantees
+                        # we can re-split at the correct position.  Without LRPB
+                        # we have no reliable split point and the student's break
+                        # (even if imperfect) is better than none.
+                        if not (_tbl_has_lrpb(tbl1_obj) or _tbl_has_lrpb(tbl2_obj)):
+                            last_tbl_idx = i
+                            i += 1
+                            continue
                         empty_para_idxs = [
                             idx
                             for idx, (k, _, _) in enumerate(body_elems[last_tbl_idx + 1 : i], start=last_tbl_idx + 1)
@@ -684,6 +796,14 @@ def apply_table_merging(doc: Document) -> int:
 
                 # j must now point to the second table part
                 if j < n and body_elems[j][0] == "table":
+                    # Only merge if LRPB is present — without it we cannot
+                    # re-split correctly and student's break is better than none
+                    _, tbl1_xml_c, tbl1_obj_c = body_elems[last_tbl_idx]
+                    _, _tbl2_xml_c, tbl2_obj_c = body_elems[j]
+                    if not (_tbl_has_lrpb(tbl1_obj_c) or _tbl_has_lrpb(tbl2_obj_c)):
+                        i = j + 1
+                        last_tbl_idx = j
+                        continue
                     merge_jobs.append((cont_indices, j, last_tbl_idx))
                     # Skip past everything we just catalogued
                     i = j + 1
@@ -782,6 +902,20 @@ def apply_table_continuation(doc: Document) -> int:
             n_splits += 1
 
     logger.info("table_continuation: %d split(s) applied", n_splits)
+
+    # Column-width optimisation: fix phantom/undersized columns and tables
+    # wider than the body.  Applied to ALL tables after splitting so that
+    # both original and continuation tables are corrected.
+    n_col_fixed = 0
+    body_elems_post = list(_iter_body(doc))
+    for kind, tbl_xml, _ in body_elems_post:
+        if kind != "table":
+            continue
+        if _optimize_table_col_widths(tbl_xml, body_w):
+            n_col_fixed += 1
+    if n_col_fixed:
+        logger.info("table_continuation: col-width optimised %d table(s)", n_col_fixed)
+
     return n_splits
 
 
