@@ -166,6 +166,10 @@ Do not say “done” without verification results.
 - Never assume permission to squash, rebase, or rewrite history.
 
 ---
+## Execution protocol
+Follow `WORKFLOW.md` for all non-trivial tasks.
+Do not skip phases.
+If there is any conflict, the stricter rule wins.
 
 ## Response format for every substantial task
 
