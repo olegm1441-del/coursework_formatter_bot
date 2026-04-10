@@ -568,7 +568,6 @@ def is_table_continuation_text(text: str) -> bool:
     return bool(TABLE_CONTINUATION_RE.match(t2))
 
 
-
 REFERENCE_SUBHEADINGS_CANON = {
     "официальные материалы": "Официальные материалы",
     "статистические материалы": "Статистические материалы",

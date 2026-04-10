@@ -65,7 +65,7 @@ def _row_lrpb_index(rows) -> int:
 
 # Safety margin subtracted from body height so we don't overfill a page.
 # Accounts for rounding + minor rendering differences between LO and Word.
-_PAGE_BUFFER_PT = 18
+_PAGE_BUFFER_PT = 36
 
 
 def _body_height_pt(doc: Document) -> float:
@@ -105,25 +105,29 @@ def _estimate_para_height(p) -> float:
     try:
         pf = p.paragraph_format
         ls = pf.line_spacing
-        ls_rule = pf.line_spacing_rule   # None | WD_LINE_SPACING (0=auto,1=exact,2=atLeast,…)
         if ls is not None:
-            # ls_rule == 1 means "Exactly" — ls is stored in EMU, not as a multiplier
-            if ls_rule is not None and int(ls_rule) == 1:
-                # Exact rule: ls is an Emu object → .pt gives the fixed line height
-                if hasattr(ls, "pt"):
-                    line_h = ls.pt
+            # python-docx may return:
+            #  • a Length subclass (Emu, Twips, …) with .pt for exact/atLeast rules
+            #  • a plain float multiplier (e.g. 1.5) for auto rule
+            #  • a raw int in 240ths-of-a-line when rule is unset (older python-docx)
+            # Detection order: .pt first (handles all Length objects correctly),
+            # then float multiplier, then 240ths fallback.
+            # NOTE: WD_LINE_SPACING.EXACTLY == 4 (not 1), so checking int(rule)==1
+            #       was wrong — we now rely on type detection instead.
+            if hasattr(ls, "pt"):
+                # Length object: .pt converts to points regardless of sub-type
+                line_h = float(ls.pt)
+            elif isinstance(ls, float):
+                # Pure Python float → line spacing multiplier (e.g. 1.5)
+                line_h = 14 * ls
+            elif isinstance(ls, int):
+                ls_i = int(ls)
+                if ls_i > 10:
+                    # Raw 240ths-of-a-line value (240=single, 360=1.5×, 480=double)
+                    line_h = 14 * (ls_i / 240)
                 else:
-                    # Fallback: raw int = EMU
-                    try:
-                        line_h = int(ls) / EMU_PER_PT
-                    except (TypeError, ValueError):
-                        pass
-            elif isinstance(ls, (int, float)):
-                # Multiplier (e.g. 1.5)
-                line_h = 14 * float(ls)
-            elif hasattr(ls, "pt"):
-                # Fixed spacing stored as Emu (atLeast / exact via old API)
-                line_h = ls.pt
+                    # Small integer treated as a multiplier (rare)
+                    line_h = 14 * ls_i
     except Exception:
         pass
 
@@ -279,6 +283,11 @@ def _estimate_cell_height(cell, col_w_pt: float) -> float:
     for p_elem in p_elems:
         font_pt = _para_font_size_pt(p_elem)
         line_h  = _para_line_height_pt(p_elem, font_pt)
+        # If no explicit line spacing is set in the paragraph XML, the cell
+        # inherits the document's Normal style (typically 1.5× in KFU docs).
+        # Apply 1.5× as a conservative default to avoid underestimating row height.
+        if abs(line_h - font_pt) < 0.5:   # "line_h == font_pt" means unset (single)
+            line_h = font_pt * 1.5
         sb, sa  = _para_spacing_pt(p_elem)
 
         # TNR avg char width ≈ 0.50 × font size (conservative — Cyrillic glyphs are wider than Latin)
@@ -390,12 +399,18 @@ def _extract_table_num(text: str) -> str | None:
 
 # ── "Продолжение таблицы X" paragraph ────────────────────────────────────────
 
+_FORMATTER_RSID = "00CF0001"   # stamp on formatter-inserted paragraphs; never set by Word
+
+
 def _make_continuation_para(table_num: str) -> OxmlElement:
     """
     Build <w:p> for "Продолжение таблицы X.Y.Z":
       right-aligned, Times New Roman 14 pt, not bold, no indent, keep_with_next.
     """
     p = OxmlElement("w:p")
+    # Stamp a unique rsidR so _is_formatter_continuation can identify this
+    # paragraph even after Phase 1 reformats its content.
+    p.set(qn("w:rsidR"), _FORMATTER_RSID)
 
     pPr = OxmlElement("w:pPr")
 
@@ -551,19 +566,16 @@ def _is_student_continuation(text: str) -> bool:
 
 def _is_formatter_continuation(para) -> bool:
     """
-    True if this paragraph is a formatter-inserted 'Продолжение таблицы' paragraph
-    (right-aligned — our format).  Student-written continuation lines are typically
-    left-aligned or centred, so alignment is a reliable discriminator.
+    True if this paragraph is a formatter-inserted 'Продолжение таблицы' paragraph.
+
+    The formatter stamps w:rsidR="_FORMATTER_RSID" on every continuation paragraph
+    it creates.  Phase 1 (safe_formatter) never reads or modifies rsidR attributes,
+    so the stamp survives all formatting passes and is the only reliable discriminator.
     """
     try:
-        pPr = para._element.find(qn("w:pPr"))
-        if pPr is not None:
-            jc = pPr.find(qn("w:jc"))
-            if jc is not None and jc.get(qn("w:val")) == "right":
-                return True
+        return para._element.get(qn("w:rsidR")) == _FORMATTER_RSID
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _rows_match(row1, row2) -> bool:
@@ -620,6 +632,36 @@ def apply_table_merging(doc: Document) -> int:
         kind, xml_elem, py_obj = body_elems[i]
 
         if kind == "table":
+            # ── Detect silent splits: consecutive tables with no body text ──
+            # Students sometimes split a table by just inserting a page break
+            # mid-table, creating two (or more) adjacent tables with no
+            # "Продолжение" paragraph between them.  Merge if:
+            #   • the immediately preceding body element is also a table, AND
+            #   • all elements between them are empty paragraphs, AND
+            #   • both tables have the same number of grid columns.
+            if last_tbl_idx is not None:
+                inter = body_elems[last_tbl_idx + 1 : i]
+                has_content = any(
+                    k == "paragraph" and (po.text or "").strip()
+                    for k, _, po in inter
+                )
+                if not has_content:
+                    _, tbl1_xml, _ = body_elems[last_tbl_idx]
+                    tbl1_grid = tbl1_xml.find(qn("w:tblGrid"))
+                    tbl2_grid = xml_elem.find(qn("w:tblGrid"))
+                    tbl1_cols = len(tbl1_grid.findall(qn("w:gridCol"))) if tbl1_grid is not None else 0
+                    tbl2_cols = len(tbl2_grid.findall(qn("w:gridCol"))) if tbl2_grid is not None else 0
+                    if tbl1_cols > 0 and tbl1_cols == tbl2_cols:
+                        empty_para_idxs = [
+                            idx
+                            for idx, (k, _, _) in enumerate(body_elems[last_tbl_idx + 1 : i], start=last_tbl_idx + 1)
+                            if k == "paragraph"
+                        ]
+                        merge_jobs.append((empty_para_idxs, i, last_tbl_idx))
+                        last_tbl_idx = i
+                        i += 1
+                        continue
+
             last_tbl_idx = i
 
         elif kind == "paragraph":
@@ -715,9 +757,11 @@ def apply_table_continuation(doc: Document) -> int:
 
             # LRPB in a body paragraph → Word broke a page here in the last
             # render.  Reset the cumulative height so errors don't accumulate
-            # across many pages.
+            # across many pages.  Use trust ratio: only reset when current_h is
+            # high enough that the LRPB is likely genuine (not stale from the
+            # original layout before Phase 1/2 formatting changed page breaks).
             if _para_has_lrpb(xml_elem):
-                current_h = 0.0
+                current_h = _lrpb_calibrate(xml_elem, current_h, body_h)
 
             h = _estimate_para_height(py_obj)
             current_h += h
@@ -764,7 +808,7 @@ def apply_table_continuation(doc: Document) -> int:
                         current_h = rh
                         continue
 
-                    split_after = row_idx - 1
+                    split_after = max(_MIN_DATA_ROWS, row_idx - 1)
                     splits.append((xml_elem, split_after, table_num))
                     logger.info(
                         "table_continuation: geometry split '%s' after row %d",
