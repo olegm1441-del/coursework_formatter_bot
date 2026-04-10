@@ -358,6 +358,30 @@ Therefore:
 If something looks unnecessary, verify first.
 
 ---
+## Execution format for implementation
+
+When implementation is approved, always provide a ready-to-run command block.
+
+Requirements:
+- Output a single copy-paste bash block.
+- The block must:
+  - checkout correct branch (e.g. test-bot)
+  - sync with remote (git pull --ff-only)
+  - apply changes programmatically (via python or sed)
+  - commit changes
+  - push to origin/test-bot
+- Do not require manual file editing.
+
+Example structure:
+
+```bash
+git checkout test-bot && git pull --ff-only origin test-bot && python3 - <<'PY'
+# apply changes to files
+PY
+git add .
+git commit -m "clear, focused message"
+git push origin test-bot
+
 
 ## Standard response structure for every substantial task
 
