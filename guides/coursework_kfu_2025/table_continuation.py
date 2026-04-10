@@ -743,7 +743,6 @@ def apply_table_continuation(doc: Document) -> int:
 
     body_elems = list(_iter_body(doc))   # snapshot — safe to mutate doc after this
 
-    current_h = 0.0          # running height on the current page
     last_tbl_num: str | None = None   # table number from the most recent caption
     splits: list[tuple] = []  # (tbl_xml, split_after_row, table_num)
 
@@ -755,67 +754,25 @@ def apply_table_continuation(doc: Document) -> int:
             if num:
                 last_tbl_num = num
 
-            # LRPB in a body paragraph → Word broke a page here in the last
-            # render.  Reset the cumulative height so errors don't accumulate
-            # across many pages.  Use trust ratio: only reset when current_h is
-            # high enough that the LRPB is likely genuine (not stale from the
-            # original layout before Phase 1/2 formatting changed page breaks).
-            if _para_has_lrpb(xml_elem):
-                current_h = _lrpb_calibrate(xml_elem, current_h, body_h)
-
-            h = _estimate_para_height(py_obj)
-            current_h += h
-            if current_h > body_h:
-                current_h = h   # paragraph starts a fresh page
-
         elif kind == "table":
             rows = py_obj.rows
-
             if len(rows) < 2:
-                current_h += sum(
-                    _estimate_row_height(r, body_w) for r in rows
-                )
                 continue
 
             table_num = last_tbl_num or "?"
-            col_widths = _tbl_col_widths_pt(xml_elem)
 
-            # ── Primary signal: w:lastRenderedPageBreak inside rows ───────
+            # Split only on w:lastRenderedPageBreak — Word's own page-break
+            # signal written during its last render.  Geometry-based estimation
+            # is intentionally omitted: accumulated height errors across multiple
+            # preceding tables produce incorrect (too-early) split positions.
             lrpb_row = _row_lrpb_index(rows)
             if lrpb_row > 0:
-                split_after = lrpb_row - 1   # keep entire LRPB row on next page
-                split_after = max(_MIN_DATA_ROWS, split_after)
+                split_after = max(_MIN_DATA_ROWS, lrpb_row - 1)
                 splits.append((xml_elem, split_after, table_num))
                 logger.info(
                     "table_continuation: LRPB split '%s' before row %d",
                     table_num, lrpb_row,
                 )
-                # Update geometry: remaining rows go on the new page
-                row_hs = [_estimate_row_height(r, body_w, col_widths) for r in rows]
-                current_h = row_hs[0] + sum(row_hs[lrpb_row:])
-                if current_h > body_h:
-                    current_h = row_hs[0]
-                continue
-
-            # ── Fallback: geometry estimation (no LRPB in table rows) ────
-            row_hs = [_estimate_row_height(r, body_w, col_widths) for r in rows]
-            split_after = -1
-
-            for row_idx, rh in enumerate(row_hs):
-                current_h += rh
-                if current_h > body_h:
-                    if row_idx == 0:
-                        current_h = rh
-                        continue
-
-                    split_after = max(_MIN_DATA_ROWS, row_idx - 1)
-                    splits.append((xml_elem, split_after, table_num))
-                    logger.info(
-                        "table_continuation: geometry split '%s' after row %d",
-                        table_num, split_after,
-                    )
-                    current_h = row_hs[0] + rh
-                    break
 
     # Apply splits (each operates on an independent tbl XML element, so
     # processing in forward order is safe — no index shifting between tables)
