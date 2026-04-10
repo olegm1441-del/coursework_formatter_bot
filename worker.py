@@ -9,6 +9,7 @@ from multiprocessing import Process, Queue
 from pathlib import Path
 
 import httpx
+import telegram
 
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
@@ -25,6 +26,10 @@ FORMAT_TIMEOUT_SECONDS = 180
 STALE_PROCESSING_SECONDS = 5 * 60
 POLL_INTERVAL_SECONDS = 2
 EMPTY_POLLS_LOG_EVERY = 45
+SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 120
+SEND_DOCUMENT_READ_TIMEOUT_SECONDS = 120
+SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS = 30
+SEND_DOCUMENT_POOL_TIMEOUT_SECONDS = 30
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +65,31 @@ async def send_document(
     filename: str,
     caption: str,
 ) -> None:
-    request = HTTPXRequest(write_timeout=120, connect_timeout=30, read_timeout=120)
+    request = HTTPXRequest(
+        write_timeout=SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS,
+        connect_timeout=SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=SEND_DOCUMENT_READ_TIMEOUT_SECONDS,
+        pool_timeout=SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
+    )
     bot = Bot(token=bot_token, request=request)
+    logger.info(
+        "send_document_config ptb_version=%s write_timeout=%s read_timeout=%s connect_timeout=%s pool_timeout=%s",
+        telegram.__version__,
+        SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS,
+        SEND_DOCUMENT_READ_TIMEOUT_SECONDS,
+        SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
+        SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
+    )
     with open(path, "rb") as f:
         await bot.send_document(
             chat_id=chat_id,
             document=f,
             filename=filename,
             caption=caption,
+            write_timeout=SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS,
+            read_timeout=SEND_DOCUMENT_READ_TIMEOUT_SECONDS,
+            connect_timeout=SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
+            pool_timeout=SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
         )
 
 async def send_referral_bonus_notification(

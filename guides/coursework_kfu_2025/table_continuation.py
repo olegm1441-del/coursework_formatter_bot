@@ -69,7 +69,7 @@ _PAGE_BUFFER_PT = 36
 
 # Minimum column width (pt) for column-width optimisation.
 # Columns narrower than this are "phantom" or overly squeezed.
-_MIN_COL_PT = 36.0   # ≈ 1.27 cm
+_MIN_COL_PT = 48.0   # ≈ 1.27 cm
 
 
 def _body_height_pt(doc: Document) -> float:
