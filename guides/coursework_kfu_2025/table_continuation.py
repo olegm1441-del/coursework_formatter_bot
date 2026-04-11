@@ -474,6 +474,11 @@ def _make_continuation_para(table_num: str) -> OxmlElement:
 
 _MIN_DATA_ROWS = 1   # at least this many data rows must remain on the first page
 
+# In-memory split hints for tables that were merged from a student-provided
+# continuation pair during the current formatting run.
+# key: id(tbl_xml_element), value: split_after_row
+_MERGED_SPLIT_HINTS: dict[int, int] = {}
+
 
 def _split_table(tbl_elem, split_after_row: int, table_num: str) -> bool:
     """
@@ -720,6 +725,7 @@ def apply_table_merging(doc: Document) -> int:
 
     Returns the number of merges performed.
     """
+    _MERGED_SPLIT_HINTS.clear()
     body_elems = list(_iter_body(doc))
     n = len(body_elems)
 
@@ -822,7 +828,12 @@ def apply_table_merging(doc: Document) -> int:
         try:
             _, tbl1_xml, tbl1_obj = body_elems[tbl1_idx]
             _, tbl2_xml, tbl2_obj = body_elems[tbl2_idx]
+            # Preserve the student's original split point (header + N rows in
+            # the first part => split_after_row = len(rows_part1) - 1).
+            # We will prioritise this hint over stale LRPB markers after merge.
+            split_hint = max(_MIN_DATA_ROWS, len(tbl1_obj.rows) - 1)
             _merge_tables(tbl1_xml, tbl1_obj, tbl2_xml, tbl2_obj)
+            _MERGED_SPLIT_HINTS[id(tbl1_xml)] = split_hint
 
             # Remove continuation paragraphs
             for ci in cont_indices:
@@ -880,6 +891,14 @@ def apply_table_continuation(doc: Document) -> int:
                 continue
 
             table_num = last_tbl_num or "?"
+            split_hint = _MERGED_SPLIT_HINTS.get(id(xml_elem))
+            if split_hint is not None:
+                splits.append((xml_elem, split_hint, table_num))
+                logger.info(
+                    "table_continuation: merged-hint split '%s' after row %d",
+                    table_num, split_hint,
+                )
+                continue
 
             # Split only on w:lastRenderedPageBreak — Word's own page-break
             # signal written during its last render.  Geometry-based estimation
