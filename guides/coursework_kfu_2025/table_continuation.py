@@ -26,6 +26,8 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+from .docx_utils import xml_has_image, is_source_or_note_line, FormattingReport
+
 logger = logging.getLogger(__name__)
 
 # ── Unit helpers ─────────────────────────────────────────────────────────────
@@ -60,6 +62,25 @@ def _row_lrpb_index(rows) -> int:
         if row._tr.find(".//" + _LRPB_TAG) is not None:
             return i
     return -1
+
+
+def _all_row_lrpb_indices(rows) -> list[int]:
+    """
+    Return ALL row indices (after the header, index > 0) that contain
+    w:lastRenderedPageBreak.  Used for tables spanning 3+ pages.
+
+    Each index means: the page break is WITHIN that row → split just
+    BEFORE it (split_after = index - 1).
+
+    Returns an empty list if no LRPB is found after the header row.
+    """
+    result: list[int] = []
+    for i, row in enumerate(rows):
+        if i == 0:
+            continue   # header row — never split before it
+        if row._tr.find(".//" + _LRPB_TAG) is not None:
+            result.append(i)
+    return result
 
 # ── Page geometry ─────────────────────────────────────────────────────────────
 
@@ -565,10 +586,11 @@ def _is_student_continuation(text: str) -> bool:
     True if paragraph text looks like a student-written standalone
     'Продолжение таблицы X.Y.Z' header.
 
-    Guard: text must be short (≤100 chars) — long paragraphs are prose
+    Guard: text must be short (≤30 chars) — long paragraphs are prose
     that merely happen to contain those words mid-sentence.
+    30 chars covers table numbers up to e.g. "100.10.10" depth.
     """
-    if len(text) > 27:
+    if len(text) > 30:
         return False
     return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
 
@@ -863,9 +885,25 @@ def apply_table_merging(doc: Document) -> int:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def apply_table_continuation(doc: Document) -> int:
+_MIN_ROWS_PAGE1_WARN = 4   # warn in trouble-report if fewer rows land on page 1
+
+
+def apply_table_continuation(
+    doc: Document,
+    report: FormattingReport | None = None,
+) -> int:
     """
     Walk document body elements, detect tables that overflow a page, split them.
+
+    For tables spanning multiple pages (multiple LRPB rows), multiple splits
+    are produced — one per LRPB row, applied from last to first so that row
+    indices remain valid across sequential splits of the same element.
+
+    Args:
+        doc:    The loaded python-docx Document (modified in-place).
+        report: Optional FormattingReport — warnings appended for tables that
+                could not be split or produced very short first-page sections.
+
     Returns the number of splits performed.
     """
     body_h = _body_height_pt(doc)
@@ -875,7 +913,10 @@ def apply_table_continuation(doc: Document) -> int:
     body_elems = list(_iter_body(doc))   # snapshot — safe to mutate doc after this
 
     last_tbl_num: str | None = None   # table number from the most recent caption
-    splits: list[tuple] = []  # (tbl_xml, split_after_row, table_num)
+    # Each entry: (tbl_xml, split_after_row, table_num)
+    # For multi-LRPB tables, multiple entries share the same tbl_xml, ordered
+    # from highest split_after_row to lowest so they apply correctly in sequence.
+    splits: list[tuple] = []
 
     for kind, xml_elem, py_obj in body_elems:
 
@@ -891,6 +932,8 @@ def apply_table_continuation(doc: Document) -> int:
                 continue
 
             table_num = last_tbl_num or "?"
+
+            # ── Priority 1: student split hint (from apply_table_merging) ──
             split_hint = _MERGED_SPLIT_HINTS.get(id(xml_elem))
             if split_hint is not None:
                 splits.append((xml_elem, split_hint, table_num))
@@ -900,23 +943,44 @@ def apply_table_continuation(doc: Document) -> int:
                 )
                 continue
 
-            # Split only on w:lastRenderedPageBreak — Word's own page-break
-            # signal written during its last render.  Geometry-based estimation
-            # is intentionally omitted: accumulated height errors across multiple
-            # preceding tables produce incorrect (too-early) split positions.
-            lrpb_row = _row_lrpb_index(rows)
-            if lrpb_row > 0:
-                split_after = max(_MIN_DATA_ROWS, lrpb_row - 1)
-                splits.append((xml_elem, split_after, table_num))
+            # ── Priority 2: w:lastRenderedPageBreak ────────────────────────
+            # Collect ALL LRPB rows so tables spanning 3+ pages get multiple
+            # splits.  Sort descending so each split correctly trims the tail
+            # of tbl_xml without invalidating the earlier split positions.
+            lrpb_rows = _all_row_lrpb_indices(rows)
+            if lrpb_rows:
+                for lrpb_row in sorted(lrpb_rows, reverse=True):
+                    split_after = max(_MIN_DATA_ROWS, lrpb_row - 1)
+                    splits.append((xml_elem, split_after, table_num))
                 logger.info(
-                    "table_continuation: LRPB split '%s' before row %d",
-                    table_num, lrpb_row,
+                    "table_continuation: LRPB split '%s' — %d page-break(s) at rows %s",
+                    table_num, len(lrpb_rows), lrpb_rows,
                 )
+                continue
 
-    # Apply splits (each operates on an independent tbl XML element, so
-    # processing in forward order is safe — no index shifting between tables)
+            # ── No signal: table cannot be auto-split ─────────────────────
+            if report is not None:
+                report.warn(
+                    f"Таблица {table_num}: нет данных о разрыве страниц — "
+                    "проверьте перенос вручную"
+                )
+            logger.info(
+                "table_continuation: no split signal for table '%s' — skipped",
+                table_num,
+            )
+
+    # Apply splits in the order they were appended.
+    # For a single table with multiple LRPB positions the entries are already
+    # ordered from highest to lowest split_after_row (descending sort above),
+    # so each successive _split_table call operates on the shortened tbl_xml.
     n_splits = 0
     for tbl_xml, split_after_row, tbl_num in splits:
+        # Warn if the first page part will be very short (< _MIN_ROWS_PAGE1_WARN rows)
+        if report is not None and split_after_row < _MIN_ROWS_PAGE1_WARN - 1:
+            report.warn(
+                f"При переносе таблицы {tbl_num} осталось мало строк "
+                f"({split_after_row + 1} стр. 1)"
+            )
         if _split_table(tbl_xml, split_after_row, tbl_num):
             n_splits += 1
 
@@ -975,10 +1039,7 @@ _FIGURE_CAP_RE_GEOM = re.compile(
 
 def _para_has_image(p_elem) -> bool:
     """True if the paragraph XML element contains an inline drawing or picture."""
-    return bool(
-        p_elem.findall(".//" + qn("w:drawing"))
-        or p_elem.findall(".//" + qn("w:pict"))
-    )
+    return xml_has_image(p_elem)
 
 
 def _set_page_break_before(para_elem) -> None:
@@ -1024,7 +1085,9 @@ def _apply_rule4_pass(doc: Document) -> int:
                 current_h = 0.0   # new page starts
 
             text = (py_obj.text or "").strip()
-            is_empty = not text
+            # A paragraph with an image but no text must never be treated as
+            # "empty" — removing it would delete the figure from the document.
+            is_empty = not text and not xml_has_image(xml_elem)
 
             if page_overflow and is_empty:
                 # Preserve intentional blank lines that must remain after
@@ -1048,7 +1111,7 @@ def _apply_rule4_pass(doc: Document) -> int:
                 if not is_empty:
                     if _looks_like_heading(text):
                         prev_nonempty_kind = "heading"
-                    elif re.match(r"^\s*(источник|примечание)\s*:", text, re.IGNORECASE):
+                    elif is_source_or_note_line(text):
                         prev_nonempty_kind = "source_or_note"
                     else:
                         prev_nonempty_kind = "text"

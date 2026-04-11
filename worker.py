@@ -26,7 +26,7 @@ FORMAT_TIMEOUT_SECONDS = 180
 STALE_PROCESSING_SECONDS = 5 * 60
 POLL_INTERVAL_SECONDS = 2
 EMPTY_POLLS_LOG_EVERY = 45
-SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 120
+SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 30
 SEND_DOCUMENT_READ_TIMEOUT_SECONDS = 120
 SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS = 30
 SEND_DOCUMENT_POOL_TIMEOUT_SECONDS = 30
@@ -107,12 +107,12 @@ def _formatter_process_target(
     queue: Queue,
 ) -> None:
     try:
-        result = services.format_document_by_guide(
+        path, warnings = services.format_document_by_guide(
             guide_code=guide_code,
             input_path=input_path,
             output_path=output_path,
         )
-        queue.put({"ok": True, "result": result})
+        queue.put({"ok": True, "result": path, "warnings": warnings})
     except Exception:
         queue.put({"ok": False, "error": traceback.format_exc()})
 
@@ -122,7 +122,13 @@ def run_format_with_timeout(
     input_path: str,
     output_path: str,
     timeout_seconds: int,
-) -> str:
+) -> tuple[str, list[str]]:
+    """
+    Run the formatter in a subprocess with a hard timeout.
+
+    Returns (output_path, warnings) on success.
+    Raises TimeoutError or RuntimeError on failure.
+    """
     queue: Queue = Queue()
     process = Process(
         target=_formatter_process_target,
@@ -144,7 +150,9 @@ def run_format_with_timeout(
     payload = queue.get()
 
     if payload.get("ok"):
-        return payload.get("result") or output_path
+        path = payload.get("result") or output_path
+        warnings = payload.get("warnings") or []
+        return path, warnings
 
     raise RuntimeError(payload.get("error") or "Unknown formatter error")
 
@@ -387,7 +395,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             guide_code,
         )
 
-        run_format_with_timeout(
+        _, formatting_warnings = run_format_with_timeout(
             guide_code=guide_code,
             input_path=str(input_path),
             output_path=str(output_path),
@@ -439,26 +447,31 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             output_path,
         )
 
-        logger.info("send_document_start request_id=%s", request.id)
+        base_caption = (
+            "Готово — курсовая оформлена.\n\n"
+            "Быстро проверь 3 вещи перед отправкой преподавателю:\n"
+            "• не повисли ли внизу страницы заголовки или подписи таблиц\n"
+            "• есть ли «Продолжение таблицы X.Y.Z», если таблица перенеслась\n"
+            "• не осталось ли явно пустых верхних строк страницы\n\n"
+            "Если хочешь, можешь сразу отправить следующий .docx-файл.\n\n"
+            "Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им бота по рефералке.\n\n"
+            "Ты получишь +1 оформление, когда они загрузят файл."
+        )
+        if formatting_warnings:
+            warning_block = "\n".join(f"⚠️ {w}" for w in formatting_warnings)
+            caption = f"{base_caption}\n\n{warning_block}"
+        else:
+            caption = base_caption
+
+        logger.info("send_document_start request_id=%s warnings=%d", request.id, len(formatting_warnings))
         asyncio.run(
             send_document(
                 bot_token,
                 user.telegram_id,
                 output_path,
                 output_path.name,
-                """Готово — курсовая оформлена.
-
-Быстро проверь 3 вещи перед отправкой преподавателю:
-• не повисли ли внизу страницы заголовки или подписи таблиц
-• есть ли «Продолжение таблицы X.Y.Z», если таблица перенеслась
-• не осталось ли явно пустых верхних строк страницы
-
-Если хочешь, можешь сразу отправить следующий .docx-файл.
-
-Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им бота по рефералке.
-
-Ты получишь +1 оформление, когда они загрузят файл."""
-                )
+                caption,
+            )
         )
 
         logger.info(

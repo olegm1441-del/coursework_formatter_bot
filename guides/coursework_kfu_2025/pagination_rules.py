@@ -18,6 +18,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from .classifier import classify_paragraph, paragraph_text
+from .docx_utils import is_source_or_note_line
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,8 @@ def _set_keep_with_next(paragraph, value: bool = True) -> None:
 
 def _has_image(paragraph) -> bool:
     """True if paragraph contains an inline drawing or picture."""
-    elem = paragraph._element
-    return bool(
-        elem.findall(".//" + qn("w:drawing"))
-        or elem.findall(".//" + qn("w:pict"))
-    )
+    from .docx_utils import xml_has_image
+    return xml_has_image(paragraph._element)
 
 
 def _classify_all(paragraphs) -> list[str]:
@@ -137,6 +135,79 @@ def _apply_rule6(paragraphs: list, kinds: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Rule E — Source / note line must stay directly below its table
+# ---------------------------------------------------------------------------
+
+def _apply_rule_source_note(doc: Document) -> int:
+    """
+    Walk the document body.  When a paragraph starting with 'Источник:' or
+    'Примечание:' immediately follows a table (with at most one intervening
+    empty paragraph), set keep_with_next=True on the last paragraph in the
+    last cell of the table's last row.
+
+    This signals Word: "don't break between the table tail and the following
+    source/note line."  Word then keeps them on the same page.
+
+    Returns the number of tables whose last row was tagged.
+    """
+    body = doc.element.body
+    children = list(body)
+    n = len(children)
+    count = 0
+
+    para_map = {p._element: p for p in doc.paragraphs}
+
+    i = 0
+    while i < n:
+        elem = children[i]
+        local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+
+        if local != "tbl":
+            i += 1
+            continue
+
+        # Look ahead: skip at most one empty paragraph, then check for source/note
+        j = i + 1
+        skipped_empty = 0
+        while j < n and skipped_empty <= 1:
+            nelem = children[j]
+            nlocal = nelem.tag.split("}")[-1] if "}" in nelem.tag else nelem.tag
+            if nlocal != "p":
+                break
+            # Get paragraph text
+            texts = nelem.findall(".//" + qn("w:t"))
+            text = "".join(t.text or "" for t in texts).strip()
+            if not text:
+                skipped_empty += 1
+                j += 1
+                continue
+            # Non-empty paragraph found
+            if is_source_or_note_line(text):
+                # Tag last paragraph in last cell of last row of this table
+                tr_elems = elem.findall(qn("w:tr"))
+                if tr_elems:
+                    last_tr = tr_elems[-1]
+                    tc_elems = last_tr.findall(qn("w:tc"))
+                    if tc_elems:
+                        last_tc = tc_elems[-1]
+                        p_elems = last_tc.findall(qn("w:p"))
+                        if p_elems:
+                            last_p_elem = p_elems[-1]
+                            para = para_map.get(last_p_elem)
+                            if para is not None:
+                                _set_keep_with_next(para)
+                                count += 1
+                                logger.debug(
+                                    "rule_source_note: keepWithNext on last row of table "
+                                    "before '%s'", text[:40]
+                                )
+            break  # done with this table regardless
+        i += 1
+
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -151,8 +222,9 @@ def apply_pagination_rules(doc: Document) -> None:
     r3 = _apply_rule3(paragraphs, kinds)
     r5 = _apply_rule5(paragraphs, kinds)
     r6 = _apply_rule6(paragraphs, kinds)
+    rE = _apply_rule_source_note(doc)
 
     logger.info(
-        "pagination_rules applied: rule3=%d rule5=%d rule6=%d paragraphs",
-        r3, r5, r6,
+        "pagination_rules applied: rule3=%d rule5=%d rule6=%d rule_source_note=%d paragraphs",
+        r3, r5, r6, rE,
     )

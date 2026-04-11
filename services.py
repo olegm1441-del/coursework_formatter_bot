@@ -645,7 +645,13 @@ def mark_formatting_failed_in_new_session(request_id: int, error_text: str) -> N
         db.close()
 
 
-def format_document_by_guide(guide_code: str, input_path: str, output_path: str) -> str:
+def format_document_by_guide(
+    guide_code: str, input_path: str, output_path: str
+) -> tuple[str, list[str]]:
+    """
+    Run the formatter for *guide_code* and return (output_path, warnings).
+    *warnings* is a list of short Russian strings for the trouble-report.
+    """
     guide = get_guide(guide_code)
     formatter = guide["formatter"]
     return formatter(input_path, output_path)
