@@ -26,7 +26,7 @@ FORMAT_TIMEOUT_SECONDS = 180
 STALE_PROCESSING_SECONDS = 5 * 60
 POLL_INTERVAL_SECONDS = 2
 EMPTY_POLLS_LOG_EVERY = 45
-SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 120
+SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 45
 SEND_DOCUMENT_READ_TIMEOUT_SECONDS = 120
 SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS = 30
 SEND_DOCUMENT_POOL_TIMEOUT_SECONDS = 30
@@ -64,7 +64,16 @@ async def send_document(
     path: Path,
     filename: str,
     caption: str,
+    warnings: list[str] | None = None,
 ) -> None:
+    """
+    Upload the formatted DOCX and, if there are formatter warnings, send them
+    in a separate text message immediately after.
+
+    Telegram limits document captions to 1024 chars; regular messages allow up
+    to 4096 chars.  Warnings are therefore sent as a follow-up message to avoid
+    BadRequest: Message caption is too long.
+    """
     request = HTTPXRequest(
         write_timeout=SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS,
         connect_timeout=SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
@@ -91,6 +100,11 @@ async def send_document(
             connect_timeout=SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
             pool_timeout=SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
         )
+
+    # Send warnings as a separate message so caption length is never an issue.
+    if warnings:
+        warning_lines = "\n".join(f"⚠️ {w}" for w in warnings)
+        await bot.send_message(chat_id=chat_id, text=warning_lines)
 
 async def send_referral_bonus_notification(
     bot_token: str,
@@ -447,7 +461,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             output_path,
         )
 
-        base_caption = (
+        caption = (
             "Готово — курсовая оформлена.\n\n"
             "Быстро проверь 3 вещи перед отправкой преподавателю:\n"
             "• не повисли ли внизу страницы заголовки или подписи таблиц\n"
@@ -457,11 +471,9 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             "Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им бота по рефералке.\n\n"
             "Ты получишь +1 оформление, когда они загрузят файл."
         )
-        if formatting_warnings:
-            warning_block = "\n".join(f"⚠️ {w}" for w in formatting_warnings)
-            caption = f"{base_caption}\n\n{warning_block}"
-        else:
-            caption = base_caption
+        # Warnings are sent as a separate text message AFTER the document
+        # (Telegram document captions are limited to 1024 chars; text messages
+        # allow 4096 — prevents BadRequest: Message caption is too long).
 
         logger.info("send_document_start request_id=%s warnings=%d", request.id, len(formatting_warnings))
         asyncio.run(
@@ -471,6 +483,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 output_path,
                 output_path.name,
                 caption,
+                warnings=formatting_warnings or None,
             )
         )
 
