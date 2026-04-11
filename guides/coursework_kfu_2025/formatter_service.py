@@ -11,6 +11,7 @@ from .table_continuation import (
     apply_rule3_table_orphan,
     apply_rule4_empty_first_lines,
     apply_rule6_figure_orphan,
+    remove_empty_before_figure_captions,
 )
 from .docx_utils import FormattingReport
 
@@ -60,11 +61,12 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         n_rule3   = apply_rule3_table_orphan(doc)
         n_rule4   = apply_rule4_empty_first_lines(doc)
         n_rule6   = apply_rule6_figure_orphan(doc)
-        if n_merged > 0 or n_splits > 0 or n_rule3 > 0 or n_rule4 > 0 or n_rule6 > 0:
+        n_gap     = remove_empty_before_figure_captions(doc)
+        if n_merged > 0 or n_splits > 0 or n_rule3 > 0 or n_rule4 > 0 or n_rule6 > 0 or n_gap > 0:
             doc.save(str(output_path))
             logger.info(
-                "format_docx: phase3 merged=%d splits=%d rule3=%d rule4=%d rule6=%d",
-                n_merged, n_splits, n_rule3, n_rule4, n_rule6,
+                "format_docx: phase3 merged=%d splits=%d rule3=%d rule4=%d rule6=%d gap=%d",
+                n_merged, n_splits, n_rule3, n_rule4, n_rule6, n_gap,
             )
         else:
             logger.info("format_docx: phase3 no changes")

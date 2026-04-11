@@ -93,6 +93,21 @@ def _count_drawings(doc: Document) -> int:
     return len(doc.element.body.findall(".//" + qn("w:drawing")))
 
 
+def _set_row_height_exact(row, height_pt: float) -> None:
+    """Set an exact row height (w:trHeight hRule=exact) so geometry estimator uses it."""
+    tr = row._tr
+    trPr = tr.find(qn("w:trPr"))
+    if trPr is None:
+        trPr = OxmlElement("w:trPr")
+        tr.insert(0, trPr)
+    trH = trPr.find(qn("w:trHeight"))
+    if trH is None:
+        trH = OxmlElement("w:trHeight")
+        trPr.append(trH)
+    trH.set(qn("w:val"), str(round(height_pt * 20)))  # twips = pt × 20
+    trH.set(qn("w:hRule"), "exact")
+
+
 def _make_doc_with_student_continuation(cont_text: str) -> Document:
     """
     Minimal document with two 2-column tables separated by a student continuation
@@ -222,6 +237,12 @@ def test_b_multi_lrpb_produces_two_splits() -> tuple[bool, str]:
     for ri in range(1, 10):
         for ci, cell in enumerate(tbl.rows[ri].cells):
             cell.text = f"r{ri}c{ci}"
+
+    # Make each row 80pt tall so total (10×80=800pt) exceeds body_h (~720pt).
+    # This ensures the table-fits-on-one-page guard does NOT fire and the
+    # LRPB-based split logic is exercised.
+    for row in tbl.rows:
+        _set_row_height_exact(row, 80.0)
 
     # Inject LRPB into row 4 and row 7
     # row 4 → split_after=3 → 4 rows page1 (valid ≥ 4)
@@ -354,6 +375,9 @@ def test_b1_stale_lrpb_skipped() -> tuple[bool, str]:
     Table 2.3.1: 6 rows, LRPB at row index 3 → split_after=2 → 3 rows on page 1.
     3 < _MIN_ROWS_TO_SPLIT(4) → apply_table_continuation must SKIP the split
     and emit a trouble-report warning.
+
+    Rows are made 130pt tall (6×130=780pt > body_h) so the table-fits-on-one-page
+    guard does NOT fire first.
     """
     from guides.coursework_kfu_2025.table_continuation import (
         apply_table_continuation, _MERGED_SPLIT_HINTS,
@@ -368,6 +392,10 @@ def test_b1_stale_lrpb_skipped() -> tuple[bool, str]:
     for ri in range(1, 6):
         for ci, cell in enumerate(tbl.rows[ri].cells):
             cell.text = f"r{ri}c{ci}"
+
+    # Make each row 130pt exact so total (6×130=780pt) exceeds body_h (~720pt)
+    for row in tbl.rows:
+        _set_row_height_exact(row, 130.0)
 
     # LRPB at row index 3 → split_after = max(1, 3-1) = 2 → 3 rows on page 1
     tr = tbl.rows[3]._tr
@@ -389,6 +417,9 @@ def test_b1_valid_lrpb_splits() -> tuple[bool, str]:
     """
     Table with LRPB at row index 4 → split_after=3 → 4 rows on page 1 = threshold.
     apply_table_continuation must still perform exactly 1 split.
+
+    Rows are made 130pt tall (6×130=780pt > body_h) so the table-fits-on-one-page
+    guard does NOT fire first.
     """
     from guides.coursework_kfu_2025.table_continuation import (
         apply_table_continuation, _MERGED_SPLIT_HINTS,
@@ -403,6 +434,10 @@ def test_b1_valid_lrpb_splits() -> tuple[bool, str]:
     for ri in range(1, 6):
         for ci, cell in enumerate(tbl.rows[ri].cells):
             cell.text = f"r{ri}c{ci}"
+
+    # Make each row 130pt exact so total (6×130=780pt) exceeds body_h (~720pt)
+    for row in tbl.rows:
+        _set_row_height_exact(row, 130.0)
 
     # LRPB at row index 4 → split_after = max(1, 4-1) = 3 → 4 rows on page 1
     tr = tbl.rows[4]._tr
@@ -587,6 +622,142 @@ def test_b3_format_footnote_para_applies_10pt_tnr() -> tuple[bool, str]:
     return _result(True, "footnote para: 10pt TNR, no bold, zero indent ✓")
 
 
+# ── Batch C2 — image gap, table-fits-on-1-page, number columns ───────────────
+
+def test_c2_empty_para_between_image_and_caption_removed() -> tuple[bool, str]:
+    """
+    Phase 3 must remove empty paragraphs that appear between an image paragraph
+    and its figure_caption (e.g. blank line inserted by student between рисунок
+    and 'Рис. 1.2.1 — …').
+    """
+    from guides.coursework_kfu_2025.table_continuation import remove_empty_before_figure_captions
+
+    doc = Document()
+    # Image paragraph
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r_el = OxmlElement("w:r")
+    r_el.append(drawing)
+    img_p._element.append(r_el)
+    # Empty paragraph between image and caption (the student's stray blank line)
+    doc.add_paragraph("")
+    # Figure caption
+    doc.add_paragraph("Рисунок 1.2.1 — Схема взаимодействия")
+
+    n = remove_empty_before_figure_captions(doc)
+
+    if n != 1:
+        return _result(False, f"expected 1 removal, got {n}")
+    # Check the empty paragraph is gone: image should be immediately before caption
+    remaining = [p for p in doc.paragraphs if not _para_has_image(p._element)]
+    # paragraphs: [img_p (has image), caption]
+    total = len(doc.paragraphs)
+    if total != 2:
+        return _result(False, f"expected 2 paragraphs after removal, got {total}")
+    return _result(True, "empty paragraph between image and caption removed ✓")
+
+
+def test_c2_table_fits_one_page_skips_lrpb() -> tuple[bool, str]:
+    """
+    If a table's estimated total height ≤ body_h, the LRPB signal is stale
+    (table now fits on one page after Phase 1 reformatting) → must NOT split.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        apply_table_continuation, _MERGED_SPLIT_HINTS, _body_height_pt,
+        _estimate_row_height, _body_width_pt,
+    )
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1 — Fits-on-one-page test")
+    # Create a small table (3 rows) whose total estimated height << body_h
+    tbl = doc.add_table(rows=3, cols=2)
+    for i, cell in enumerate(tbl.rows[0].cells):
+        cell.text = f"H{i + 1}"
+    for ri in range(1, 3):
+        for ci, cell in enumerate(tbl.rows[ri].cells):
+            cell.text = "short"   # tiny cells → table fits on one page easily
+
+    # Put LRPB in row 2 — but total table height << body_h, so should be skipped
+    tr = tbl.rows[2]._tr
+    lrpb = OxmlElement("w:lastRenderedPageBreak")
+    tr.append(lrpb)
+
+    _MERGED_SPLIT_HINTS.clear()
+    report = FormattingReport()
+    n = apply_table_continuation(doc, report=report)
+
+    if n != 0:
+        return _result(False, f"expected 0 splits (table fits on one page), got {n}")
+    return _result(True, "LRPB skipped because table fits on one page ✓")
+
+
+def test_c2_number_column_minimum() -> tuple[bool, str]:
+    """
+    _optimize_table_col_widths must protect numeric-only columns from being
+    scaled below the width needed to display their content on one line.
+    A 7-digit number like '9503005' in a column requires at least ~50pt.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _optimize_table_col_widths, TWIP_PER_PT,
+    )
+
+    doc = Document()
+    tbl = doc.add_table(rows=3, cols=4)
+    tbl_xml = tbl._element
+    body_w = 481.9
+
+    # Set column widths: [250, 100, 100, 130] pt → total 580pt (needs scaling)
+    original_widths_pt = [250.0, 100.0, 100.0, 130.0]
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is None:
+        return _result(False, "no tblGrid")
+    for gc, w in zip(grid.findall(qn("w:gridCol")), original_widths_pt):
+        gc.set(qn("w:w"), str(round(w * TWIP_PER_PT)))
+
+    # Put numeric content in column 1 (index 1): '9 503 005' (9 chars)
+    for ri in range(3):
+        cells = tbl.rows[ri].cells
+        cells[0].text = "Текстовый заголовок показателя" if ri == 0 else "Текст"
+        cells[1].text = "2023 г." if ri == 0 else "9 503 005"  # numeric
+        cells[2].text = "2024 г." if ri == 0 else "9 875 076"  # numeric
+        cells[3].text = "Абсолютное изменение" if ri == 0 else "−372 071"
+
+    # Also update tcW for each cell to match initial widths
+    for ri in range(3):
+        tr = tbl.rows[ri]._tr
+        col_idx = 0
+        for tc in tr.findall(qn("w:tc")):
+            tcPr = tc.find(qn("w:tcPr"))
+            if tcPr is None:
+                tcPr = OxmlElement("w:tcPr")
+                tc.insert(0, tcPr)
+            tcW = tcPr.find(qn("w:tcW"))
+            if tcW is None:
+                tcW = OxmlElement("w:tcW")
+                tcPr.append(tcW)
+            tcW.set(qn("w:w"), str(round(original_widths_pt[col_idx] * TWIP_PER_PT)))
+            tcW.set(qn("w:type"), "dxa")
+            col_idx += 1
+
+    _optimize_table_col_widths(tbl_xml, body_w)
+
+    # Column 1 and 2 contain "9 503 005" / "9 875 076" (9 chars × 6pt + 8pt ≈ 62pt)
+    # After optimization, columns 1 and 2 should be at least 50pt
+    grid_after = tbl_xml.find(qn("w:tblGrid"))
+    cols_after = grid_after.findall(qn("w:gridCol"))
+    widths_after_pt = [int(c.get(qn("w:w"), 0)) / TWIP_PER_PT for c in cols_after]
+
+    min_expected = 50.0  # 9 chars × 6pt + 8pt padding ≈ 62pt; 50pt is a safe floor
+    for col_idx in (1, 2):
+        if widths_after_pt[col_idx] < min_expected:
+            return _result(
+                False,
+                f"numeric column {col_idx} too narrow: {widths_after_pt[col_idx]:.1f}pt < {min_expected}pt",
+            )
+    return _result(True, f"numeric columns protected: {[f'{w:.1f}' for w in widths_after_pt]}")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -604,7 +775,10 @@ def run_all() -> None:
         ("B2 | keepTogether on heading1/heading2",     test_b2_keep_together_on_headings),
         ("B2 | rule6 keepWithNext through empty para", test_b2_rule6_propagates_through_empty_para),
         ("B2 | image height from wp:extent cy",        test_b2_image_height_from_emu),
-        ("B3 | footnote para: 10pt TNR no bold",       test_b3_format_footnote_para_applies_10pt_tnr),
+        ("B3 | footnote para: 10pt TNR no bold",         test_b3_format_footnote_para_applies_10pt_tnr),
+        ("C2 | empty para image→caption removed",         test_c2_empty_para_between_image_and_caption_removed),
+        ("C2 | table fits 1 page → no split",             test_c2_table_fits_one_page_skips_lrpb),
+        ("C2 | numeric column minimum protected",          test_c2_number_column_minimum),
     ]
 
     for asset in ASSET_FILES:

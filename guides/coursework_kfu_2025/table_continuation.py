@@ -645,16 +645,70 @@ def _tbl_has_lrpb(tbl_obj) -> bool:
     return _row_lrpb_index(tbl_obj.rows) > 0
 
 
+_NUMERIC_CELL_RE = re.compile(r"^[\d\s\+\-−–,.%]+$")
+_PT_PER_CHAR_NUMERIC = 6.0   # approx pt/char for 12pt TNR digits
+_CELL_H_PADDING = 8.0        # left+right cell padding (pt) added to content width
+
+
+def _compute_col_minimums(tbl_xml, n_cols: int) -> list[float]:
+    """
+    Compute per-column minimum widths (pt) in a single pass over all rows.
+
+    For cells containing only numbers/symbols (no letters), the minimum is
+    set to the width needed to render the longest value on one line:
+        min_w = len(text) × _PT_PER_CHAR_NUMERIC + _CELL_H_PADDING
+
+    For all other cells (header or text), the minimum falls back to _MIN_COL_PT.
+    This protects numeric columns (e.g. "9 503 005") from being scaled so narrow
+    that values wrap to multiple lines.
+
+    Only single-column cells (gridSpan = 1) are considered.
+    """
+    minimums = [_MIN_COL_PT] * n_cols
+
+    for tr in tbl_xml.findall(qn("w:tr")):
+        col_idx = 0
+        for tc in tr.findall(qn("w:tc")):
+            if col_idx >= n_cols:
+                break
+            tcPr = tc.find(qn("w:tcPr"))
+            gs = tcPr.find(qn("w:gridSpan")) if tcPr is not None else None
+            span = int(gs.get(qn("w:val"), 1)) if gs is not None else 1
+            span = max(1, min(span, n_cols - col_idx))
+
+            if span == 1:
+                for p_el in tc.findall(".//" + qn("w:p")):
+                    cell_text = "".join(
+                        (r.find(qn("w:t")).text or "")
+                        for r in p_el.findall(qn("w:r"))
+                        if r.find(qn("w:t")) is not None
+                    ).strip()
+                    if cell_text and _NUMERIC_CELL_RE.match(cell_text):
+                        content_w = len(cell_text) * _PT_PER_CHAR_NUMERIC + _CELL_H_PADDING
+                        if content_w > minimums[col_idx]:
+                            minimums[col_idx] = content_w
+
+            col_idx += span
+
+    return minimums
+
+
 def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
     """
-    Ensure no column is narrower than _MIN_COL_PT and total width ≤ body_width_pt.
+    Ensure no column is narrower than its content minimum and total width ≤ body_width_pt.
 
     Algorithm:
       1. Scale all columns down proportionally if total > body_width_pt.
-      2. Identify undersized columns; redistribute deficit from wider donor columns.
+      2. Identify undersized columns (based on content-aware per-column minimums);
+         redistribute deficit from wider donor columns.
 
-    Updates both w:tblGrid/w:gridCol and each w:tc/w:tcPr/w:tcW (honouring
-    w:gridSpan for merged cells).
+    The per-column minimums are content-aware: numeric-only cells (digits, spaces,
+    punctuation) set a minimum wide enough to display their content on one line.
+    This prevents number columns from being scaled too narrow when proportionally
+    shrinking a wide table.
+
+    Updates both w:tblGrid/w:gridCol, w:tblPr/w:tblW, and each w:tc/w:tcPr/w:tcW
+    (honouring w:gridSpan for merged cells).
 
     Returns True if any width was changed.
     """
@@ -671,6 +725,9 @@ def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
     if total < 1:
         return False
 
+    # Content-aware per-column minimums (protects numeric columns from over-shrinking)
+    col_mins = _compute_col_minimums(tbl_xml, n)
+
     changed = False
 
     # Step 1: scale down if total exceeds body width
@@ -680,24 +737,26 @@ def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
         total = sum(widths)
         changed = True
 
-    # Step 2: redistribute to fix undersized columns (up to n iterations)
+    # Step 2: redistribute to fix undersized columns (up to n iterations).
+    # Uses per-column minimums: numeric columns have higher minimums to keep
+    # values on one line; other columns use the global _MIN_COL_PT floor.
     for _ in range(n):
-        undersized = [(i, _MIN_COL_PT - widths[i]) for i in range(n)
-                      if widths[i] < _MIN_COL_PT - 0.5]
+        undersized = [(i, col_mins[i] - widths[i]) for i in range(n)
+                      if widths[i] < col_mins[i] - 0.5]
         if not undersized:
             break
-        donors = [i for i in range(n) if widths[i] > _MIN_COL_PT + 0.5]
+        donors = [i for i in range(n) if widths[i] > col_mins[i] + 0.5]
         if not donors:
             break
         total_deficit = sum(d for _, d in undersized)
-        total_donor_excess = sum(widths[i] - _MIN_COL_PT for i in donors)
+        total_donor_excess = sum(widths[i] - col_mins[i] for i in donors)
         take_frac = min(1.0, total_donor_excess / total_deficit)
 
         for i, deficit in undersized:
             widths[i] += deficit * take_frac
         actual_taken = total_deficit * take_frac
         for i in donors:
-            donor_excess = widths[i] - _MIN_COL_PT
+            donor_excess = widths[i] - col_mins[i]
             widths[i] -= actual_taken * (donor_excess / total_donor_excess)
         changed = True
 
@@ -966,12 +1025,28 @@ def apply_table_continuation(
             # splits.  Sort descending so each split correctly trims the tail
             # of tbl_xml without invalidating the earlier split positions.
             #
-            # Stale-LRPB guard: after Phase 1 reformatting (changed margins /
-            # fonts / spacing) some LRPB markers no longer reflect real page
-            # breaks.  If applying a split would leave fewer than _MIN_ROWS_TO_SPLIT
-            # rows on page 1, the signal is considered stale → skip and warn.
+            # Stale-LRPB guard A — table fits on one page:
+            # Phase 1 reformatting (narrower margins, different fonts, tighter
+            # spacing) often makes rows shorter than in the original Word layout.
+            # If the estimated total table height ≤ body height, the table now
+            # fits on one page and all LRPB markers are stale → skip splitting.
+            #
+            # Stale-LRPB guard B — too few rows on page 1:
+            # If a split would leave fewer than _MIN_ROWS_TO_SPLIT rows on page 1,
+            # the signal is considered stale → skip that specific split and warn.
             lrpb_rows = _all_row_lrpb_indices(rows)
             if lrpb_rows:
+                col_widths_pt = _tbl_col_widths_pt(xml_elem)
+                total_tbl_h = sum(
+                    _estimate_row_height(r, body_w, col_widths_pt) for r in rows
+                )
+                if total_tbl_h <= body_h:
+                    logger.info(
+                        "table_continuation: table '%s' fits on one page "
+                        "(est. h=%.1fpt ≤ body_h=%.1fpt) — LRPB skipped as stale",
+                        table_num, total_tbl_h, body_h,
+                    )
+                    continue
                 valid_splits: list[int] = []
                 for lrpb_row in lrpb_rows:
                     split_after = max(_MIN_DATA_ROWS, lrpb_row - 1)
@@ -1037,6 +1112,54 @@ def apply_table_continuation(
         logger.info("table_continuation: col-width optimised %d table(s)", n_col_fixed)
 
     return n_splits
+
+
+# ── Remove empty paragraphs between image and figure caption ─────────────────
+
+def remove_empty_before_figure_captions(doc: Document) -> int:
+    """
+    Remove empty paragraphs that appear immediately between an image paragraph
+    and a figure caption ("Рис. X.Y.Z — ...").
+
+    Students often insert a blank line between the figure and its caption.
+    This leaves a visual gap in the formatted output.  We remove such blanks
+    only when the paragraph immediately before the empty run contains a drawing.
+
+    Returns the number of paragraphs removed.
+    """
+    paragraphs = doc.paragraphs
+    n = len(paragraphs)
+    to_remove: list = []
+
+    i = 0
+    while i < n:
+        text = (paragraphs[i].text or "").strip()
+        if _FIGURE_CAP_RE_GEOM.match(text):
+            # Collect preceding empty paragraphs
+            j = i - 1
+            empty_elems: list = []
+            while j >= 0:
+                prev_text = (paragraphs[j].text or "").strip()
+                if not prev_text and not _para_has_image(paragraphs[j]._element):
+                    empty_elems.append(paragraphs[j]._element)
+                    j -= 1
+                else:
+                    break
+            # Only remove if the paragraph immediately before the run is an image
+            if empty_elems and j >= 0 and _para_has_image(paragraphs[j]._element):
+                to_remove.extend(empty_elems)
+        i += 1
+
+    removed = 0
+    for elem in to_remove:
+        parent = elem.getparent()
+        if parent is not None:
+            parent.remove(elem)
+            removed += 1
+
+    if removed:
+        logger.info("remove_empty_before_figure_captions: removed %d gap paragraph(s)", removed)
+    return removed
 
 
 # Only trust a w:lastRenderedPageBreak calibration signal when we have already
