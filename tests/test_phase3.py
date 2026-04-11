@@ -206,22 +206,27 @@ def test_c_student_continuation_merges() -> tuple[bool, str]:
 
 def test_b_multi_lrpb_produces_two_splits() -> tuple[bool, str]:
     """
-    A single table with 2 LRPB rows (row 2 and row 4) should produce 2 splits
-    and therefore 2 'Продолжение таблицы' paragraphs in the output.
+    A single table with 2 LRPB rows (row 4 and row 7 of a 10-row table) should
+    produce 2 splits and therefore 2 'Продолжение таблицы' paragraphs.
+
+    Row indices chosen so split_after = 3 and 6, both ≥ _MIN_ROWS_TO_SPLIT-1 (3),
+    meaning rows_page1 = 4 and 7 — both valid, not stale.
     """
     from guides.coursework_kfu_2025.table_continuation import _MERGED_SPLIT_HINTS
 
     doc = Document()
     doc.add_paragraph("Таблица 1.1 — Test")
-    tbl = doc.add_table(rows=6, cols=2)
+    tbl = doc.add_table(rows=10, cols=2)
     for i, cell in enumerate(tbl.rows[0].cells):
         cell.text = f"H{i+1}"
-    for ri in range(1, 6):
+    for ri in range(1, 10):
         for ci, cell in enumerate(tbl.rows[ri].cells):
             cell.text = f"r{ri}c{ci}"
 
-    # Inject LRPB into row 2 and row 4
-    for row_idx in (2, 4):
+    # Inject LRPB into row 4 and row 7
+    # row 4 → split_after=3 → 4 rows page1 (valid ≥ 4)
+    # row 7 → split_after=6 → 7 rows page1 (valid ≥ 4)
+    for row_idx in (4, 7):
         tr = tbl.rows[row_idx]._tr
         lrpb = OxmlElement("w:lastRenderedPageBreak")
         tr.append(lrpb)
@@ -278,6 +283,310 @@ def test_regression_asset(asset_path: Path) -> tuple[bool, str]:
         return _result(True, f"ok (images: {imgs_before}→{imgs_after})")
 
 
+# ── Batch 1 — tblW fix, _MIN_COL_PT, stale LRPB skip ────────────────────────
+
+def test_b1_tblW_updated_after_col_optimization() -> tuple[bool, str]:
+    """
+    _optimize_table_col_widths must update w:tblPr/w:tblW to match the new
+    column total after scaling.  Without this fix Word renders the table at
+    the original (too-wide) tblW instead of the corrected column sum.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _optimize_table_col_widths, TWIP_PER_PT,
+    )
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=3)
+    tbl_xml = tbl._element
+    body_w = 481.9  # standard KFU body width in pt
+
+    # Set each of 3 columns to 200 pt → total 600 pt > body_w
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is None:
+        return _result(False, "no tblGrid in table XML")
+    for gc in grid.findall(qn("w:gridCol")):
+        gc.set(qn("w:w"), str(int(200 * TWIP_PER_PT)))
+
+    # Set tblW to original oversized value
+    tblPr = tbl_xml.find(qn("w:tblPr"))
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl_xml.insert(0, tblPr)
+    tblW_el = tblPr.find(qn("w:tblW"))
+    if tblW_el is None:
+        tblW_el = OxmlElement("w:tblW")
+        tblPr.append(tblW_el)
+    tblW_el.set(qn("w:w"), str(int(600 * TWIP_PER_PT)))
+    tblW_el.set(qn("w:type"), "dxa")
+
+    changed = _optimize_table_col_widths(tbl_xml, body_w)
+    if not changed:
+        return _result(False, "optimizer reported no change (expected scale-down)")
+
+    new_tblW_el = tblPr.find(qn("w:tblW"))
+    if new_tblW_el is None:
+        return _result(False, "w:tblW element missing after optimization")
+
+    new_total_twips = int(new_tblW_el.get(qn("w:w"), 0))
+    expected_twips = round(body_w * TWIP_PER_PT)
+    # Allow ±50 twips rounding slack
+    if abs(new_total_twips - expected_twips) > 50:
+        return _result(
+            False,
+            f"tblW not updated: got {new_total_twips} twips, expected ~{expected_twips}",
+        )
+    return _result(True, f"tblW updated to {new_total_twips} twips (expected ~{expected_twips})")
+
+
+def test_b1_min_col_pt_is_20() -> tuple[bool, str]:
+    """
+    _MIN_COL_PT must be ≤ 20 (variant C: only phantom columns < 20 pt
+    are redistributed; legitimate narrow columns like 30 pt survive).
+    """
+    from guides.coursework_kfu_2025.table_continuation import _MIN_COL_PT
+    if _MIN_COL_PT > 20.5:
+        return _result(False, f"_MIN_COL_PT={_MIN_COL_PT} > 20 — old value, fix not applied")
+    return _result(True, f"_MIN_COL_PT={_MIN_COL_PT} ✓")
+
+
+def test_b1_stale_lrpb_skipped() -> tuple[bool, str]:
+    """
+    Table 2.3.1: 6 rows, LRPB at row index 3 → split_after=2 → 3 rows on page 1.
+    3 < _MIN_ROWS_TO_SPLIT(4) → apply_table_continuation must SKIP the split
+    and emit a trouble-report warning.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        apply_table_continuation, _MERGED_SPLIT_HINTS,
+    )
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.3.1 — Stale LRPB test")
+    tbl = doc.add_table(rows=6, cols=2)
+    for i, cell in enumerate(tbl.rows[0].cells):
+        cell.text = f"H{i + 1}"
+    for ri in range(1, 6):
+        for ci, cell in enumerate(tbl.rows[ri].cells):
+            cell.text = f"r{ri}c{ci}"
+
+    # LRPB at row index 3 → split_after = max(1, 3-1) = 2 → 3 rows on page 1
+    tr = tbl.rows[3]._tr
+    lrpb = OxmlElement("w:lastRenderedPageBreak")
+    tr.append(lrpb)
+
+    _MERGED_SPLIT_HINTS.clear()
+    report = FormattingReport()
+    n = apply_table_continuation(doc, report=report)
+
+    if n != 0:
+        return _result(False, f"expected 0 splits (stale LRPB skipped), got {n}")
+    if report.is_empty():
+        return _result(False, "expected a trouble-report warning for stale LRPB, got none")
+    return _result(True, f"stale LRPB skipped; warning: '{report.warnings[0][:60]}'")
+
+
+def test_b1_valid_lrpb_splits() -> tuple[bool, str]:
+    """
+    Table with LRPB at row index 4 → split_after=3 → 4 rows on page 1 = threshold.
+    apply_table_continuation must still perform exactly 1 split.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        apply_table_continuation, _MERGED_SPLIT_HINTS,
+    )
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1 — Valid LRPB test")
+    tbl = doc.add_table(rows=6, cols=2)
+    for i, cell in enumerate(tbl.rows[0].cells):
+        cell.text = f"H{i + 1}"
+    for ri in range(1, 6):
+        for ci, cell in enumerate(tbl.rows[ri].cells):
+            cell.text = f"r{ri}c{ci}"
+
+    # LRPB at row index 4 → split_after = max(1, 4-1) = 3 → 4 rows on page 1
+    tr = tbl.rows[4]._tr
+    lrpb = OxmlElement("w:lastRenderedPageBreak")
+    tr.append(lrpb)
+
+    _MERGED_SPLIT_HINTS.clear()
+    report = FormattingReport()
+    n = apply_table_continuation(doc, report=report)
+
+    if n != 1:
+        return _result(False, f"expected 1 split, got {n}")
+    return _result(True, "split performed at row 4 (4 rows on page 1 = threshold)")
+
+
+# ── Batch 2 — keepTogether, Rule 6 propagation, image height ─────────────────
+
+def test_b2_keep_together_on_table_caption() -> tuple[bool, str]:
+    """
+    After apply_pagination_rules, table_caption and table_title paragraphs
+    must have keep_together=True (prevents a long title from being split
+    across pages by Word's line-breaker).
+    """
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1 — Test caption line")   # → table_caption
+    doc.add_table(rows=2, cols=2)
+    apply_pagination_rules(doc)
+
+    p = doc.paragraphs[0]
+    if not p.paragraph_format.keep_together:
+        return _result(False, "keep_together not set on table_caption paragraph")
+    return _result(True, "table_caption has keep_together=True")
+
+
+def test_b2_keep_together_on_headings() -> tuple[bool, str]:
+    """
+    After apply_pagination_rules, heading1 and heading2 paragraphs must have
+    keep_together=True (prevents a multi-line heading from being split across pages).
+    """
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    doc.add_paragraph("1. Теоретические основы исследования")   # → heading1
+    doc.add_paragraph("1.1. Понятие и сущность термина")         # → heading2
+    doc.add_paragraph("Основной текст параграфа.")
+    apply_pagination_rules(doc)
+
+    p_h1 = doc.paragraphs[0]
+    p_h2 = doc.paragraphs[1]
+    if not p_h1.paragraph_format.keep_together:
+        return _result(False, "keep_together not set on heading1")
+    if not p_h2.paragraph_format.keep_together:
+        return _result(False, "keep_together not set on heading2")
+    return _result(True, "heading1 and heading2 have keep_together=True")
+
+
+def test_b2_rule6_propagates_through_empty_para() -> tuple[bool, str]:
+    """
+    _apply_rule6: an image paragraph followed by one (or more) empty paragraphs
+    and then a figure_caption must have keepWithNext set on BOTH the image paragraph
+    AND the intervening empty paragraph(s), so the chain reaches the caption.
+    """
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    # Image paragraph
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r_el = OxmlElement("w:r")
+    r_el.append(drawing)
+    img_p._element.append(r_el)
+    # Empty paragraph between image and caption
+    doc.add_paragraph("")
+    # Figure caption
+    doc.add_paragraph("Рисунок 1.1 — Схема взаимодействия")
+
+    apply_pagination_rules(doc)
+
+    img_para   = doc.paragraphs[0]
+    empty_para = doc.paragraphs[1]
+    if not img_para.paragraph_format.keep_with_next:
+        return _result(False, "keep_with_next not set on image paragraph")
+    if not empty_para.paragraph_format.keep_with_next:
+        return _result(
+            False,
+            "keep_with_next not set on empty paragraph between image and caption",
+        )
+    return _result(True, "keepWithNext propagated through empty paragraph to caption")
+
+
+def test_b2_image_height_from_emu() -> tuple[bool, str]:
+    """
+    _get_image_height_pt must read wp:extent cy from a drawing element and
+    convert EMU → pt correctly (EMU_PER_PT = 12700).
+    """
+    from guides.coursework_kfu_2025.table_continuation import _get_image_height_pt
+
+    doc = Document()
+    p = doc.add_paragraph()
+
+    # Build a minimal drawing: w:drawing > wp:inline > wp:extent cy="1270000" (=100pt)
+    drawing  = OxmlElement("w:drawing")
+    inline   = OxmlElement("wp:inline")
+    extent   = OxmlElement("wp:extent")
+    extent.set("cy", str(100 * 12700))   # 100 pt × 12700 EMU/pt = 1270000 EMU
+    inline.append(extent)
+    drawing.append(inline)
+    r_el = OxmlElement("w:r")
+    r_el.append(drawing)
+    p._element.append(r_el)
+
+    h = _get_image_height_pt(p._element)
+    if h is None:
+        return _result(False, "_get_image_height_pt returned None — extent not read")
+    if abs(h - 100.0) > 0.5:
+        return _result(False, f"expected 100.0 pt, got {h:.2f} pt")
+    return _result(True, f"image height correctly read as {h:.1f} pt from EMU")
+
+
+# ── Batch 3 — footnote standardization ───────────────────────────────────────
+
+def test_b3_format_footnote_para_applies_10pt_tnr() -> tuple[bool, str]:
+    """
+    _format_footnote_para must apply 10pt Times New Roman, no bold,
+    single line spacing, and zero indent to a paragraph XML element.
+    Tests the low-level helper directly to avoid needing a real footnotes part.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _format_footnote_para
+
+    doc = Document()
+    p = doc.add_paragraph()
+
+    # Give the paragraph some run with 14pt bold text (typical body style)
+    r_el = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    sz_el = OxmlElement("w:sz")
+    sz_el.set(qn("w:val"), "28")   # 14pt
+    bold_el = OxmlElement("w:b")
+    rPr.append(sz_el)
+    rPr.append(bold_el)
+    t_el = OxmlElement("w:t")
+    t_el.text = "Footnote text"
+    r_el.append(rPr)
+    r_el.append(t_el)
+    p._element.append(r_el)
+
+    _format_footnote_para(p._element)
+
+    # Check run font size is now 10pt (w:sz val="20")
+    r_out = p._element.find(".//" + qn("w:r"))
+    if r_out is None:
+        return _result(False, "no w:r found after formatting")
+    rPr_out = r_out.find(qn("w:rPr"))
+    if rPr_out is None:
+        return _result(False, "no w:rPr on run after formatting")
+
+    sz_out = rPr_out.find(qn("w:sz"))
+    if sz_out is None:
+        return _result(False, "w:sz missing from run rPr after formatting")
+    sz_val = sz_out.get(qn("w:val"))
+    if sz_val != "20":
+        return _result(False, f"expected w:sz val='20' (10pt), got '{sz_val}'")
+
+    # Bold must be suppressed: w:b absent or val="0"
+    b_out = rPr_out.find(qn("w:b"))
+    if b_out is not None:
+        b_val = b_out.get(qn("w:val"), "1")
+        if b_val not in ("0", "false"):
+            return _result(False, f"bold not suppressed (w:b val='{b_val}')")
+
+    # Check paragraph indent = 0
+    pPr_out = p._element.find(qn("w:pPr"))
+    if pPr_out is not None:
+        ind_out = pPr_out.find(qn("w:ind"))
+        if ind_out is not None:
+            left_val = ind_out.get(qn("w:left"), "0")
+            if left_val not in ("0", None):
+                return _result(False, f"indent not zeroed (w:ind left='{left_val}')")
+
+    return _result(True, "footnote para: 10pt TNR, no bold, zero indent ✓")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -287,6 +596,15 @@ def run_all() -> None:
         ("C  | continuation length guard",           test_c_continuation_length_guard),
         ("C  | student continuation merges",         test_c_student_continuation_merges),
         ("B  | multi-LRPB → 2 splits",              test_b_multi_lrpb_produces_two_splits),
+        ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
+        ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),
+        ("B1 | stale LRPB skipped (3 rows page1)",    test_b1_stale_lrpb_skipped),
+        ("B1 | valid LRPB splits (4 rows page1)",     test_b1_valid_lrpb_splits),
+        ("B2 | keepTogether on table_caption",         test_b2_keep_together_on_table_caption),
+        ("B2 | keepTogether on heading1/heading2",     test_b2_keep_together_on_headings),
+        ("B2 | rule6 keepWithNext through empty para", test_b2_rule6_propagates_through_empty_para),
+        ("B2 | image height from wp:extent cy",        test_b2_image_height_from_emu),
+        ("B3 | footnote para: 10pt TNR no bold",       test_b3_format_footnote_para_applies_10pt_tnr),
     ]
 
     for asset in ASSET_FILES:

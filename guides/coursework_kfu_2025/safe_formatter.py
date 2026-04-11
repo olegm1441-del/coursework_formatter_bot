@@ -3135,6 +3135,130 @@ def remove_all_italic(doc):
                         clear_run(r)
 
 
+# ── Footnote standardization ──────────────────────────────────────────────────
+
+import lxml.etree as _lxml_etree
+
+_FOOTNOTES_RTYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
+)
+# Separator footnotes (id ≤ 0) contain Word-internal separator lines — skip them.
+_FOOTNOTE_SKIP_IDS = {"-1", "0"}
+
+
+def _fn_ensure(parent, tag: str):
+    """Return existing child with Clark-notation *tag*, or create and append one."""
+    el = parent.find(tag)
+    if el is None:
+        el = _lxml_etree.SubElement(parent, tag)
+    return el
+
+
+def _format_footnote_para(p_elem) -> None:
+    """
+    Apply KFU footnote style to a single <w:p> XML element:
+      • Times New Roman 10 pt, not bold
+      • Single line spacing (240/240), no space_before/space_after
+      • Zero indent (left, right, firstLine, hanging)
+
+    Operates directly on the XML — safe to call on footnote paragraphs
+    that are not exposed as python-docx Paragraph objects.
+    Hyperlink runs (inside w:hyperlink) are formatted too.
+
+    Uses lxml.etree.SubElement directly (instead of OxmlElement) because
+    OxmlElement requires namespace-prefixed tags ("w:b") whereas qn()
+    returns Clark notation ("{...}b").
+    """
+    # ── Paragraph-level properties ────────────────────────────────────────
+    pPr = _fn_ensure(p_elem, qn("w:pPr"))
+    # Keep pPr as first child
+    if list(p_elem)[0] is not pPr:
+        p_elem.remove(pPr)
+        p_elem.insert(0, pPr)
+
+    # Indent → 0
+    ind = _fn_ensure(pPr, qn("w:ind"))
+    for attr in (qn("w:left"), qn("w:right"), qn("w:firstLine"), qn("w:hanging")):
+        ind.set(attr, "0")
+
+    # Spacing → single (line=240, lineRule=auto), no before/after
+    spacing = _fn_ensure(pPr, qn("w:spacing"))
+    spacing.set(qn("w:line"), "240")
+    spacing.set(qn("w:lineRule"), "auto")
+    spacing.set(qn("w:before"), "0")
+    spacing.set(qn("w:after"), "0")
+
+    # ── Run-level properties (all w:r descendants, including inside hyperlinks) ─
+    for r_elem in p_elem.findall(".//" + qn("w:r")):
+        rPr = _fn_ensure(r_elem, qn("w:rPr"))
+        # Keep rPr as first child of run
+        if list(r_elem)[0] is not rPr:
+            r_elem.remove(rPr)
+            r_elem.insert(0, rPr)
+
+        # Font → Times New Roman
+        rFonts = _fn_ensure(rPr, qn("w:rFonts"))
+        for attr in (qn("w:ascii"), qn("w:hAnsi"), qn("w:cs")):
+            rFonts.set(attr, "Times New Roman")
+
+        # Size → 10 pt (20 half-points)
+        for tag in (qn("w:sz"), qn("w:szCs")):
+            el = _fn_ensure(rPr, tag)
+            el.set(qn("w:val"), "20")
+
+        # Bold → suppress
+        for tag in (qn("w:b"), qn("w:bCs")):
+            el = _fn_ensure(rPr, tag)
+            el.set(qn("w:val"), "0")
+
+
+def _format_footnotes(doc: Document) -> int:
+    """
+    Standardise all footnotes in the document to KFU footnote style:
+    10 pt Times New Roman, single spacing, no bold, zero indent.
+
+    Separator footnotes (id ≤ 0) are left untouched.
+    Returns the number of footnote paragraphs formatted.
+
+    Works with both XmlPart (has ._element) and plain Part (has ._blob),
+    since python-docx may load the footnotes part as either depending on version.
+    """
+    try:
+        footnotes_part = doc.part.part_related_by(_FOOTNOTES_RTYPE)
+    except KeyError:
+        return 0   # document has no footnotes
+
+    # XmlPart path (python-docx >= 0.8.x typically)
+    if hasattr(footnotes_part, "_element"):
+        fn_root = footnotes_part._element
+        need_serialize = False
+    elif hasattr(footnotes_part, "_blob") and footnotes_part._blob:
+        # Plain Part — parse the raw XML blob, modify, re-serialize
+        fn_root = _lxml_etree.fromstring(footnotes_part._blob)
+        need_serialize = True
+    else:
+        return 0
+
+    count = 0
+    for fn_elem in fn_root.findall(qn("w:footnote")):
+        fn_id = fn_elem.get(qn("w:id"), "")
+        if fn_id in _FOOTNOTE_SKIP_IDS:
+            continue
+        for p_elem in fn_elem.findall(".//" + qn("w:p")):
+            _format_footnote_para(p_elem)
+            count += 1
+
+    if need_serialize:
+        footnotes_part._blob = _lxml_etree.tostring(
+            fn_root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            standalone=True,
+        )
+
+    return count
+
+
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
 
@@ -3515,6 +3639,9 @@ def process_document(input_path: Path, output_path: Path):
 
     # И ещё раз дочищаем цвет / highlight в самом конце
     remove_all_italic(doc)
+
+    # Стандартизация сносок: TNR 10pt, без полужирного, одинарный интервал
+    _format_footnotes(doc)
 
     doc.save(str(output_path))
 

@@ -31,6 +31,11 @@ def _set_keep_with_next(paragraph, value: bool = True) -> None:
     paragraph.paragraph_format.keep_with_next = value
 
 
+def _set_keep_together(paragraph, value: bool = True) -> None:
+    """Set keep_together (w:keepLines) — prevents a paragraph from being split mid-text."""
+    paragraph.paragraph_format.keep_together = value
+
+
 def _has_image(paragraph) -> bool:
     """True if paragraph contains an inline drawing or picture."""
     from .docx_utils import xml_has_image
@@ -61,6 +66,11 @@ def _apply_rule3(paragraphs: list, kinds: list[str]) -> int:
     for p, kind in zip(paragraphs, kinds):
         if kind in ("table_caption", "table_title", "table_continuation"):
             _set_keep_with_next(p)
+            # keep_together prevents a long multi-line title from being split
+            # across pages by Word's line-breaker (keepWithNext alone won't stop
+            # that — it only keeps the paragraph joined to the NEXT element).
+            if kind in ("table_caption", "table_title"):
+                _set_keep_together(p)
             count += 1
     return count
 
@@ -85,6 +95,9 @@ def _apply_rule5(paragraphs: list, kinds: list[str]) -> int:
             continue
 
         _set_keep_with_next(p)
+        # keep_together prevents a multi-line heading from being split mid-text
+        # across page boundaries (keepWithNext alone only chains to next element).
+        _set_keep_together(p)
         count += 1
 
         # Propagate through trailing empty paragraphs so the chain reaches
@@ -114,10 +127,17 @@ def _apply_rule6(paragraphs: list, kinds: list[str]) -> int:
     count = 0
     n = len(paragraphs)
     for i, (p, kind) in enumerate(zip(paragraphs, kinds)):
-        # Case A: paragraph contains an image → chain it to the next paragraph
+        # Case A: paragraph contains an image → chain it to the caption below.
+        # Propagate keepWithNext through any intervening empty paragraphs so the
+        # chain reaches the figure_caption even when blank lines separate them.
         if _has_image(p):
             _set_keep_with_next(p)
             count += 1
+            j = i + 1
+            while j < n and kinds[j] == "empty_paragraph":
+                _set_keep_with_next(paragraphs[j])
+                count += 1
+                j += 1
             continue
 
         # Case B: figure_caption but the paragraph just above is NOT an image

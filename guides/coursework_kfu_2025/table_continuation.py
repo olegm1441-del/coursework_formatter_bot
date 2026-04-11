@@ -89,8 +89,10 @@ def _all_row_lrpb_indices(rows) -> list[int]:
 _PAGE_BUFFER_PT = 36
 
 # Minimum column width (pt) for column-width optimisation.
-# Columns narrower than this are "phantom" or overly squeezed.
-_MIN_COL_PT = 48.0   # ≈ 1.27 cm
+# Columns narrower than this are "phantom" (invisible/accidental).
+# Using 20 pt (variant C): only truly phantom columns are redistributed;
+# legitimate narrow columns (e.g. 30 pt numbering column) are left as-is.
+_MIN_COL_PT = 20.0   # ≈ 0.7 cm — only phantom columns
 
 
 def _body_height_pt(doc: Document) -> float:
@@ -709,6 +711,18 @@ def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
     for col_el, tw in zip(gridcols, twip_widths):
         col_el.set(qn("w:w"), str(tw))
 
+    # Update w:tblPr/w:tblW to the new column total.
+    # Without this, Word uses the original (too-wide) tblW as master table width
+    # and ignores the corrected gridCol / tcW values.
+    tblPr = tbl_xml.find(qn("w:tblPr"))
+    if tblPr is not None:
+        tblW = tblPr.find(qn("w:tblW"))
+        if tblW is None:
+            tblW = OxmlElement("w:tblW")
+            tblPr.append(tblW)
+        tblW.set(qn("w:w"), str(sum(twip_widths)))
+        tblW.set(qn("w:type"), "dxa")
+
     # Apply to each row's cells (respecting gridSpan)
     for tr in tbl_xml.findall(qn("w:tr")):
         col_idx = 0
@@ -885,7 +899,11 @@ def apply_table_merging(doc: Document) -> int:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-_MIN_ROWS_PAGE1_WARN = 4   # warn in trouble-report if fewer rows land on page 1
+# Minimum number of rows (including header) that must land on page 1 after a
+# LRPB-driven split.  If a split would leave fewer rows, the LRPB signal is
+# considered stale (artefact from the original layout that changed after Phase 1
+# reformatting) and the split is skipped with a trouble-report warning.
+_MIN_ROWS_TO_SPLIT = 4
 
 
 def apply_table_continuation(
@@ -947,15 +965,40 @@ def apply_table_continuation(
             # Collect ALL LRPB rows so tables spanning 3+ pages get multiple
             # splits.  Sort descending so each split correctly trims the tail
             # of tbl_xml without invalidating the earlier split positions.
+            #
+            # Stale-LRPB guard: after Phase 1 reformatting (changed margins /
+            # fonts / spacing) some LRPB markers no longer reflect real page
+            # breaks.  If applying a split would leave fewer than _MIN_ROWS_TO_SPLIT
+            # rows on page 1, the signal is considered stale → skip and warn.
             lrpb_rows = _all_row_lrpb_indices(rows)
             if lrpb_rows:
-                for lrpb_row in sorted(lrpb_rows, reverse=True):
+                valid_splits: list[int] = []
+                for lrpb_row in lrpb_rows:
                     split_after = max(_MIN_DATA_ROWS, lrpb_row - 1)
+                    if split_after + 1 < _MIN_ROWS_TO_SPLIT:
+                        logger.info(
+                            "table_continuation: stale LRPB skipped for '%s' "
+                            "(split_after=%d, rows_page1=%d < %d)",
+                            table_num, split_after, split_after + 1, _MIN_ROWS_TO_SPLIT,
+                        )
+                        if report is not None:
+                            report.warn(
+                                f"Таблица {table_num}: разрыв страниц не определён — "
+                                "проверьте перенос вручную"
+                            )
+                        continue
+                    valid_splits.append(split_after)
+
+                for split_after in sorted(valid_splits, reverse=True):
                     splits.append((xml_elem, split_after, table_num))
-                logger.info(
-                    "table_continuation: LRPB split '%s' — %d page-break(s) at rows %s",
-                    table_num, len(lrpb_rows), lrpb_rows,
-                )
+
+                if valid_splits:
+                    logger.info(
+                        "table_continuation: LRPB split '%s' — %d valid split(s) "
+                        "at rows %s (skipped stale: %d)",
+                        table_num, len(valid_splits), lrpb_rows,
+                        len(lrpb_rows) - len(valid_splits),
+                    )
                 continue
 
             # ── No signal: table cannot be auto-split ─────────────────────
@@ -975,12 +1018,6 @@ def apply_table_continuation(
     # so each successive _split_table call operates on the shortened tbl_xml.
     n_splits = 0
     for tbl_xml, split_after_row, tbl_num in splits:
-        # Warn if the first page part will be very short (< _MIN_ROWS_PAGE1_WARN rows)
-        if report is not None and split_after_row < _MIN_ROWS_PAGE1_WARN - 1:
-            report.warn(
-                f"При переносе таблицы {tbl_num} осталось мало строк "
-                f"({split_after_row + 1} стр. 1)"
-            )
         if _split_table(tbl_xml, split_after_row, tbl_num):
             n_splits += 1
 
@@ -1040,6 +1077,28 @@ _FIGURE_CAP_RE_GEOM = re.compile(
 def _para_has_image(p_elem) -> bool:
     """True if the paragraph XML element contains an inline drawing or picture."""
     return xml_has_image(p_elem)
+
+
+def _get_image_height_pt(p_elem) -> float | None:
+    """
+    Return the rendered height (pt) of the first drawing in a paragraph by
+    reading the wp:extent cy attribute (in EMU).
+
+    Word stores drawing dimensions in EMU (English Metric Units):
+        1 pt = 12 700 EMU  (EMU_PER_PT constant)
+
+    Returns None if no wp:extent element is found.
+    """
+    for drawing in p_elem.findall(".//" + qn("w:drawing")):
+        for container_tag in (qn("wp:inline"), qn("wp:anchor")):
+            container = drawing.find(container_tag)
+            if container is not None:
+                extent = container.find(qn("wp:extent"))
+                if extent is not None:
+                    cy = extent.get("cy")
+                    if cy and cy.lstrip("-").isdigit():
+                        return int(cy) / EMU_PER_PT
+    return None
 
 
 def _set_page_break_before(para_elem) -> None:
@@ -1295,16 +1354,30 @@ def apply_rule6_figure_orphan(doc: Document) -> int:
                 i += 1
                 continue
 
-            # Image paragraph — check if the next paragraph is a figure caption
-            if i + 1 < n:
-                nk, nxe, npo = body_elems[i + 1]
+            # Image paragraph — use actual rendered height from wp:extent cy if
+            # available; fall back to the generic paragraph height estimate.
+            # The generic estimate returns ~21 pt (1 empty line) for image-only
+            # paragraphs, massively underestimating real figure heights.
+            img_h = _get_image_height_pt(xml_elem) or h
+
+            # Image paragraph — check if the next paragraph is a figure caption.
+            # Skip past any empty paragraphs between image and caption first.
+            j = i + 1
+            while j < n and body_elems[j][0] == "paragraph":
+                nk, nxe, npo = body_elems[j]
+                if (npo.text or "").strip():
+                    break
+                j += 1
+
+            if j < n:
+                nk, nxe, npo = body_elems[j]
                 if nk == "paragraph":
                     next_text = (npo.text or "").strip()
                     if _FIGURE_CAP_RE_GEOM.match(next_text):
                         caption_h   = _estimate_para_height(npo)
-                        img_fits    = (current_h + h <= body_h)
-                        cap_orphan  = (current_h + h + caption_h > body_h)
-                        fits_fresh  = (h + caption_h <= body_h)
+                        img_fits    = (current_h + img_h <= body_h)
+                        cap_orphan  = (current_h + img_h + caption_h > body_h)
+                        fits_fresh  = (img_h + caption_h <= body_h)
 
                         if img_fits and cap_orphan and fits_fresh:
                             _set_page_break_before(xml_elem)
@@ -1314,15 +1387,15 @@ def apply_rule6_figure_orphan(doc: Document) -> int:
                                 next_text[:50],
                             )
                             # Both now start fresh on next page
-                            current_h = h + caption_h
-                            i += 2
+                            current_h = img_h + caption_h
+                            i = j + 1
                             continue
 
-            # Normal advance
-            if current_h + h > body_h:
-                current_h = h
+            # Normal advance (use img_h for accurate geometry tracking)
+            if current_h + img_h > body_h:
+                current_h = img_h
             else:
-                current_h += h
+                current_h += img_h
 
         elif kind == "table":
             rows = py_obj.rows
