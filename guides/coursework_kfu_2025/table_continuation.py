@@ -1010,6 +1010,7 @@ def _apply_rule4_pass(doc: Document) -> int:
     body_elems = list(_iter_body(doc))
     current_h = 0.0
     to_remove: list = []
+    prev_nonempty_kind: str | None = None
 
     for kind, xml_elem, py_obj in body_elems:
         if kind == "paragraph":
@@ -1026,6 +1027,12 @@ def _apply_rule4_pass(doc: Document) -> int:
             is_empty = not text
 
             if page_overflow and is_empty:
+                # Preserve intentional blank lines that must remain after
+                # headings and table note blocks ("Источник:" / "Примечание:").
+                if prev_nonempty_kind in {"heading", "source_or_note"}:
+                    current_h += h
+                    continue
+
                 # Check it's not a meaningful spacer (large space_before)
                 try:
                     sb = py_obj.paragraph_format.space_before
@@ -1038,8 +1045,16 @@ def _apply_rule4_pass(doc: Document) -> int:
                 # current_h stays 0 — next element is still first on page
             else:
                 current_h += h
+                if not is_empty:
+                    if _looks_like_heading(text):
+                        prev_nonempty_kind = "heading"
+                    elif re.match(r"^\s*(источник|примечание)\s*:", text, re.IGNORECASE):
+                        prev_nonempty_kind = "source_or_note"
+                    else:
+                        prev_nonempty_kind = "text"
 
         elif kind == "table":
+            prev_nonempty_kind = "table"
             rows = py_obj.rows
             col_widths = _tbl_col_widths_pt(xml_elem)
             for rh in (_estimate_row_height(r, body_w, col_widths) for r in rows):
