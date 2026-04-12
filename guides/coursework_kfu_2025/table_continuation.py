@@ -1,23 +1,53 @@
 """
-Phase 3, Rule 1 — Table continuation (hybrid: LRPB + geometry fallback).
+Phase 3 — Table formatting utilities.
 
-Primary signal — w:lastRenderedPageBreak (LRPB):
-  Word writes these elements into the XML every time it saves after rendering.
-  They mark the exact position of page breaks in the last Word render.
-  For table rows: if a row contains LRPB, that row straddles a page break
-  → we split just before that row.
-  For body paragraphs: LRPB resets our cumulative-height tracker, preventing
-  error accumulation across pages.
+### What works now (geometry-based, no LibreOffice required)
+  - apply_table_merging:      stub — returns 0 (see FUTURE note below)
+  - apply_table_continuation: stub — returns 0 (see FUTURE note below)
+  - _optimize_table_col_widths: active — fixes oversized/phantom columns
+  - apply_rule3_table_orphan: active — prevents table caption orphaned at page bottom
+  - apply_rule4_empty_first_lines: active — removes empty paragraphs at page top
+  - apply_rule6_figure_orphan: active — keeps image with its caption
 
-Geometry fallback (for tables with no LRPB in their rows):
-  Estimated from font/spacing constants and cell text length.
-  Used only when LRPB data is absent or insufficient.
+### FUTURE: Table splitting via LibreOffice (Rule 1)
+#
+# The table-continuation system (merge pre-split tables → re-split at real page
+# breaks → insert "Продолжение таблицы X.Y.Z" headers) requires knowing EXACTLY
+# where page breaks fall after formatting.  Pure geometry estimation (without a
+# rendering engine) is too unreliable for production use:
+#
+#   Problem A — w:lastRenderedPageBreak (LRPB) is stale.
+#     Word writes LRPB markers when it saves.  After Phase 1 reformatting
+#     (fonts, margins, spacing all change) the LRPBs reflect the OLD layout,
+#     not the new one.  Fresh KFU-formatted documents have NO LRPB at all,
+#     producing 9-12 spurious "check manually" warnings per document.
+#
+#   Problem B — Geometry estimator is approximate.
+#     Font metrics, line-wrap, cell merges, images in cells, and Word's own
+#     internal kerning all introduce errors that compound over many rows.
+#     A 2% per-row error on a 50-row table → entire page off.
+#
+# Recommended future approach — LibreOffice headless PDF-info:
+#   1. Run `soffice --headless --convert-to pdf <formatted.docx>` (separate
+#      Railway service or sidecar, NOT inline — adds ~400 MB + 8-15 s startup).
+#   2. Parse the PDF page-stream to find exact row → page mapping.
+#   3. Split at real page breaks, insert "Продолжение таблицы X.Y.Z" headers.
+#
+# Required helper functions (written, now commented-out):
+#   _FORMATTER_RSID         — unique rsidR stamp for formatter-inserted paragraphs
+#   _make_continuation_para — builds <w:p> "Продолжение таблицы X.Y.Z"
+#   _split_table            — splits tbl_xml after row N, inserts continuation para
+#   _is_formatter_continuation — detects formatter-stamped continuation paras
+#   _rows_match / _merge_tables — merges two table parts (undo student splits)
+#   apply_table_merging     — pre-pass: detect & merge student-split table pairs
+#   apply_table_continuation — main pass: split at real page breaks
+#
+# To re-enable: restore those functions from git history (commit before this one),
+# replace the stubs below, and integrate with a LibreOffice rendering step.
 """
 
 from __future__ import annotations
 
-import copy
-from copy import deepcopy  # used in _merge_tables and _split_table
 import logging
 import math
 import re
@@ -25,6 +55,7 @@ import re
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+
 
 from .docx_utils import xml_has_image, is_source_or_note_line, FormattingReport
 
@@ -45,42 +76,10 @@ _LRPB_TAG = qn("w:lastRenderedPageBreak")
 
 
 def _para_has_lrpb(p_elem) -> bool:
-    """True if this paragraph contains w:lastRenderedPageBreak."""
+    """True if this paragraph contains w:lastRenderedPageBreak.
+    Used by _lrpb_calibrate (Rule 4 geometry estimator).
+    """
     return p_elem.find(".//" + _LRPB_TAG) is not None
-
-
-def _row_lrpb_index(rows) -> int:
-    """
-    Return the index of the first row (after the header, index > 0) that
-    contains w:lastRenderedPageBreak, or -1 if none found.
-    A positive result means the page break is WITHIN that row — we should
-    split just BEFORE it (split_after = index - 1).
-    """
-    for i, row in enumerate(rows):
-        if i == 0:
-            continue   # header row — never split before it
-        if row._tr.find(".//" + _LRPB_TAG) is not None:
-            return i
-    return -1
-
-
-def _all_row_lrpb_indices(rows) -> list[int]:
-    """
-    Return ALL row indices (after the header, index > 0) that contain
-    w:lastRenderedPageBreak.  Used for tables spanning 3+ pages.
-
-    Each index means: the page break is WITHIN that row → split just
-    BEFORE it (split_after = index - 1).
-
-    Returns an empty list if no LRPB is found after the header row.
-    """
-    result: list[int] = []
-    for i, row in enumerate(rows):
-        if i == 0:
-            continue   # header row — never split before it
-        if row._tr.find(".//" + _LRPB_TAG) is not None:
-            result.append(i)
-    return result
 
 # ── Page geometry ─────────────────────────────────────────────────────────────
 
@@ -424,160 +423,8 @@ def _extract_table_num(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-# ── "Продолжение таблицы X" paragraph ────────────────────────────────────────
-
-_FORMATTER_RSID = "00CF0001"   # stamp on formatter-inserted paragraphs; never set by Word
-
-
-def _make_continuation_para(table_num: str) -> OxmlElement:
-    """
-    Build <w:p> for "Продолжение таблицы X.Y.Z":
-      right-aligned, Times New Roman 14 pt, not bold, no indent, keep_with_next.
-    """
-    p = OxmlElement("w:p")
-    # Stamp a unique rsidR so _is_formatter_continuation can identify this
-    # paragraph even after Phase 1 reformats its content.
-    p.set(qn("w:rsidR"), _FORMATTER_RSID)
-
-    pPr = OxmlElement("w:pPr")
-
-    jc = OxmlElement("w:jc")
-    jc.set(qn("w:val"), "right")
-    pPr.append(jc)
-
-    ind = OxmlElement("w:ind")
-    ind.set(qn("w:left"), "0")
-    ind.set(qn("w:right"), "0")
-    ind.set(qn("w:firstLine"), "0")
-    pPr.append(ind)
-
-    spacing = OxmlElement("w:spacing")
-    spacing.set(qn("w:before"), "0")
-    spacing.set(qn("w:after"), "0")
-    spacing.set(qn("w:line"), "360")       # 1.5× line spacing (360 / 240 = 1.5)
-    spacing.set(qn("w:lineRule"), "auto")
-    pPr.append(spacing)
-
-    # keep_with_next so "Продолжение" doesn't hang alone without the table
-    keep = OxmlElement("w:keepNext")
-    pPr.append(keep)
-
-    p.append(pPr)
-
-    r = OxmlElement("w:r")
-    rPr = OxmlElement("w:rPr")
-
-    rFonts = OxmlElement("w:rFonts")
-    for attr in ("w:ascii", "w:hAnsi", "w:cs"):
-        rFonts.set(qn(attr), "Times New Roman")
-    rPr.append(rFonts)
-
-    for tag in ("w:sz", "w:szCs"):
-        el = OxmlElement(tag)
-        el.set(qn("w:val"), "28")   # 14 pt = 28 half-points
-        rPr.append(el)
-
-    for tag in ("w:b", "w:bCs"):
-        el = OxmlElement(tag)
-        el.set(qn("w:val"), "0")    # explicitly not bold
-        rPr.append(el)
-
-    r.append(rPr)
-
-    t = OxmlElement("w:t")
-    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    t.text = f"Продолжение таблицы {table_num}"
-    r.append(t)
-    p.append(r)
-
-    return p
-
-
-# ── Table split ───────────────────────────────────────────────────────────────
-
-_MIN_DATA_ROWS = 1   # at least this many data rows must remain on the first page
-
-# In-memory split hints for tables that were merged from a student-provided
-# continuation pair during the current formatting run.
-# key: id(tbl_xml_element), value: split_after_row
-_MERGED_SPLIT_HINTS: dict[int, int] = {}
-
-
-def _split_table(tbl_elem, split_after_row: int, table_num: str) -> bool:
-    """
-    Split tbl_elem after row index split_after_row.
-
-    After the call the document body looks like:
-        tbl1  (rows 0 … split_after_row)
-        <w:p> "Продолжение таблицы X.Y.Z"
-        tbl2  (header_copy + rows split_after_row+1 … end)
-
-    Returns True on success, False if split is not meaningful.
-    """
-    rows = tbl_elem.findall(qn("w:tr"))
-    total = len(rows)
-
-    # Clamp split point: keep ≥ MIN_DATA_ROWS data rows on first page,
-    # and ≥ 1 row after the split.
-    split_after_row = max(_MIN_DATA_ROWS, min(split_after_row, total - 2))
-
-    if split_after_row >= total - 1:
-        logger.debug("_split_table: nothing to split (split_after=%d, total=%d)", split_after_row, total)
-        return False
-
-    # Deep-copy entire table → becomes the second (continuation) table
-    tbl2 = copy.deepcopy(tbl_elem)
-
-    # ── Strip stale LRPB markers from tbl2 ────────────────────────────────
-    # The rows moved to tbl2 carry w:lastRenderedPageBreak elements that
-    # reflect the ORIGINAL document layout.  After the split, those page
-    # boundaries are no longer valid.  Removing them prevents a second
-    # formatter pass from treating them as fresh split signals and
-    # re-splitting the continuation table.
-    for lrpb_elem in list(tbl2.findall(".//" + _LRPB_TAG)):
-        parent = lrpb_elem.getparent()
-        if parent is not None:
-            parent.remove(lrpb_elem)
-
-    # ── Trim tbl1: remove rows after the split ─────────────────────────────
-    tbl1_rows = tbl_elem.findall(qn("w:tr"))
-    for row in tbl1_rows[split_after_row + 1:]:
-        tbl_elem.remove(row)
-
-    # ── Trim tbl2: remove rows up to and including split_after_row ─────────
-    tbl2_rows = tbl2.findall(qn("w:tr"))
-    header_copy = tbl2_rows[0]          # deep-copy of row 0 (already copied)
-    for row in tbl2_rows[: split_after_row + 1]:
-        tbl2.remove(row)
-
-    # ── Prepend header row to tbl2 ─────────────────────────────────────────
-    first_data_rows = tbl2.findall(qn("w:tr"))
-    if first_data_rows:
-        tbl2.insert(list(tbl2).index(first_data_rows[0]), header_copy)
-    else:
-        tbl2.append(header_copy)
-
-    # Mark the prepended header as a repeating table header (w:tblHeader)
-    trPr = header_copy.find(qn("w:trPr"))
-    if trPr is None:
-        trPr = OxmlElement("w:trPr")
-        header_copy.insert(0, trPr)
-    if trPr.find(qn("w:tblHeader")) is None:
-        trPr.append(OxmlElement("w:tblHeader"))
-
-    # ── Insert "Продолжение" paragraph + tbl2 after tbl1 ──────────────────
-    cont_para = _make_continuation_para(table_num)
-    tbl_elem.addnext(tbl2)         # body: tbl1 → tbl2
-    tbl_elem.addnext(cont_para)    # body: tbl1 → cont_para → tbl2  ✓
-
-    logger.info(
-        "table_continuation: split '%s' after row %d/%d",
-        table_num, split_after_row, total - 1,
-    )
-    return True
-
-
-# ── Table merging (pre-existing student splits) ───────────────────────────────
+# ── Table merging / continuation detection helpers ────────────────────────────
+# (splitting/merging logic is stubbed — see module docstring for FUTURE plan)
 
 _CONT_RE = re.compile(r"продолжени", re.IGNORECASE)
 _TBL_WORD_RE = re.compile(r"таблиц", re.IGNORECASE)
@@ -596,53 +443,6 @@ def _is_student_continuation(text: str) -> bool:
         return False
     return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
 
-
-def _is_formatter_continuation(para) -> bool:
-    """
-    True if this paragraph is a formatter-inserted 'Продолжение таблицы' paragraph.
-
-    The formatter stamps w:rsidR="_FORMATTER_RSID" on every continuation paragraph
-    it creates.  Phase 1 (safe_formatter) never reads or modifies rsidR attributes,
-    so the stamp survives all formatting passes and is the only reliable discriminator.
-    """
-    try:
-        return para._element.get(qn("w:rsidR")) == _FORMATTER_RSID
-    except Exception:
-        return False
-
-
-def _rows_match(row1, row2) -> bool:
-    """Compare cell texts of two table rows (True if identical)."""
-    cells1 = [c.text.strip() for c in row1.cells]
-    cells2 = [c.text.strip() for c in row2.cells]
-    return cells1 == cells2
-
-
-def _merge_tables(tbl1_elem, tbl1_obj, tbl2_elem, tbl2_obj) -> None:
-    """
-    Append all rows from tbl2 into tbl1.
-    If the first row of tbl2 is identical to the first row of tbl1 (duplicate
-    header), skip it.
-    """
-    rows1 = tbl1_obj.rows
-    rows2 = tbl2_obj.rows
-
-    if not rows2:
-        return
-
-    start_row = 0
-    if rows1 and rows2 and _rows_match(rows1[0], rows2[0]):
-        start_row = 1   # skip duplicate header
-
-    for row in rows2[start_row:]:
-        tbl1_elem.append(deepcopy(row._tr))
-
-    logger.debug("_merge_tables: appended %d row(s) from tbl2", len(rows2) - start_row)
-
-
-def _tbl_has_lrpb(tbl_obj) -> bool:
-    """True if any row (after row 0) in the table contains w:lastRenderedPageBreak."""
-    return _row_lrpb_index(tbl_obj.rows) > 0
 
 
 _NUMERIC_CELL_RE = re.compile(r"^[\d\s\+\-−–,.%]+$")
@@ -812,298 +612,104 @@ def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
 
 def apply_table_merging(doc: Document) -> int:
     """
-    Phase 3 pre-pass — detect tables that the student manually split with a
-    "Продолжение таблицы X.Y.Z" paragraph and merge them back into a single table.
+    Phase 3 pre-pass — STUB (table splitting/merging disabled).
 
-    After merging, apply_table_continuation will re-split any table that genuinely
-    overflows the page and insert a correctly formatted continuation paragraph.
+    Previously: detected student-split table pairs (table + "Продолжение
+    таблицы X" paragraph + continuation table) and merged them back into one
+    table so apply_table_continuation could re-split at the real page boundary.
 
-    Returns the number of merges performed.
+    Disabled because reliable page-break detection requires a rendering engine
+    (LibreOffice / Word) — pure geometry estimation was too unreliable.
+    See module docstring for the FUTURE implementation plan.
+
+    Returns 0 (no changes made).
     """
-    _MERGED_SPLIT_HINTS.clear()
-    body_elems = list(_iter_body(doc))
-    n = len(body_elems)
-
-    # Collect merge jobs:
-    # (cont_para_indices, tbl2_index, tbl1_index)
-    merge_jobs: list[tuple[list[int], int, int]] = []
-
-    # Track the index of the most recent table
-    last_tbl_idx: int | None = None
-
-    i = 0
-    while i < n:
-        kind, xml_elem, py_obj = body_elems[i]
-
-        if kind == "table":
-            # ── Detect silent splits: consecutive tables with no body text ──
-            # Students sometimes split a table by just inserting a page break
-            # mid-table, creating two (or more) adjacent tables with no
-            # "Продолжение" paragraph between them.  Merge if:
-            #   • the immediately preceding body element is also a table, AND
-            #   • all elements between them are empty paragraphs, AND
-            #   • both tables have the same number of grid columns.
-            if last_tbl_idx is not None:
-                inter = body_elems[last_tbl_idx + 1 : i]
-                has_content = any(
-                    k == "paragraph" and (po.text or "").strip()
-                    for k, _, po in inter
-                )
-                if not has_content:
-                    _, tbl1_xml, tbl1_obj = body_elems[last_tbl_idx]
-                    tbl2_obj = py_obj
-                    tbl1_grid = tbl1_xml.find(qn("w:tblGrid"))
-                    tbl2_grid = xml_elem.find(qn("w:tblGrid"))
-                    tbl1_cols = len(tbl1_grid.findall(qn("w:gridCol"))) if tbl1_grid is not None else 0
-                    tbl2_cols = len(tbl2_grid.findall(qn("w:gridCol"))) if tbl2_grid is not None else 0
-                    if tbl1_cols > 0 and tbl1_cols == tbl2_cols:
-                        # Only merge if at least one part has LRPB — guarantees
-                        # we can re-split at the correct position.  Without LRPB
-                        # we have no reliable split point and the student's break
-                        # (even if imperfect) is better than none.
-                        if not (_tbl_has_lrpb(tbl1_obj) or _tbl_has_lrpb(tbl2_obj)):
-                            last_tbl_idx = i
-                            i += 1
-                            continue
-                        empty_para_idxs = [
-                            idx
-                            for idx, (k, _, _) in enumerate(body_elems[last_tbl_idx + 1 : i], start=last_tbl_idx + 1)
-                            if k == "paragraph"
-                        ]
-                        merge_jobs.append((empty_para_idxs, i, last_tbl_idx))
-                        last_tbl_idx = i
-                        i += 1
-                        continue
-
-            last_tbl_idx = i
-
-        elif kind == "paragraph":
-            text = (py_obj.text or "").strip()
-            if (_is_student_continuation(text)
-                    and not _is_formatter_continuation(py_obj)
-                    and last_tbl_idx is not None):
-                # Collect the continuation paragraph + any trailing empty paras
-                cont_indices = [i]
-                j = i + 1
-                while j < n:
-                    k2, _, po2 = body_elems[j]
-                    if k2 != "paragraph":
-                        break
-                    t2 = (po2.text or "").strip()
-                    if t2:
-                        break   # non-empty non-table element — stop
-                    cont_indices.append(j)
-                    j += 1
-
-                # j must now point to the second table part
-                if j < n and body_elems[j][0] == "table":
-                    # Only merge if LRPB is present — without it we cannot
-                    # re-split correctly and student's break is better than none
-                    _, tbl1_xml_c, tbl1_obj_c = body_elems[last_tbl_idx]
-                    _, _tbl2_xml_c, tbl2_obj_c = body_elems[j]
-                    if not (_tbl_has_lrpb(tbl1_obj_c) or _tbl_has_lrpb(tbl2_obj_c)):
-                        i = j + 1
-                        last_tbl_idx = j
-                        continue
-                    merge_jobs.append((cont_indices, j, last_tbl_idx))
-                    # Skip past everything we just catalogued
-                    i = j + 1
-                    last_tbl_idx = i - 1  # tbl2 is now the "last table"
-                    continue
-
-        i += 1
-
-    if not merge_jobs:
-        logger.info("table_merging: no pre-existing splits found")
-        return 0
-
-    # Apply in reverse order so indices remain valid
-    merged = 0
-    for cont_indices, tbl2_idx, tbl1_idx in reversed(merge_jobs):
-        try:
-            _, tbl1_xml, tbl1_obj = body_elems[tbl1_idx]
-            _, tbl2_xml, tbl2_obj = body_elems[tbl2_idx]
-            # Preserve the student's original split point (header + N rows in
-            # the first part => split_after_row = len(rows_part1) - 1).
-            # We will prioritise this hint over stale LRPB markers after merge.
-            split_hint = max(_MIN_DATA_ROWS, len(tbl1_obj.rows) - 1)
-            _merge_tables(tbl1_xml, tbl1_obj, tbl2_xml, tbl2_obj)
-            _MERGED_SPLIT_HINTS[id(tbl1_xml)] = split_hint
-
-            # Remove continuation paragraphs
-            for ci in cont_indices:
-                xe = body_elems[ci][1]
-                parent = xe.getparent()
-                if parent is not None:
-                    parent.remove(xe)
-
-            # Remove the second table element
-            parent = tbl2_xml.getparent()
-            if parent is not None:
-                parent.remove(tbl2_xml)
-
-            merged += 1
-            logger.info(
-                "table_merging: merged tbl@%d ← tbl@%d (removed %d cont para(s))",
-                tbl1_idx, tbl2_idx, len(cont_indices),
-            )
-        except Exception:
-            logger.exception(
-                "table_merging: failed to merge tbl@%d ← tbl@%d", tbl1_idx, tbl2_idx
-            )
-
-    logger.info("table_merging: %d merge(s) applied", merged)
-    return merged
+    # ## FUTURE: LibreOffice-based implementation ##
+    #
+    # Algorithm (to restore when a rendering engine is available):
+    #
+    # 1. Walk body elements in order tracking the last-seen table index.
+    #
+    # 2. CASE A — "Продолжение таблицы X" paragraph between two tables:
+    #    a. Detect via _is_student_continuation(text) (and NOT
+    #       _is_formatter_continuation() to skip our own previously inserted ones).
+    #    b. Confirm the next non-empty body element is a table with the same
+    #       number of grid columns as the preceding table.
+    #    c. Merge tbl2 into tbl1 via _merge_tables() (skipping duplicate header).
+    #    d. Remove the "Продолжение" paragraph from the body.
+    #    e. Record the student's split point in _MERGED_SPLIT_HINTS so
+    #       apply_table_continuation can use it as a priority hint.
+    #
+    # 3. CASE B — Adjacent tables with no body text between them (silent split):
+    #    Same merge logic, but without a "Продолжение" paragraph to remove.
+    #    Only merge if LRPB markers (or rendering data) confirm a page break
+    #    existed — otherwise the student's break is intentional (e.g. two
+    #    separate tables on the same page).
+    #
+    # 4. Apply merges in reverse body order so indices stay valid.
+    #
+    # Key helpers needed:
+    #   _is_formatter_continuation(para) — checks w:rsidR == _FORMATTER_RSID
+    #   _rows_match(row1, row2)          — compares cell texts for dup-header detection
+    #   _merge_tables(tbl1_xml, tbl1_obj, tbl2_xml, tbl2_obj) — appends rows
+    #   _MERGED_SPLIT_HINTS: dict[int, int] — maps id(tbl_xml) → split_after_row
+    #
+    # All of the above were implemented and removed from this file.
+    # Restore from git history (last commit before this docstring was added).
+    return 0
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
-
-# Minimum number of rows (including header) that must land on page 1 after a
-# LRPB-driven split.  If a split would leave fewer rows, the LRPB signal is
-# considered stale (artefact from the original layout that changed after Phase 1
-# reformatting) and the split is skipped with a trouble-report warning.
-_MIN_ROWS_TO_SPLIT = 4
-
 
 def apply_table_continuation(
     doc: Document,
     report: FormattingReport | None = None,
 ) -> int:
     """
-    Walk document body elements, detect tables that overflow a page, split them.
+    Phase 3 Rule 1 — STUB (table page-break splitting disabled).
 
-    For tables spanning multiple pages (multiple LRPB rows), multiple splits
-    are produced — one per LRPB row, applied from last to first so that row
-    indices remain valid across sequential splits of the same element.
+    Still active: column-width optimisation (_optimize_table_col_widths) runs
+    for ALL tables — fixes oversized / phantom-narrow columns regardless of
+    whether splitting is enabled.
 
-    Args:
-        doc:    The loaded python-docx Document (modified in-place).
-        report: Optional FormattingReport — warnings appended for tables that
-                could not be split or produced very short first-page sections.
+    The splitting part is disabled because reliable page-break detection
+    requires a rendering engine.  See module docstring for the FUTURE plan.
 
-    Returns the number of splits performed.
+    Returns 0 (no splits performed).
     """
-    body_h = _body_height_pt(doc)
+    # ## FUTURE: LibreOffice-based splitting implementation ##
+    #
+    # Algorithm (to restore when a rendering engine is available):
+    #
+    # 1. Pre-pass: call apply_table_merging() to undo student-split table pairs.
+    #
+    # 2. For each table in the document body:
+    #    a. Look up the rendering engine's page-break report to find which rows
+    #       straddle a page boundary (replaces stale LRPB detection).
+    #    b. Collect all split points (there can be multiple for long tables).
+    #    c. Apply splits from last to first (so earlier indices stay valid):
+    #         _split_table(tbl_xml, split_after_row, table_num)
+    #       which:
+    #         • deep-copies the table → tbl2
+    #         • trims tbl1 to rows 0..split_after
+    #         • prepends header row to tbl2 + marks it w:tblHeader
+    #         • inserts "Продолжение таблицы X" para between tbl1 and tbl2
+    #
+    # 3. Stale-signal guards (needed even with rendering engine):
+    #    _MIN_ROWS_TO_SPLIT = 4  — skip split if <4 rows land on page 1
+    #    table-fits-on-one-page  — skip if total height ≤ body height
+    #
+    # 4. Warn via report.warn() for tables where no reliable split was found.
+    #
+    # Key helpers needed (restore from git history):
+    #   _split_table(tbl_elem, split_after_row, table_num) → bool
+    #   _make_continuation_para(table_num) → OxmlElement
+    #   _MERGED_SPLIT_HINTS: dict[int, int]
+
+    # ── Column-width optimisation (always active) ──────────────────────────
     body_w = _body_width_pt(doc)
-    logger.info("table_continuation: body_height=%.1f pt  body_width=%.1f pt", body_h, body_w)
-
-    body_elems = list(_iter_body(doc))   # snapshot — safe to mutate doc after this
-
-    last_tbl_num: str | None = None   # table number from the most recent caption
-    # Each entry: (tbl_xml, split_after_row, table_num)
-    # For multi-LRPB tables, multiple entries share the same tbl_xml, ordered
-    # from highest split_after_row to lowest so they apply correctly in sequence.
-    splits: list[tuple] = []
-
-    for kind, xml_elem, py_obj in body_elems:
-
-        if kind == "paragraph":
-            text = (py_obj.text or "").strip()
-            num = _extract_table_num(text)
-            if num:
-                last_tbl_num = num
-
-        elif kind == "table":
-            rows = py_obj.rows
-            if len(rows) < 2:
-                continue
-
-            table_num = last_tbl_num or "?"
-
-            # ── Priority 1: student split hint (from apply_table_merging) ──
-            split_hint = _MERGED_SPLIT_HINTS.get(id(xml_elem))
-            if split_hint is not None:
-                splits.append((xml_elem, split_hint, table_num))
-                logger.info(
-                    "table_continuation: merged-hint split '%s' after row %d",
-                    table_num, split_hint,
-                )
-                continue
-
-            # ── Priority 2: w:lastRenderedPageBreak ────────────────────────
-            # Collect ALL LRPB rows so tables spanning 3+ pages get multiple
-            # splits.  Sort descending so each split correctly trims the tail
-            # of tbl_xml without invalidating the earlier split positions.
-            #
-            # Stale-LRPB guard A — table fits on one page:
-            # Phase 1 reformatting (narrower margins, different fonts, tighter
-            # spacing) often makes rows shorter than in the original Word layout.
-            # If the estimated total table height ≤ body height, the table now
-            # fits on one page and all LRPB markers are stale → skip splitting.
-            #
-            # Stale-LRPB guard B — too few rows on page 1:
-            # If a split would leave fewer than _MIN_ROWS_TO_SPLIT rows on page 1,
-            # the signal is considered stale → skip that specific split and warn.
-            lrpb_rows = _all_row_lrpb_indices(rows)
-            if lrpb_rows:
-                col_widths_pt = _tbl_col_widths_pt(xml_elem)
-                total_tbl_h = sum(
-                    _estimate_row_height(r, body_w, col_widths_pt) for r in rows
-                )
-                if total_tbl_h <= body_h:
-                    logger.info(
-                        "table_continuation: table '%s' fits on one page "
-                        "(est. h=%.1fpt ≤ body_h=%.1fpt) — LRPB skipped as stale",
-                        table_num, total_tbl_h, body_h,
-                    )
-                    continue
-                valid_splits: list[int] = []
-                for lrpb_row in lrpb_rows:
-                    split_after = max(_MIN_DATA_ROWS, lrpb_row - 1)
-                    if split_after + 1 < _MIN_ROWS_TO_SPLIT:
-                        logger.info(
-                            "table_continuation: stale LRPB skipped for '%s' "
-                            "(split_after=%d, rows_page1=%d < %d)",
-                            table_num, split_after, split_after + 1, _MIN_ROWS_TO_SPLIT,
-                        )
-                        if report is not None:
-                            report.warn(
-                                f"Таблица {table_num}: разрыв страниц не определён — "
-                                "проверьте перенос вручную"
-                            )
-                        continue
-                    valid_splits.append(split_after)
-
-                for split_after in sorted(valid_splits, reverse=True):
-                    splits.append((xml_elem, split_after, table_num))
-
-                if valid_splits:
-                    logger.info(
-                        "table_continuation: LRPB split '%s' — %d valid split(s) "
-                        "at rows %s (skipped stale: %d)",
-                        table_num, len(valid_splits), lrpb_rows,
-                        len(lrpb_rows) - len(valid_splits),
-                    )
-                continue
-
-            # ── No signal: table cannot be auto-split ─────────────────────
-            if report is not None:
-                report.warn(
-                    f"Таблица {table_num}: нет данных о разрыве страниц — "
-                    "проверьте перенос вручную"
-                )
-            logger.info(
-                "table_continuation: no split signal for table '%s' — skipped",
-                table_num,
-            )
-
-    # Apply splits in the order they were appended.
-    # For a single table with multiple LRPB positions the entries are already
-    # ordered from highest to lowest split_after_row (descending sort above),
-    # so each successive _split_table call operates on the shortened tbl_xml.
-    n_splits = 0
-    for tbl_xml, split_after_row, tbl_num in splits:
-        if _split_table(tbl_xml, split_after_row, tbl_num):
-            n_splits += 1
-
-    logger.info("table_continuation: %d split(s) applied", n_splits)
-
-    # Column-width optimisation: fix phantom/undersized columns and tables
-    # wider than the body.  Applied to ALL tables after splitting so that
-    # both original and continuation tables are corrected.
     n_col_fixed = 0
-    body_elems_post = list(_iter_body(doc))
-    for kind, tbl_xml, _ in body_elems_post:
+    for kind, tbl_xml, _ in _iter_body(doc):
         if kind != "table":
             continue
         if _optimize_table_col_widths(tbl_xml, body_w):
@@ -1111,7 +717,7 @@ def apply_table_continuation(
     if n_col_fixed:
         logger.info("table_continuation: col-width optimised %d table(s)", n_col_fixed)
 
-    return n_splits
+    return 0
 
 
 # ── Remove empty paragraphs between image and figure caption ─────────────────

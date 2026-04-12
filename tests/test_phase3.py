@@ -8,11 +8,17 @@ or directly:
 
 Acceptance criteria per task:
   A  — Figure deletion: images survive Rule 4 (paragraphs with w:drawing never removed)
-  C  — Student continuation length: text up to 30 chars is detected and merged
-  B  — Multi-LRPB: a table with 2 LRPB rows gets 2 continuation paragraphs
-  D  — Trouble-report: tables without LRPB/split produce a non-empty warning list
-  E  — Source/note: formatter sets keepWithNext on source paragraphs after tables
+  C  — Student continuation length: _is_student_continuation detects ≤30 char texts
+  B1 — tblW fix: _optimize_table_col_widths updates w:tblW after scaling
+  B2 — keepTogether, Rule 6 propagation, image height from wp:extent
+  B3 — Footnote standardisation
+  C2 — Empty para between image and caption removed; numeric column minimums
   regression — all 5 asset files format without crash and produce a .docx output
+
+  NOTE: Tests for LRPB-based table splitting (B, B1-stale/valid, C2-fits-1-page,
+  C-student-merges) were removed when apply_table_merging / apply_table_continuation
+  were stubbed out.  See module docstring in table_continuation.py for the future
+  LibreOffice-based plan.
 """
 
 from __future__ import annotations
@@ -39,9 +45,6 @@ from guides.coursework_kfu_2025.table_continuation import (
     _body_height_pt,
     _estimate_para_height,
     apply_rule4_empty_first_lines,
-    apply_table_merging,
-    apply_table_continuation,
-    _FORMATTER_RSID,
 )
 from guides.coursework_kfu_2025.formatter_service import format_docx
 
@@ -93,43 +96,6 @@ def _count_drawings(doc: Document) -> int:
     return len(doc.element.body.findall(".//" + qn("w:drawing")))
 
 
-def _set_row_height_exact(row, height_pt: float) -> None:
-    """Set an exact row height (w:trHeight hRule=exact) so geometry estimator uses it."""
-    tr = row._tr
-    trPr = tr.find(qn("w:trPr"))
-    if trPr is None:
-        trPr = OxmlElement("w:trPr")
-        tr.insert(0, trPr)
-    trH = trPr.find(qn("w:trHeight"))
-    if trH is None:
-        trH = OxmlElement("w:trHeight")
-        trPr.append(trH)
-    trH.set(qn("w:val"), str(round(height_pt * 20)))  # twips = pt × 20
-    trH.set(qn("w:hRule"), "exact")
-
-
-def _make_doc_with_student_continuation(cont_text: str) -> Document:
-    """
-    Minimal document with two 2-column tables separated by a student continuation
-    paragraph of given text.
-    """
-    doc = Document()
-    # Table 1
-    t1 = doc.add_table(rows=3, cols=2)
-    for i, cell in enumerate(t1.rows[0].cells):
-        cell.text = f"Header {i+1}"
-    for r in t1.rows[1:]:
-        for c in r.cells:
-            c.text = "data"
-    # Continuation paragraph
-    doc.add_paragraph(cont_text)
-    # Table 2
-    t2 = doc.add_table(rows=2, cols=2)
-    for i, cell in enumerate(t2.rows[0].cells):
-        cell.text = f"Header {i+1}"
-    for c in t2.rows[1].cells:
-        c.text = "more data"
-    return doc
 
 
 # ── Task A — figure deletion ──────────────────────────────────────────────────
@@ -193,79 +159,6 @@ def test_c_continuation_length_guard() -> tuple[bool, str]:
         return _result(False, "; ".join(failures))
     return _result(True, f"all {len(cases)} cases correct")
 
-
-def test_c_student_continuation_merges() -> tuple[bool, str]:
-    """
-    A document with a student continuation text of ≤30 chars must be merged
-    (apply_table_merging returns n>0) when at least one table has LRPB.
-    Without LRPB the merge is intentionally skipped — so we inject a fake LRPB.
-    """
-    cont_text = "Продолжение таблицы 10.1.1"   # 26 chars
-    doc = _make_doc_with_student_continuation(cont_text)
-
-    # Inject a fake LRPB into the second row of table 1 so the guard passes
-    tbl1 = doc.tables[0]
-    row1_tr = tbl1.rows[1]._tr
-    lrpb = OxmlElement("w:lastRenderedPageBreak")
-    row1_tr.append(lrpb)
-
-    n = apply_table_merging(doc)
-    if n == 0:
-        return _result(False, "expected merge=1, got 0 — continuation not detected")
-    if len(doc.tables) != 1:
-        return _result(False, f"expected 1 merged table, got {len(doc.tables)}")
-    return _result(True, f"merged {n} table(s)")
-
-
-# ── Task B — multi-LRPB ──────────────────────────────────────────────────────
-
-def test_b_multi_lrpb_produces_two_splits() -> tuple[bool, str]:
-    """
-    A single table with 2 LRPB rows (row 4 and row 7 of a 10-row table) should
-    produce 2 splits and therefore 2 'Продолжение таблицы' paragraphs.
-
-    Row indices chosen so split_after = 3 and 6, both ≥ _MIN_ROWS_TO_SPLIT-1 (3),
-    meaning rows_page1 = 4 and 7 — both valid, not stale.
-    """
-    from guides.coursework_kfu_2025.table_continuation import _MERGED_SPLIT_HINTS
-
-    doc = Document()
-    doc.add_paragraph("Таблица 1.1 — Test")
-    tbl = doc.add_table(rows=10, cols=2)
-    for i, cell in enumerate(tbl.rows[0].cells):
-        cell.text = f"H{i+1}"
-    for ri in range(1, 10):
-        for ci, cell in enumerate(tbl.rows[ri].cells):
-            cell.text = f"r{ri}c{ci}"
-
-    # Make each row 80pt tall so total (10×80=800pt) exceeds body_h (~720pt).
-    # This ensures the table-fits-on-one-page guard does NOT fire and the
-    # LRPB-based split logic is exercised.
-    for row in tbl.rows:
-        _set_row_height_exact(row, 80.0)
-
-    # Inject LRPB into row 4 and row 7
-    # row 4 → split_after=3 → 4 rows page1 (valid ≥ 4)
-    # row 7 → split_after=6 → 7 rows page1 (valid ≥ 4)
-    for row_idx in (4, 7):
-        tr = tbl.rows[row_idx]._tr
-        lrpb = OxmlElement("w:lastRenderedPageBreak")
-        tr.append(lrpb)
-
-    _MERGED_SPLIT_HINTS.clear()
-    n = apply_table_continuation(doc)
-
-    # Count formatter-inserted continuation paragraphs
-    cont_count = sum(
-        1 for p in doc.paragraphs
-        if p._element.get(qn("w:rsidR")) == _FORMATTER_RSID
-    )
-
-    if n != 2:
-        return _result(False, f"expected 2 splits, got {n}")
-    if cont_count != 2:
-        return _result(False, f"expected 2 continuation paragraphs, got {cont_count}")
-    return _result(True, f"splits={n}, continuation paragraphs={cont_count}")
 
 
 # ── Asset regression ──────────────────────────────────────────────────────────
@@ -369,88 +262,6 @@ def test_b1_min_col_pt_is_20() -> tuple[bool, str]:
         return _result(False, f"_MIN_COL_PT={_MIN_COL_PT} > 20 — old value, fix not applied")
     return _result(True, f"_MIN_COL_PT={_MIN_COL_PT} ✓")
 
-
-def test_b1_stale_lrpb_skipped() -> tuple[bool, str]:
-    """
-    Table 2.3.1: 6 rows, LRPB at row index 3 → split_after=2 → 3 rows on page 1.
-    3 < _MIN_ROWS_TO_SPLIT(4) → apply_table_continuation must SKIP the split
-    and emit a trouble-report warning.
-
-    Rows are made 130pt tall (6×130=780pt > body_h) so the table-fits-on-one-page
-    guard does NOT fire first.
-    """
-    from guides.coursework_kfu_2025.table_continuation import (
-        apply_table_continuation, _MERGED_SPLIT_HINTS,
-    )
-    from guides.coursework_kfu_2025.docx_utils import FormattingReport
-
-    doc = Document()
-    doc.add_paragraph("Таблица 2.3.1 — Stale LRPB test")
-    tbl = doc.add_table(rows=6, cols=2)
-    for i, cell in enumerate(tbl.rows[0].cells):
-        cell.text = f"H{i + 1}"
-    for ri in range(1, 6):
-        for ci, cell in enumerate(tbl.rows[ri].cells):
-            cell.text = f"r{ri}c{ci}"
-
-    # Make each row 130pt exact so total (6×130=780pt) exceeds body_h (~720pt)
-    for row in tbl.rows:
-        _set_row_height_exact(row, 130.0)
-
-    # LRPB at row index 3 → split_after = max(1, 3-1) = 2 → 3 rows on page 1
-    tr = tbl.rows[3]._tr
-    lrpb = OxmlElement("w:lastRenderedPageBreak")
-    tr.append(lrpb)
-
-    _MERGED_SPLIT_HINTS.clear()
-    report = FormattingReport()
-    n = apply_table_continuation(doc, report=report)
-
-    if n != 0:
-        return _result(False, f"expected 0 splits (stale LRPB skipped), got {n}")
-    if report.is_empty():
-        return _result(False, "expected a trouble-report warning for stale LRPB, got none")
-    return _result(True, f"stale LRPB skipped; warning: '{report.warnings[0][:60]}'")
-
-
-def test_b1_valid_lrpb_splits() -> tuple[bool, str]:
-    """
-    Table with LRPB at row index 4 → split_after=3 → 4 rows on page 1 = threshold.
-    apply_table_continuation must still perform exactly 1 split.
-
-    Rows are made 130pt tall (6×130=780pt > body_h) so the table-fits-on-one-page
-    guard does NOT fire first.
-    """
-    from guides.coursework_kfu_2025.table_continuation import (
-        apply_table_continuation, _MERGED_SPLIT_HINTS,
-    )
-    from guides.coursework_kfu_2025.docx_utils import FormattingReport
-
-    doc = Document()
-    doc.add_paragraph("Таблица 1.3.1 — Valid LRPB test")
-    tbl = doc.add_table(rows=6, cols=2)
-    for i, cell in enumerate(tbl.rows[0].cells):
-        cell.text = f"H{i + 1}"
-    for ri in range(1, 6):
-        for ci, cell in enumerate(tbl.rows[ri].cells):
-            cell.text = f"r{ri}c{ci}"
-
-    # Make each row 130pt exact so total (6×130=780pt) exceeds body_h (~720pt)
-    for row in tbl.rows:
-        _set_row_height_exact(row, 130.0)
-
-    # LRPB at row index 4 → split_after = max(1, 4-1) = 3 → 4 rows on page 1
-    tr = tbl.rows[4]._tr
-    lrpb = OxmlElement("w:lastRenderedPageBreak")
-    tr.append(lrpb)
-
-    _MERGED_SPLIT_HINTS.clear()
-    report = FormattingReport()
-    n = apply_table_continuation(doc, report=report)
-
-    if n != 1:
-        return _result(False, f"expected 1 split, got {n}")
-    return _result(True, "split performed at row 4 (4 rows on page 1 = threshold)")
 
 
 # ── Batch 2 — keepTogether, Rule 6 propagation, image height ─────────────────
@@ -657,40 +468,6 @@ def test_c2_empty_para_between_image_and_caption_removed() -> tuple[bool, str]:
     return _result(True, "empty paragraph between image and caption removed ✓")
 
 
-def test_c2_table_fits_one_page_skips_lrpb() -> tuple[bool, str]:
-    """
-    If a table's estimated total height ≤ body_h, the LRPB signal is stale
-    (table now fits on one page after Phase 1 reformatting) → must NOT split.
-    """
-    from guides.coursework_kfu_2025.table_continuation import (
-        apply_table_continuation, _MERGED_SPLIT_HINTS, _body_height_pt,
-        _estimate_row_height, _body_width_pt,
-    )
-    from guides.coursework_kfu_2025.docx_utils import FormattingReport
-
-    doc = Document()
-    doc.add_paragraph("Таблица 1.3.1 — Fits-on-one-page test")
-    # Create a small table (3 rows) whose total estimated height << body_h
-    tbl = doc.add_table(rows=3, cols=2)
-    for i, cell in enumerate(tbl.rows[0].cells):
-        cell.text = f"H{i + 1}"
-    for ri in range(1, 3):
-        for ci, cell in enumerate(tbl.rows[ri].cells):
-            cell.text = "short"   # tiny cells → table fits on one page easily
-
-    # Put LRPB in row 2 — but total table height << body_h, so should be skipped
-    tr = tbl.rows[2]._tr
-    lrpb = OxmlElement("w:lastRenderedPageBreak")
-    tr.append(lrpb)
-
-    _MERGED_SPLIT_HINTS.clear()
-    report = FormattingReport()
-    n = apply_table_continuation(doc, report=report)
-
-    if n != 0:
-        return _result(False, f"expected 0 splits (table fits on one page), got {n}")
-    return _result(True, "LRPB skipped because table fits on one page ✓")
-
 
 def test_c2_number_column_minimum() -> tuple[bool, str]:
     """
@@ -762,23 +539,18 @@ def test_c2_number_column_minimum() -> tuple[bool, str]:
 
 def run_all() -> None:
     tests = [
-        ("A  | rule4 does not delete images",       test_a_rule4_does_not_delete_images),
-        ("A  | _para_has_image helper",              test_a_para_has_image_helper),
-        ("C  | continuation length guard",           test_c_continuation_length_guard),
-        ("C  | student continuation merges",         test_c_student_continuation_merges),
-        ("B  | multi-LRPB → 2 splits",              test_b_multi_lrpb_produces_two_splits),
+        ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
+        ("A  | _para_has_image helper",                test_a_para_has_image_helper),
+        ("C  | continuation length guard",             test_c_continuation_length_guard),
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
         ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),
-        ("B1 | stale LRPB skipped (3 rows page1)",    test_b1_stale_lrpb_skipped),
-        ("B1 | valid LRPB splits (4 rows page1)",     test_b1_valid_lrpb_splits),
         ("B2 | keepTogether on table_caption",         test_b2_keep_together_on_table_caption),
         ("B2 | keepTogether on heading1/heading2",     test_b2_keep_together_on_headings),
         ("B2 | rule6 keepWithNext through empty para", test_b2_rule6_propagates_through_empty_para),
         ("B2 | image height from wp:extent cy",        test_b2_image_height_from_emu),
-        ("B3 | footnote para: 10pt TNR no bold",         test_b3_format_footnote_para_applies_10pt_tnr),
-        ("C2 | empty para image→caption removed",         test_c2_empty_para_between_image_and_caption_removed),
-        ("C2 | table fits 1 page → no split",             test_c2_table_fits_one_page_skips_lrpb),
-        ("C2 | numeric column minimum protected",          test_c2_number_column_minimum),
+        ("B3 | footnote para: 10pt TNR no bold",       test_b3_format_footnote_para_applies_10pt_tnr),
+        ("C2 | empty para image→caption removed",      test_c2_empty_para_between_image_and_caption_removed),
+        ("C2 | numeric column minimum protected",      test_c2_number_column_minimum),
     ]
 
     for asset in ASSET_FILES:
