@@ -535,6 +535,34 @@ def test_c2_number_column_minimum() -> tuple[bool, str]:
     return _result(True, f"numeric columns protected: {[f'{w:.1f}' for w in widths_after_pt]}")
 
 
+def test_yo_normalisation_midword_uppercase() -> tuple[bool, str]:
+    """
+    Words starting with uppercase but containing lowercase ё mid-word
+    (e.g. "Лётчик") must have the ё replaced with е.
+    Capital Ё at the start of a word must be preserved.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_yo_in_text
+
+    cases = [
+        # (input, expected)
+        ("лётчик",       "летчик"),
+        ("ёж",           "еж"),
+        ("Ёж",           "Ёж"),        # capital Ё: preserved
+        ("Лётчик",       "Летчик"),    # starts with uppercase Л, ё is lowercase → replace
+        ("ЛЁТЧИК",       "ЛЁТЧИК"),   # Ё uppercase → preserved
+        ("неёмкий",      "неемкий"),
+        ("Чернышёв",     "Чернышев"),
+    ]
+    failures = []
+    for inp, expected in cases:
+        got = normalize_yo_in_text(inp)
+        if got != expected:
+            failures.append(f"normalize_yo_in_text({inp!r}) = {got!r}, expected {expected!r}")
+    if failures:
+        return _result(False, "\n".join(failures))
+    return _result(True, f"all {len(cases)} ё-normalisation cases correct")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -551,6 +579,7 @@ def run_all() -> None:
         ("B3 | footnote para: 10pt TNR no bold",       test_b3_format_footnote_para_applies_10pt_tnr),
         ("C2 | empty para image→caption removed",      test_c2_empty_para_between_image_and_caption_removed),
         ("C2 | numeric column minimum protected",      test_c2_number_column_minimum),
+        ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
     ]
 
     for asset in ASSET_FILES:

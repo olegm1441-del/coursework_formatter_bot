@@ -864,12 +864,8 @@ _WORD_RE = re.compile(r'[А-ЯЁа-яё]+')
 
 
 def normalize_yo_in_text(text: str) -> str:
-    def replace_word(m):
-        word = m.group(0)
-        if word[0].isupper():
-            return word
-        return word.replace('ё', 'е')
-    return _WORD_RE.sub(replace_word, text)
+    """Replace lowercase ё with е. Capital Ё is preserved (Python replace is case-sensitive)."""
+    return text.replace('ё', 'е')
 
 
 def normalize_yo_in_runs(paragraph):
