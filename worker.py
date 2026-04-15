@@ -430,21 +430,15 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
             )
 
-            referral_result = services.grant_referral_upload_bonus_if_needed(db, user.id)
-            if referral_result:
+            inviter_user_id = services.grant_referral_upload_bonus_if_needed(db, user.id)
+            if inviter_user_id:
                 inviter = (
                     db.query(User)
-                    .filter(User.id == referral_result["inviter_user_id"])
+                    .filter(User.id == inviter_user_id)
                     .first()
                 )
                 if inviter:
-                    if referral_result["bonus_granted"]:
-                        bonus_text = services.build_referral_upload_bonus_awarded_text()
-                    else:
-                        bonus_text = services.build_referral_progress_notification_text(
-                            referral_result["progress"],
-                            referral_result["target"],
-                        )
+                    bonus_text = services.build_referral_upload_bonus_awarded_text()
                     try:
                         asyncio.run(
                             send_text(

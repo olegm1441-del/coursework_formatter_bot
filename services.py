@@ -421,83 +421,60 @@ def get_referral_upload_bonus_progress(db, inviter_user_id: int) -> tuple[int, i
     return progress, REFERRAL_UPLOAD_BONUS_SIZE, completed_bonuses
 
 
-def _count_granted_referral_upload_bonuses(db, inviter_user_id: int) -> int:
-    prefix = f"referral_upload_check_triple_bonus:{inviter_user_id}:"
-    return (
-        db.query(func.count(CreditLedger.id))
-        .filter(CreditLedger.idempotency_key.like(f"{prefix}%"))
-        .scalar()
-    ) or 0
-
-
-def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> dict | None:
-    invited_user = get_user_by_id(db, invited_user_id)
-    invited_telegram_id = getattr(invited_user, "telegram_id", None)
+def grant_referral_upload_bonus_if_needed(db, invited_user_id: int):
+    """
+    Mark the invited user's referral as qualified (first upload) if not yet done.
+    Grant +1 credit to the inviter for every 3rd friend who qualifies.
+    Returns inviter_user_id if a bonus was granted, else None.
+    """
     referral = (
         db.query(Referral)
         .filter(Referral.invited_user_id == invited_user_id)
+        .filter(Referral.qualified_upload_at.is_(None))
         .first()
     )
 
     if not referral:
-        logger.info(
-            "referral_skip reason=no_referral invited_user_id=%s invited_telegram_id=%s",
-            invited_user_id,
-            invited_telegram_id,
-        )
-        return None
+        return None   # already marked, or no referral record
 
-    if referral.qualified_upload_at is not None:
-        logger.info(
-            "referral_skip reason=already_qualified invited_user_id=%s invited_telegram_id=%s inviter_user_id=%s",
-            invited_user_id,
-            invited_telegram_id,
-            referral.inviter_user_id,
-        )
-        return None
-
+    # Mark this referral as qualified
     referral.qualified_upload_at = datetime.utcnow()
-    db.flush()
-
-    progress, target, completed_bonuses = get_referral_upload_bonus_progress(
-        db,
-        referral.inviter_user_id,
-    )
-    qualified = completed_bonuses * target + progress
-    logger.info(
-        "referral_progress_count inviter_user_id=%s qualified=%s progress=%s/%s bonus_awarded=%s",
-        referral.inviter_user_id,
-        qualified,
-        progress,
-        target,
-        completed_bonuses > _count_granted_referral_upload_bonuses(db, referral.inviter_user_id),
-    )
-    granted_bonuses = _count_granted_referral_upload_bonuses(
-        db,
-        referral.inviter_user_id,
-    )
-
-    bonus_granted = False
-    for bonus_number in range(granted_bonuses + 1, completed_bonuses + 1):
-        bonus = CreditLedger(
-            user_id=referral.inviter_user_id,
-            operation_type="referral_upload_bonus",
-            amount=1,
-            source_type="referral_upload_check_triple",
-            source_id=str(referral.id),
-            idempotency_key=f"referral_upload_check_triple_bonus:{referral.inviter_user_id}:{bonus_number}",
-        )
-        db.add(bonus)
-        bonus_granted = True
-
     db.commit()
 
-    return {
-        "inviter_user_id": referral.inviter_user_id,
-        "progress": progress,
-        "target": target,
-        "bonus_granted": bonus_granted,
-    }
+    # Count total qualified referrals for this inviter
+    qualified_count = (
+        db.query(Referral)
+        .filter(Referral.inviter_user_id == referral.inviter_user_id)
+        .filter(Referral.qualified_upload_at.isnot(None))
+        .count()
+    )
+
+    # Grant bonus for every 3rd qualified friend (3, 6, 9, ...)
+    if qualified_count % 3 != 0:
+        return None
+
+    # Unique idempotency key per milestone
+    idem_key = f"referral_upload_bonus_{referral.inviter_user_id}_count{qualified_count}"
+    existing = (
+        db.query(CreditLedger)
+        .filter(CreditLedger.idempotency_key == idem_key)
+        .first()
+    )
+    if existing:
+        return None
+
+    bonus = CreditLedger(
+        user_id=referral.inviter_user_id,
+        operation_type="referral_upload_bonus",
+        amount=1,
+        source_type="referral",
+        source_id=str(referral.id),
+        idempotency_key=idem_key,
+    )
+    db.add(bonus)
+    db.commit()
+
+    return referral.inviter_user_id
 
 
 def build_referral_progress_notification_text(progress: int, target: int) -> str:
