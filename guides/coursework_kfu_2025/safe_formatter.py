@@ -576,6 +576,11 @@ REFERENCE_SUBHEADINGS_CANON = {
     "учебники, учебные пособия и материалы": "Учебники, учебные пособия и материалы",
     "электронные ресурсы": "Электронные ресурсы",
     "материалы на иностранных языках": "Материалы на иностранных языках",
+    "нормативные правовые акты": "Нормативные правовые акты",
+    "монографии, учебники": "Монографии, учебники",
+    "статьи": "Статьи",
+    "диссертации": "Диссертации",
+    "материалы интернет-сайтов": "Материалы интернет-сайтов",
 }
 
 
@@ -2662,8 +2667,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
 def ensure_blank_before_reference_subheadings(document, body_start):
     """
     Ensure exactly one blank paragraph appears immediately before each
-    reference subheading (e.g. "Официальные материалы"). If the preceding
-    paragraph is not empty, insert a blank one.
+    reference subheading (e.g. "Официальные материалы").
     """
     any_changes = False
     changed = True
@@ -2692,7 +2696,6 @@ def ensure_blank_before_reference_subheadings(document, body_start):
             if not canonical_reference_subheading_text(text):
                 continue
 
-            # This is a reference subheading. Check the preceding paragraph.
             if idx == 0:
                 continue
 
@@ -2703,6 +2706,17 @@ def ensure_blank_before_reference_subheadings(document, body_start):
                 changed = True
                 any_changes = True
                 break
+
+            while idx - 2 >= body_start and is_empty_paragraph(paragraphs[idx - 2]):
+                remove_paragraph(paragraphs[idx - 2])
+                changed = True
+                any_changes = True
+                break
+
+            if changed:
+                break
+
+            format_empty_paragraph(prev_p)
 
     return any_changes
 
@@ -3290,19 +3304,18 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 p.paragraph_format.page_break_before = False
                 format_reference_subheading(p)
 
-                if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                    if idx - 2 >= body_start:
-                        prev_prev_text = clean_spaces(paragraphs[idx - 2].text)
-                        if is_references_heading_text(prev_prev_text):
-                            pass
-                        else:
-                            remove_paragraph(paragraphs[idx - 1])
-                            changed = True
-                            break
-                    else:
-                        remove_paragraph(paragraphs[idx - 1])
-                        changed = True
-                        break
+                if idx - 1 < body_start or not is_empty_paragraph(paragraphs[idx - 1]):
+                    new_el = OxmlElement("w:p")
+                    p._element.addprevious(new_el)
+                    format_empty_paragraph(Paragraph(new_el, p._parent))
+                    changed = True
+                    break
+
+                format_empty_paragraph(paragraphs[idx - 1])
+                if idx - 2 >= body_start and is_empty_paragraph(paragraphs[idx - 2]):
+                    remove_paragraph(paragraphs[idx - 2])
+                    changed = True
+                    break
 
                 if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
                     remove_paragraph(paragraphs[idx + 1])
