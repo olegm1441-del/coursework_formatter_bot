@@ -616,6 +616,37 @@ def test_t_indent_body_paragraph_left_zero() -> tuple[bool, str]:
     return _result(True, f"body paragraph indent: left=0, firstLine={fl_val} ✓")
 
 
+# ── Task 2 — Глава N without title ────────────────────────────────────────────
+
+def test_t2_chapter_heading_without_title() -> tuple[bool, str]:
+    """
+    "Глава 1" (no title) must be classified as heading1.
+    "Глава 1. Название" (with title) must still work.
+    """
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+
+    cases = [
+        ("Глава 1",                    True),
+        ("глава 2",                    True),
+        ("ГЛАВА 3",                    True),
+        ("Глава 1.",                   True),
+        ("Глава 1. Теоретические основы", True),
+        ("Глава 10. Заключение",       True),
+        ("Глава",                      False),  # no number
+        ("1. Теоретические основы",    True),   # normalized heading — must still work
+        ("Введение",                   True),   # exact match — must still work
+    ]
+    failures = []
+    for text, expected in cases:
+        result = parse_heading1(text)
+        got = result is not None
+        if got != expected:
+            failures.append(f"parse_heading1({text!r}) → {result}, expected match={expected}")
+    if failures:
+        return _result(False, "\n".join(failures))
+    return _result(True, f"all {len(cases)} chapter heading cases correct")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -634,6 +665,7 @@ def run_all() -> None:
         ("C2 | numeric column minimum protected",      test_c2_number_column_minimum),
         ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
         ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
+        ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
     ]
 
     for asset in ASSET_FILES:
