@@ -573,6 +573,7 @@ REFERENCE_SUBHEADINGS_CANON = {
     "статистические материалы": "Статистические материалы",
     "справочные и архивные материалы": "Справочные и архивные материалы",
     "монографии и статьи": "Монографии и статьи",
+    "монографии и учебники": "Монографии и учебники",
     "учебники, учебные пособия и материалы": "Учебники, учебные пособия и материалы",
     "электронные ресурсы": "Электронные ресурсы",
     "материалы на иностранных языках": "Материалы на иностранных языках",
@@ -1193,11 +1194,23 @@ def canonical_reference_subheading_text(text: str):
     if not t:
         return None
 
-    t = re.sub(r'^\s*[•·▪■◆►→\-–—]+\s*', '', t)
-    t = re.sub(r'^\s*\d+\.\s*', '', t)
-    t = clean_spaces(t)
-
     return REFERENCE_SUBHEADINGS_CANON.get(t.lower())
+
+
+def canonical_numbered_reference_subheading_text(text: str):
+    t = clean_spaces(text)
+    match = re.match(r"^\s*\d+\.\s+(.+)$", t)
+    if not match:
+        return None
+
+    return canonical_reference_subheading_text(match.group(1))
+
+
+def canonical_reference_block_heading_text(text: str):
+    return (
+        canonical_reference_subheading_text(text)
+        or canonical_numbered_reference_subheading_text(text)
+    )
 
 
 
@@ -2457,7 +2470,7 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
         text = clean_spaces(paragraph.text)
         low = text.lower()
-        canonical = canonical_reference_subheading_text(text)
+        canonical = canonical_reference_block_heading_text(text)
 
         if low in {
             "список использованных источников",
@@ -2538,7 +2551,7 @@ def compact_references_block(document, body_start):
 
             text = clean_spaces(p.text)
             low = text.lower()
-            canonical = canonical_reference_subheading_text(text)
+            canonical = canonical_reference_block_heading_text(text)
 
             if is_references_heading_text(text):
                 in_references = True
@@ -2561,7 +2574,7 @@ def compact_references_block(document, body_start):
                     if _nt:
                         next_nonempty = _nt
                         break
-                if next_nonempty and canonical_reference_subheading_text(next_nonempty):
+                if next_nonempty and canonical_reference_block_heading_text(next_nonempty):
                     pass  # keep the blank
                 else:
                     remove_paragraph(p)
@@ -2620,6 +2633,12 @@ def compact_references_block(document, body_start):
             _pPr.append(_ind)
 
 def ensure_single_blank_after_references_heading(document, body_start):
+    def is_reference_spacing_paragraph(paragraph):
+        return (
+            clean_spaces(paragraph.text) == ""
+            and not paragraph._element.findall(".//" + qn("w:drawing"))
+        )
+
     any_changes = False
     changed = True
     while changed:
@@ -2644,7 +2663,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
 
             next_p = paragraphs[idx + 1]
 
-            if not is_empty_paragraph(next_p):
+            if not is_reference_spacing_paragraph(next_p):
                 new_p = insert_paragraph_after(p, "")
                 format_empty_paragraph(new_p)
                 changed = True
@@ -2652,7 +2671,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
                 break
 
             # если пустых строк больше одной — удаляем лишние
-            while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+            while idx + 2 < len(paragraphs) and is_reference_spacing_paragraph(paragraphs[idx + 2]):
                 remove_paragraph(paragraphs[idx + 2])
                 paragraphs = document.paragraphs
                 changed = True
@@ -2693,7 +2712,7 @@ def ensure_blank_before_reference_subheadings(document, body_start):
                 in_references = False
                 continue
 
-            if not canonical_reference_subheading_text(text):
+            if not canonical_reference_block_heading_text(text):
                 continue
 
             if idx == 0:
@@ -3297,7 +3316,7 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 in_references = False
                 continue
 
-            canonical = canonical_reference_subheading_text(text)
+            canonical = canonical_reference_block_heading_text(text)
             if canonical:
                 replace_paragraph_text(p, canonical)
                 remove_paragraph_numbering(p)
@@ -3675,6 +3694,7 @@ def process_document(input_path: Path, output_path: Path):
     prev_kind = None
     current_chapter_num = None
     next_paragraph_num = None
+    in_references = False
 
     # Основной проход по телу документа
     for idx, paragraph in enumerate(doc.paragraphs):
@@ -3682,8 +3702,32 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+        elif in_references and is_appendix_heading_text(text):
+            in_references = False
+
         if not text:
             prev_kind = "empty_paragraph"
+            continue
+
+        if in_references and not is_references_heading_text(text):
+            canonical = canonical_reference_block_heading_text(text)
+            if canonical:
+                replace_paragraph_text(paragraph, canonical)
+                format_reference_subheading(paragraph)
+                prev_kind = "reference_subheading"
+            else:
+                format_body(paragraph)
+                if re.match(r"^\d+\.\s+", text):
+                    _pPr_ref = paragraph._element.get_or_add_pPr()
+                    for _old_ind in list(_pPr_ref.findall(qn("w:ind"))):
+                        _pPr_ref.remove(_old_ind)
+                    _ind_ref = OxmlElement("w:ind")
+                    _ind_ref.set(qn("w:left"), "851")
+                    _ind_ref.set(qn("w:hanging"), "709")
+                    _pPr_ref.append(_ind_ref)
+                prev_kind = "body_text"
             continue
 
         text = strip_leading_heading_garbage(text)
@@ -3827,7 +3871,7 @@ def process_document(input_path: Path, output_path: Path):
         elif kind == "body_list_item":
             format_body_list_item(paragraph)
         elif kind == "reference_subheading":
-            canonical = canonical_reference_subheading_text(text)
+            canonical = canonical_reference_block_heading_text(text)
             if canonical:
                 replace_paragraph_text(paragraph, canonical)
             format_reference_subheading(paragraph)
@@ -3957,6 +4001,25 @@ def process_document(input_path: Path, output_path: Path):
             format_empty_paragraph(paragraph)
             continue
 
+        if _final_in_references and not is_references_heading_text(text):
+            canonical = canonical_reference_block_heading_text(text)
+            if canonical:
+                replace_paragraph_text(paragraph, canonical)
+                format_reference_subheading(paragraph)
+                prev_nonempty_kind = "reference_subheading"
+            else:
+                format_body(paragraph)
+                if re.match(r"^\d+\.\s+", text):
+                    _pPr2 = paragraph._element.get_or_add_pPr()
+                    for _oi2 in list(_pPr2.findall(qn("w:ind"))):
+                        _pPr2.remove(_oi2)
+                    _ind2 = OxmlElement("w:ind")
+                    _ind2.set(qn("w:left"), "851")
+                    _ind2.set(qn("w:hanging"), "709")
+                    _pPr2.append(_ind2)
+                prev_nonempty_kind = "body_text"
+            continue
+
         text = strip_leading_heading_garbage(text)
         if text != clean_spaces(paragraph.text):
             replace_paragraph_text(paragraph, text)
@@ -4051,6 +4114,11 @@ def process_document(input_path: Path, output_path: Path):
     # Стандартизация сносок: TNR 10pt, без полужирного, одинарный интервал
     _format_footnotes(doc)
 
+    run_with_pass_limit(
+        "ensure_single_blank_after_references_heading_final",
+        ensure_single_blank_after_references_heading,
+        doc,
+        body_start,
+    )
+
     doc.save(str(output_path))
-
-
