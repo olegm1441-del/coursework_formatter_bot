@@ -90,6 +90,14 @@ def get_user_by_referral_code(db, referral_code: str) -> User | None:
     return db.query(User).filter(User.referral_code == referral_code).first()
 
 
+def get_referral_by_invited_user_id(db, invited_user_id: int) -> Referral | None:
+    return (
+        db.query(Referral)
+        .filter(Referral.invited_user_id == invited_user_id)
+        .first()
+    )
+
+
 def _user_model_supports_selected_guide() -> bool:
     return hasattr(User, "selected_guide_code")
 
@@ -132,6 +140,69 @@ def get_or_create_user(
 ) -> tuple[User, bool]:
     user = get_user_by_telegram_id(db, telegram_id)
     if user:
+        if not referral_code_from_start:
+            return user, False
+
+        logger.info(
+            "referral_existing_user_link_attempt telegram_id=%s db_user_id=%s code=%s",
+            telegram_id,
+            user.id,
+            referral_code_from_start,
+        )
+
+        if user.referred_by_user_id:
+            logger.info(
+                "referral_existing_user_skip reason=already_referred telegram_id=%s db_user_id=%s inviter_id=%s",
+                telegram_id,
+                user.id,
+                user.referred_by_user_id,
+            )
+            return user, False
+
+        existing_referral = get_referral_by_invited_user_id(db, user.id)
+        if existing_referral:
+            logger.info(
+                "referral_existing_user_skip reason=already_referred telegram_id=%s db_user_id=%s inviter_id=%s",
+                telegram_id,
+                user.id,
+                existing_referral.inviter_user_id,
+            )
+            return user, False
+
+        inviter = get_user_by_referral_code(db, referral_code_from_start)
+        if not inviter:
+            logger.info(
+                "referral_existing_user_skip reason=inviter_not_found telegram_id=%s db_user_id=%s code=%s",
+                telegram_id,
+                user.id,
+                referral_code_from_start,
+            )
+            return user, False
+
+        if inviter.telegram_id == telegram_id:
+            logger.info(
+                "referral_existing_user_skip reason=self_referral telegram_id=%s db_user_id=%s inviter_id=%s",
+                telegram_id,
+                user.id,
+                inviter.id,
+            )
+            return user, False
+
+        user.referred_by_user_id = inviter.id
+        referral = Referral(
+            inviter_user_id=inviter.id,
+            invited_user_id=user.id,
+            referral_code=inviter.referral_code,
+        )
+        db.add(referral)
+        db.commit()
+        db.refresh(user)
+        logger.info(
+            "referral_existing_user_linked inviter_id=%s invited_id=%s invited_telegram_id=%s",
+            inviter.id,
+            user.id,
+            telegram_id,
+        )
         return user, False
 
     referred_by_user_id = None
