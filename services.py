@@ -35,7 +35,7 @@ ASSETS_DIR = Path("assets")
 
 DEFAULT_GUIDE_CODE = "kfu_coursework_2025"
 REFERRAL_UPLOAD_BONUS_SIZE = 3
-REFERRAL_UPLOAD_BONUS_ENABLED_AT_DEFAULT = "2026-04-14T00:00:00"
+REFERRAL_UPLOAD_BONUS_ENABLED_AT_DEFAULT = "2026-04-14T20:52:03Z"
 REFERRAL_UPLOAD_BONUS_ENABLED_AT_RAW = os.getenv(
     "REFERRAL_UPLOAD_BONUS_ENABLED_AT",
     os.getenv("REFERRAL_PAIRS_ENABLED_AT", REFERRAL_UPLOAD_BONUS_ENABLED_AT_DEFAULT),
@@ -192,22 +192,26 @@ def get_referral_link(bot_username: str, referral_code: str) -> str:
 def build_referral_text(
     bot_username: str,
     user: User,
+    balance: int | None = None,
     progress: int | None = None,
     target: int | None = None,
 ) -> str:
     referral_link = get_referral_link(bot_username, user.referral_code)
+    balance_text = ""
+    if balance is not None:
+        balance_text = f"Доступно оформлений: {balance}\n\n"
     progress_text = ""
     if progress is not None and target is not None:
         progress_text = f"\n{build_referral_progress_text(progress, target)}\n"
 
     return (
-        "Пригласи друга по своей ссылке:\n"
+        f"{balance_text}"
+        "Твоя реферальная ссылка:\n"
         f"{referral_link}\n\n"
-        "Ты получишь:\n"
-        "• +1 оформление за каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку\n"
-        "• ещё +1 оформление, когда приглашённый друг впервые оплатит\n"
+        "За каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку по твоей ссылке, начисляется +1 оформление.\n"
+        "Ещё +1 оформление, когда приглашённый друг впервые оплатит.\n"
         f"{progress_text}\n"
-        "Отправь ссылку одногруппнику, которому тоже скоро сдавать курсовую."
+        "Можно отправить ссылку одногруппнику, которому тоже скоро сдавать курсовую."
     )
     
 def build_referral_bonus_notification_text(balance: int, trigger: str) -> str:
@@ -360,6 +364,7 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
         return None
 
     referral.qualified_upload_at = datetime.utcnow()
+    db.flush()
 
     progress, target, completed_bonuses = get_referral_upload_bonus_progress(
         db,
@@ -573,28 +578,31 @@ def build_start_text(
     referral_progress: int,
     referral_target: int,
 ) -> str:
-    greeting = "Привет!" if is_new else "С возвращением!"
+    balance_line = (
+        "У тебя есть 1 бесплатное оформление."
+        if is_new
+        else f"Доступно оформлений: {balance}."
+    )
     return (
-        f"{greeting} Я помогаю с оформлением курсовой по методичке вуза.\n\n"
-        f"Активная методичка: {active_guide_title}\n"
-        f"Доступно оформлений: {balance}\n\n"
-        "Что можно сделать:\n"
-        "• бесплатно проверить оформление .docx\n"
-        "• оформить работу автоматически за 1 оформление с баланса\n\n"
-        "Для первого опыта у тебя есть 1 бесплатное оформление. После него новые оформления можно купить или получить по рефералке.\n\n"
-        "Если просто отправить .docx, я запущу бесплатную проверку. Оформление запускается только после кнопки «Оформить работу».\n\n"
-        f"{build_referral_progress_text(referral_progress, referral_target)}\n"
-        "За каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку по твоей ссылке, начисляется +1 оформление.\n\n"
-        f"{build_tariffs_text()}\n\n"
-        "Продолжая использование бота, вы соглашаетесь на обработку персональных данных:\n"
-        "https://docs.google.com/document/d/14Sk5N1ow-x30Dh2dLqYQtUU5-LbdUlemkTleL-THJDc/edit?usp=drivesdk"
+        "Что можно сделать:\n\n"
+        "🔍 <b>Проверить оформление</b>\n"
+        "— загрузи файл и получи список ошибок\n\n"
+        "✍️ <b>Оформить работу</b>\n"
+        "— автоматически исправлю документ по методичке КФУ\n\n"
+        f"{balance_line}\n\n"
+        "Продолжая использование бота, вы соглашаетесь с "
+        "<a href=\"https://docs.google.com/document/d/14Sk5N1ow-x30Dh2dLqYQtUU5-LbdUlemkTleL-THJDc/edit?usp=drivesdk\">Политикой обработки персональных данных</a> "
+        "и <a href=\"https://docs.google.com/document/d/1x4OYZzURefM4RWWSRipuX0QQfRpmhBooUjZa11IY8Ck/edit?usp=sharing\">Условиями использования сервиса</a>.\n\n"
+        "Сервис выполняет автоматическое форматирование и не гарантирует 100% соответствие требованиям преподавателя. "
+        "Загруженные документы обрабатываются автоматически и не просматриваются вручную. "
+        "Сервис предназначен только для форматирования документов."
     )
 
 
 def build_balance_text(user: User, balance: int, bot_username: str) -> str:
     guide_code = get_user_selected_guide_code(user)
     guide = get_guide(guide_code)
-    referral_text = build_referral_text(bot_username, user)
+    referral_text = build_referral_text(bot_username, user, balance=balance)
 
     return (
         f"Ваш баланс: {balance} оформлений\n"
@@ -612,10 +620,6 @@ def build_no_credits_text(user: User, bot_username: str) -> str:
         f"{build_tariffs_text()}\n\n"
         f"{referral_text}"
     )
-
-
-def build_action_prompt_text() -> str:
-    return "Выбери действие:"
 
 
 def build_text_fallback_text() -> str:
@@ -656,7 +660,9 @@ def build_format_selected_text(balance: int) -> str:
     return (
         "Оформление выбрано.\n\n"
         f"Доступно оформлений: {balance}\n\n"
-        "Отправь .docx-файл. Я спишу 1 оформление и приведу работу к виду по активной методичке."
+        "Отправь .docx-файл ещё раз для автооформления.\n"
+        "Оформление спишет 1 оформление с баланса.\n"
+        "Если перед этим была проверка, она не списывала оформление."
     )
 
 

@@ -16,11 +16,15 @@ from telegram.ext import (
 
 from db import SessionLocal
 from keyboards import (
+    BTN_CHECK,
+    BTN_FORMAT,
     BTN_REFERRAL,
     BTN_SELECT_GUIDE,
     BTN_TOP_UP_BALANCE,
+    CB_ACTION_BUY,
     CB_ACTION_CHECK,
     CB_ACTION_FORMAT,
+    CB_ACTION_REFERRAL,
     CB_BACK_TO_MENU,
     CB_CHECK_ANOTHER,
     CB_SELECT_GUIDE_KFU_COURSEWORK_2025,
@@ -141,11 +145,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         await update.message.reply_text(
             text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
             reply_markup=get_main_menu_keyboard(),
-        )
-        await update.message.reply_text(
-            services.build_action_prompt_text(),
-            reply_markup=get_action_inline_keyboard(),
         )
     finally:
         db.close()
@@ -183,10 +185,12 @@ async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         user, _ = _ensure_current_user(db, update)
         bot_username = _get_bot_username(context)
+        balance = services.get_user_credit_balance(db, user.id)
         progress, target, _ = services.get_referral_upload_bonus_progress(db, user.id)
         text = services.build_referral_text(
             bot_username,
             user,
+            balance=balance,
             progress=progress,
             target=target,
         )
@@ -331,7 +335,14 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    if data in {CB_ACTION_CHECK, CB_ACTION_FORMAT, CB_CHECK_ANOTHER}:
+    if data in {CB_ACTION_CHECK, CB_ACTION_FORMAT, CB_CHECK_ANOTHER, CB_ACTION_BUY, CB_ACTION_REFERRAL}:
+        if data == CB_ACTION_BUY:
+            await query.message.reply_text(
+                services.build_top_up_balance_text(),
+                reply_markup=get_no_credits_inline_keyboard(),
+            )
+            return
+
         db = SessionLocal()
         try:
             user = services.get_user_by_telegram_id(db, query.from_user.id)
@@ -342,7 +353,19 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 return
 
-            if data == CB_CHECK_ANOTHER:
+            if data == CB_ACTION_REFERRAL:
+                bot_username = _get_bot_username(context)
+                balance = services.get_user_credit_balance(db, user.id)
+                progress, target, _ = services.get_referral_upload_bonus_progress(db, user.id)
+                text = services.build_referral_text(
+                    bot_username,
+                    user,
+                    balance=balance,
+                    progress=progress,
+                    target=target,
+                )
+                reply_markup = get_action_inline_keyboard()
+            elif data == CB_CHECK_ANOTHER:
                 context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_CHECK
                 text = services.build_check_another_text()
                 reply_markup = get_action_inline_keyboard()
@@ -376,7 +399,7 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     source="telegram_callback",
                 )
 
-            await query.edit_message_text(text, reply_markup=reply_markup)
+            await query.message.reply_text(text, reply_markup=reply_markup)
         finally:
             db.close()
         return
@@ -689,6 +712,33 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     text = update.message.text.strip()
+
+    if text == BTN_CHECK:
+        context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_CHECK
+        await update.message.reply_text(
+            services.build_check_selected_text(),
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    if text == BTN_FORMAT:
+        db = SessionLocal()
+        try:
+            user, _ = _ensure_current_user(db, update)
+            balance = services.get_user_credit_balance(db, user.id)
+            if balance > 0:
+                context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_FORMAT
+                reply_markup = get_main_menu_keyboard()
+            else:
+                context.user_data.pop(PENDING_DOCX_ACTION_KEY, None)
+                reply_markup = get_no_credits_inline_keyboard()
+            await update.message.reply_text(
+                services.build_format_selected_text(balance),
+                reply_markup=reply_markup,
+            )
+        finally:
+            db.close()
+        return
 
     if text == BTN_TOP_UP_BALANCE:
         await top_up_balance_handler(update, context)
