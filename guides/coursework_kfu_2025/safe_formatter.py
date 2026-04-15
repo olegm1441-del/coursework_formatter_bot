@@ -921,6 +921,97 @@ def normalize_semicolons_in_document(document, body_start):
                 run.text = run.text.replace(';', ',')
 
 
+# ── Source citation bracket splitting ────────────────────────────────────────
+_CITATION_ENTRY_RE = re.compile(
+    r'(\d+)(?:\s*[,;]\s*(?:с\.?|p\.?)\s*(\d+(?:\s*[–\-—]\s*\d+)?))?',
+    re.IGNORECASE
+)
+_BRACKET_GROUP_RE = re.compile(r'\[([^\]]+)\]')
+
+
+def _parse_citation_content(content: str) -> list[str]:
+    """
+    Parse inner content of a citation bracket into individual source strings.
+    Handles both с. and p. page markers, semicolon separators.
+    """
+    # Normalise semicolons to commas
+    content = content.replace(';', ',')
+    entries = []
+    pos = 0
+    s = content.strip()
+
+    while pos < len(s):
+        skip = re.match(r'[\s,]+', s[pos:])
+        if skip:
+            pos += skip.end()
+        if pos >= len(s):
+            break
+
+        m = _CITATION_ENTRY_RE.match(s, pos)
+        if not m:
+            return [s.strip()]  # unrecognised — return as single entry
+
+        num = m.group(1)
+        pages = m.group(2)
+        if pages:
+            # Normalise hyphen/em-dash to en-dash
+            pages_norm = re.sub(r'\s*[\-—]\s*', '–', pages.strip())
+            entries.append(f"{num}, с. {pages_norm}")
+        else:
+            entries.append(num)
+        pos = m.end()
+
+    return entries if entries else [s.strip()]
+
+
+def _split_citation_brackets_in_text(text: str) -> str:
+    """
+    Find all [...] citation groups and split multi-source ones.
+    Also normalises hyphens to en-dashes in page ranges within single-source citations.
+    """
+    def replace_bracket(m):
+        content = m.group(1)
+        entries = _parse_citation_content(content)
+        if len(entries) <= 1:
+            # Single source — just normalise hyphen in page range if present
+            if entries:
+                return f"[{entries[0]}]"
+            return m.group(0)
+        return ', '.join(f'[{e}]' for e in entries)
+
+    return _BRACKET_GROUP_RE.sub(replace_bracket, text)
+
+
+def normalize_citations_in_paragraph_runs(paragraph):
+    """Apply citation bracket splitting to all runs in a paragraph."""
+    for run in paragraph.runs:
+        if '[' in run.text:
+            new_text = _split_citation_brackets_in_text(run.text)
+            if new_text != run.text:
+                run.text = new_text
+
+
+def normalize_citations_in_document(document, body_start):
+    """
+    Split multi-source citation brackets in all body paragraphs.
+    Skips the references block.
+    """
+    in_references = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+            continue
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+        if in_references:
+            continue
+        if '[' in (paragraph.text or ''):
+            normalize_citations_in_paragraph_runs(paragraph)
+
+
 def canonical_reference_subheading_text(text: str):
     t = clean_spaces(text)
     if not t:
@@ -3387,6 +3478,7 @@ def process_document(input_path: Path, output_path: Path):
     normalize_dashes_in_document(doc, body_start)
     normalize_yo_in_document(doc, body_start)
     normalize_semicolons_in_document(doc, body_start)
+    normalize_citations_in_document(doc, body_start)
     # Преднормализация только тела работы; содержание не трогаем
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:

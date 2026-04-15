@@ -721,6 +721,44 @@ def test_t3_reference_subheading_centred() -> tuple[bool, str]:
     return _result(True, "reference subheading: centred, bold, blank before; source indent OK")
 
 
+def test_t4_citation_brackets_split() -> tuple[bool, str]:
+    """
+    Multi-source citation brackets split; single-source with page range get hyphen→en-dash.
+    p. notation is supported. Single page [5, с. 12] unchanged.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _split_citation_brackets_in_text
+
+    cases = [
+        # Multi-source split
+        ("[21, с. 30–45, 22, с. 21–33, 5, с. 3–8, 10]",
+         "[21, с. 30–45], [22, с. 21–33], [5, с. 3–8], [10]"),
+        ("[12; 13; 5]",      "[12], [13], [5]"),
+        ("[21, 22]",         "[21], [22]"),
+        # Single source — unchanged (but hyphen normalized)
+        ("[21, с. 30–45]",   "[21, с. 30–45]"),
+        ("[10]",             "[10]"),
+        # Hyphen → en-dash in single source range
+        ("[5, с. 12-15]",    "[5, с. 12–15]"),
+        ("[5, с. 12–15]",    "[5, с. 12–15]"),
+        # Single page (no range)
+        ("[5, с. 12]",       "[5, с. 12]"),
+        # p. notation → с. in output
+        ("[5, p. 12-15]",    "[5, с. 12–15]"),
+        ("[5, p. 12]",       "[5, с. 12]"),
+        # Mixed in sentence
+        ("по данным [21, 22], а также [5, с. 3–8, 10]",
+         "по данным [21], [22], а также [5, с. 3–8], [10]"),
+    ]
+    failures = []
+    for inp, expected in cases:
+        got = _split_citation_brackets_in_text(inp)
+        if got != expected:
+            failures.append(f"Input:    {inp!r}\nExpected: {expected!r}\nGot:      {got!r}")
+    if failures:
+        return _result(False, "\n\n".join(failures))
+    return _result(True, f"all {len(cases)} citation cases correct")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -741,6 +779,7 @@ def run_all() -> None:
         ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
         ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
         ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
+        ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
     ]
 
     for asset in ASSET_FILES:
