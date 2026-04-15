@@ -9,7 +9,7 @@ BTN_SHOW_GUIDE_FILE = "Открыть файл методички"
 BTN_BACK_TO_MENU = "Назад"
 BTN_CHECK = "🔍 Проверить оформление"
 BTN_FORMAT = "✍️ Оформить работу"
-BTN_FORMAT_THIS = "✍️ Оформить эту работу"
+BTN_FORMAT_THIS = "✍️ Оформить работу"
 BTN_CHECK_ANOTHER = "🔍 Проверить другой файл"
 BTN_BUY_MENU = "💳 Купить оформления"
 BTN_REFERRAL_LINK = "🔗 Реферальная ссылка"
@@ -97,7 +97,6 @@ def get_no_credits_inline_keyboard() -> InlineKeyboardMarkup:
 def get_check_result_inline_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(BTN_FORMAT_THIS, callback_data=CB_ACTION_FORMAT)],
-        [InlineKeyboardButton(BTN_CHECK_ANOTHER, callback_data=CB_CHECK_ANOTHER)],
         [InlineKeyboardButton(BTN_BUY_MENU, callback_data=CB_ACTION_BUY)],
         [InlineKeyboardButton(BTN_REFERRAL_LINK, callback_data=CB_ACTION_REFERRAL)],
     ]
