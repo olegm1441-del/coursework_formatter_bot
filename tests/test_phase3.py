@@ -759,6 +759,41 @@ def test_t4_citation_brackets_split() -> tuple[bool, str]:
     return _result(True, f"all {len(cases)} citation cases correct")
 
 
+def test_t5_list_formatting() -> tuple[bool, str]:
+    """
+    Numeric list items (1)/1.) after a colon-ending paragraph become а)/б)/в).
+    Level-1 items get left=906 hanging=198. Level-2 items get left=963 hanging=198.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    intro = doc.add_paragraph("Выделяют следующие виды:")
+    p1 = doc.add_paragraph("1) первый вид")
+    p2 = doc.add_paragraph("2) второй вид")
+    p3 = doc.add_paragraph("3) третий вид")
+
+    _normalize_plain_list_paragraphs([intro, p1, p2, p3])
+
+    if not p1.text.startswith("а)"):
+        return _result(False, f"p1 not converted: {p1.text!r}")
+    if not p2.text.startswith("б)"):
+        return _result(False, f"p2 not converted: {p2.text!r}")
+    if not p3.text.startswith("в)"):
+        return _result(False, f"p3 not converted: {p3.text!r}")
+
+    pPr = p1._element.find(qn("w:pPr"))
+    ind = pPr.find(qn("w:ind")) if pPr is not None else None
+    if ind is None:
+        return _result(False, "no w:ind on level-1 item")
+    left = ind.get(qn("w:left"))
+    hang = ind.get(qn("w:hanging"))
+    if left != "906" or hang != "198":
+        return _result(False, f"wrong indent: left={left}, hanging={hang} (expected 906/198)")
+
+    return _result(True, "list items converted and indented correctly ✓")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -780,6 +815,7 @@ def run_all() -> None:
         ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
         ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
+        ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
     ]
 
     for asset in ASSET_FILES:

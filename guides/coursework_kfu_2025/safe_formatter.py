@@ -1012,6 +1012,177 @@ def normalize_citations_in_document(document, body_start):
             normalize_citations_in_paragraph_runs(paragraph)
 
 
+# ── List formatting (Level 1: а/б/в, Level 2: 1/2/3) ─────────────────────────
+
+_CYRILLIC_LIST_ALPHA = 'абвгдежзиклмнопрстуфхцчшщэюя'
+_CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яё])\)\s+(.+)$', re.DOTALL)
+_NUMERIC_PAREN_LIST_RE   = re.compile(r'^(\d+)\)\s+(.+)$',   re.DOTALL)
+_NUMERIC_DOT_LIST_RE     = re.compile(r'^(\d+)\.\s+(.+)$',   re.DOTALL)
+
+
+def _is_level1_list_text(text: str) -> bool:
+    t = clean_spaces(text)
+    return bool(
+        _CYRILLIC_LETTER_LIST_RE.match(t)
+        or _NUMERIC_PAREN_LIST_RE.match(t)
+        or _NUMERIC_DOT_LIST_RE.match(t)
+    )
+
+
+def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
+    """Set list hanging indent directly via XML."""
+    pPr = paragraph._element.get_or_add_pPr()
+    for old in list(pPr.findall(qn("w:ind"))):
+        pPr.remove(old)
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"),    str(left_twips))
+    ind.set(qn("w:hanging"), str(hanging_twips))
+    ind.set(qn("w:right"),   "0")
+    pPr.append(ind)
+
+
+def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
+    """Format a paragraph as level-1 Cyrillic list item."""
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    replace_paragraph_text(paragraph, f"{letter}) {body_text}")
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _format_level2_list_item(paragraph, number: int, body_text: str):
+    """Format a paragraph as level-2 (1)/2)/3)) list item."""
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    replace_paragraph_text(paragraph, f"{number}) {body_text}")
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    _apply_list_indent_xml(paragraph, left_twips=963, hanging_twips=198)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _normalize_plain_list_paragraphs(paragraphs: list):
+    """
+    Detect and reformat plain-text list items in a sequence of paragraphs.
+    A list context is triggered by a paragraph ending with ':'.
+    """
+    in_list = False
+    level1_counter = 0
+    level2_counter = 0
+    prev_was_level1 = False
+    prev_was_level2 = False
+
+    for p in paragraphs:
+        text = clean_spaces(p.text)
+        if not text:
+            in_list = False
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+            continue
+
+        if text.endswith(':') and not _is_level1_list_text(text):
+            in_list = True
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+            continue
+
+        if not in_list:
+            continue
+
+        m_cyr      = _CYRILLIC_LETTER_LIST_RE.match(text)
+        m_num_paren = _NUMERIC_PAREN_LIST_RE.match(text)
+        m_num_dot   = _NUMERIC_DOT_LIST_RE.match(text)
+
+        if m_cyr:
+            body = m_cyr.group(2).strip()
+            letter = _CYRILLIC_LIST_ALPHA[level1_counter] if level1_counter < len(_CYRILLIC_LIST_ALPHA) else m_cyr.group(1)
+            _format_cyrillic_list_item(p, letter, body)
+            level1_counter += 1
+            level2_counter = 0
+            prev_was_level1 = True
+            prev_was_level2 = False
+
+        elif m_num_paren or m_num_dot:
+            m = m_num_paren or m_num_dot
+            body = m.group(2).strip()
+            num = int(m.group(1))
+
+            if prev_was_level1 and num == 1:
+                level2_counter = 1
+                _format_level2_list_item(p, level2_counter, body)
+                prev_was_level1 = False
+                prev_was_level2 = True
+            elif prev_was_level2:
+                level2_counter += 1
+                _format_level2_list_item(p, level2_counter, body)
+            else:
+                letter_idx = level1_counter
+                letter = _CYRILLIC_LIST_ALPHA[letter_idx] if letter_idx < len(_CYRILLIC_LIST_ALPHA) else str(level1_counter + 1)
+                _format_cyrillic_list_item(p, letter, body)
+                level1_counter += 1
+                level2_counter = 0
+                prev_was_level1 = True
+                prev_was_level2 = False
+        else:
+            in_list = False
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+
+
+def normalize_plain_lists_in_document(document, body_start):
+    """Normalise plain-text list items in the document body. Skips references block."""
+    in_ref = False
+    body_paras = []
+    for idx, p in enumerate(document.paragraphs):
+        if idx < (body_start or 0):
+            continue
+        t = clean_spaces(p.text)
+        if is_references_heading_text(t):
+            in_ref = True
+        if in_ref and is_appendix_heading_text(t):
+            in_ref = False
+        if not in_ref:
+            body_paras.append(p)
+
+    _normalize_plain_list_paragraphs(body_paras)
+
+
 def canonical_reference_subheading_text(text: str):
     t = clean_spaces(text)
     if not t:
@@ -3479,6 +3650,7 @@ def process_document(input_path: Path, output_path: Path):
     normalize_yo_in_document(doc, body_start)
     normalize_semicolons_in_document(doc, body_start)
     normalize_citations_in_document(doc, body_start)
+    normalize_plain_lists_in_document(doc, body_start)
     # Преднормализация только тела работы; содержание не трогаем
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
