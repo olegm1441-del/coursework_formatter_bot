@@ -52,17 +52,16 @@ _ADMIN_IDS: set[int] = {
 
 def _is_admin(update: Update, db) -> bool:
     """Проверяет права администратора по Telegram ID ИЛИ по внутреннему user_id."""
-    if not _ADMIN_IDS:
-        logger.warning("admin_check_failed: ADMIN_TELEGRAM_IDS is empty")
-        return False
     tg_id = update.effective_user.id
     logger.info("admin_check tg_id=%s admin_ids=%s", tg_id, _ADMIN_IDS)
     if tg_id in _ADMIN_IDS:
         return True
     user = services.get_user_by_telegram_id(db, tg_id)
     logger.info("admin_check user=%s user_id=%s", user, getattr(user, "id", None))
-    if user and user.id in _ADMIN_IDS:
+    if user and (user.id == 1 or user.id in _ADMIN_IDS):
         return True
+    if not _ADMIN_IDS:
+        logger.warning("admin_check_failed: ADMIN_TELEGRAM_IDS is empty and user_id is not 1")
     return False
 
 
@@ -115,6 +114,12 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     db = SessionLocal()
     try:
         referral_code = _extract_referral_code_from_start(update.message.text)
+        if referral_code:
+            logger.info(
+                "referral_start_detected code=%s telegram_id=%s",
+                referral_code,
+                update.effective_user.id,
+            )
         user, is_new = _ensure_current_user(
             db,
             update,
@@ -667,7 +672,8 @@ async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             admin_source_id=str(update.effective_user.id),
         )
         await update.message.reply_text(
-            f"Готово. Баланс пользователя {target_user_id}: {balance}"
+            f"Начислено {amount} оформлений пользователю {target_user_id}\n"
+            f"Текущий баланс: {balance}"
         )
     finally:
         db.close()

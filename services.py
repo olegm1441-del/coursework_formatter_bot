@@ -1,6 +1,7 @@
 import os
 import uuid
 import unicodedata
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from guides.coursework_kfu_2025.formatter_service import format_docx
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # =========================
 # Базовые настройки проекта
@@ -175,6 +178,11 @@ def get_or_create_user(
                     referral_code=inviter_referral_code,
                 )
                 db.add(referral)
+                logger.info(
+                    "referral_linked inviter_id=%s invited_id=%s",
+                    referred_by_user_id,
+                    user.id,
+                )
 
             db.commit()
             db.refresh(user)
@@ -304,11 +312,11 @@ def refund_one_credit_in_new_session(user_id: int, source_id: str) -> None:
 def grant_admin_bonus(db, target_user_id: int, amount: int, admin_source_id: str) -> int:
     entry = CreditLedger(
         user_id=target_user_id,
-        operation_type="admin_bonus",
+        operation_type="admin_grant",
         amount=amount,
         source_type="admin",
         source_id=admin_source_id,
-        idempotency_key=f"admin_bonus_{target_user_id}_{amount}_{uuid.uuid4().hex[:8]}",
+        idempotency_key=f"admin_grant_{target_user_id}_{amount}_{uuid.uuid4().hex[:8]}",
     )
     db.add(entry)
     db.commit()
@@ -358,9 +366,15 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
     )
 
     if not referral:
+        logger.info("referral_skip reason=no_referral invited_user_id=%s", invited_user_id)
         return None
 
     if referral.qualified_upload_at is not None:
+        logger.info(
+            "referral_skip reason=already_qualified invited_user_id=%s inviter_id=%s",
+            invited_user_id,
+            referral.inviter_user_id,
+        )
         return None
 
     referral.qualified_upload_at = datetime.utcnow()
@@ -369,6 +383,14 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
     progress, target, completed_bonuses = get_referral_upload_bonus_progress(
         db,
         referral.inviter_user_id,
+    )
+    qualified = completed_bonuses * target + progress
+    logger.info(
+        "referral_progress_count inviter_id=%s qualified=%s progress=%s/%s",
+        referral.inviter_user_id,
+        qualified,
+        progress,
+        target,
     )
     granted_bonuses = _count_granted_referral_upload_bonuses(
         db,

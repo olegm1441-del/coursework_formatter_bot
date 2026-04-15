@@ -405,6 +405,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 user.id,
                 input_path,
             )
+            logger.info("referral_check_upload_seen invited_user_id=%s", user.id)
 
             problems: list[str] = []
             request.status = "done"
