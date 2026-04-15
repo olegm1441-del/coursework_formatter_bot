@@ -63,7 +63,7 @@ GUIDES = {
         "university_code": "kfu",
         "document_type": "coursework",
         "guideline_version": "2025",
-        "method_basename": "КР КФУ 12.2025",
+        "method_basename": "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ",
         "formatter": format_docx,
         "is_active": True,
     }
