@@ -156,7 +156,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             disable_web_page_preview=True,
             reply_markup=get_main_menu_keyboard(),
         )
-        if referral_code and is_new and getattr(user, "referred_by_user_id", None):
+        if referral_code and getattr(user, "_referral_linked_now", False):
             await update.message.reply_text(
                 "Реферальная ссылка учтена. Теперь отправь .docx на проверку.",
                 reply_markup=get_main_menu_keyboard(),

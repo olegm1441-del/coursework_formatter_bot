@@ -197,6 +197,7 @@ def get_or_create_user(
         db.add(referral)
         db.commit()
         db.refresh(user)
+        setattr(user, "_referral_linked_now", True)
         logger.info(
             "referral_existing_user_linked inviter_id=%s invited_id=%s invited_telegram_id=%s",
             inviter.id,
@@ -255,6 +256,7 @@ def get_or_create_user(
                     user.id,
                     telegram_id,
                 )
+                setattr(user, "_referral_linked_now", True)
 
             db.commit()
             db.refresh(user)
@@ -289,8 +291,8 @@ def build_referral_text(
         "Твоя реферальная ссылка:\n"
         f"{referral_link}\n\n"
         "За каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку по твоей ссылке, начисляется +1 оформление.\n"
-        "Ещё +1 оформление, когда приглашённый друг впервые оплатит.\n"
-        f"{progress_text}\n"
+        f"{progress_text}"
+        "Ещё +1 оформление, когда приглашённый друг впервые оплатит.\n\n"
         "Можно отправить ссылку одногруппнику, которому тоже скоро сдавать курсовую."
     )
     
@@ -478,9 +480,16 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int):
 
 
 def build_referral_progress_notification_text(progress: int, target: int) -> str:
+    left = max(target - progress, 0)
+    if left == 1:
+        left_text = "Остался 1 друг до +1 оформления."
+    else:
+        left_text = f"Осталось {left} друга до +1 оформления."
+
     return (
         "🎉 Новый друг загрузил файл по твоей ссылке.\n"
-        f"Реферальный прогресс: {progress}/{target}."
+        f"Реферальный прогресс: {progress}/{target}.\n"
+        f"{left_text}"
     )
 
 
@@ -658,10 +667,19 @@ def build_tariffs_text() -> str:
 def build_referral_progress_text(progress: int, target: int) -> str:
     left = max(target - progress, 0)
     if left == target:
-        return f"Реферальный прогресс: {progress}/{target}. Пригласи 3 друзей на автопроверку, чтобы получить +1 оформление."
+        return (
+            f"Реферальный прогресс: {progress}/{target}.\n"
+            "Пригласи 3 друзей на автопроверку, чтобы получить +1 оформление."
+        )
     if left == 1:
-        return f"Реферальный прогресс: {progress}/{target}. Остался 1 новый друг до +1 оформления."
-    return f"Реферальный прогресс: {progress}/{target}. Осталось {left} новых друга до +1 оформления."
+        return (
+            f"Реферальный прогресс: {progress}/{target}.\n"
+            "Остался 1 друг до +1 оформления."
+        )
+    return (
+        f"Реферальный прогресс: {progress}/{target}.\n"
+        f"Осталось {left} друга до +1 оформления."
+    )
 
 
 def build_start_text(
@@ -778,7 +796,8 @@ def build_check_result_text(problems: list[str]) -> str:
         return (
             "Проверка завершена.\n\n"
             "Я не нашёл явных проблем по основным правилам оформления.\n\n"
-            "Если хочешь, всё равно можешь запустить автооформление, чтобы привести документ к единому виду по методичке."
+            "Документ можно улучшить.\n"
+            "Запусти автооформление — приведу его к требованиям КФУ за 1 оформление."
         )
 
     lines = "\n".join(f"• {problem}" for problem in problems)
@@ -786,7 +805,8 @@ def build_check_result_text(problems: list[str]) -> str:
         "Проверка завершена.\n\n"
         "Найдены замечания по оформлению:\n"
         f"{lines}\n\n"
-        "Чтобы исправить это автоматически, нажми «Оформить работу»."
+        "Документ можно улучшить.\n"
+        "Запусти автооформление — приведу его к требованиям КФУ за 1 оформление."
     )
 
 
