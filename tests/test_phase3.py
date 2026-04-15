@@ -647,6 +647,80 @@ def test_t2_chapter_heading_without_title() -> tuple[bool, str]:
     return _result(True, f"all {len(cases)} chapter heading cases correct")
 
 
+def test_t3_reference_subheading_centred() -> tuple[bool, str]:
+    """
+    After formatting, reference section headers must be CENTER aligned, bold,
+    preceded by exactly one empty paragraph.
+    Source entries must have hanging indent (left≈851, hanging≈709 twips).
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("Введение")
+    doc.add_paragraph("")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("Официальные материалы")
+    doc.add_paragraph("1. Некий закон.")
+    doc.add_paragraph("Интернет-ресурсы")
+    doc.add_paragraph("2. Некий сайт.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result_doc = Document(out)
+
+    paras = list(result_doc.paragraphs)
+    sh_idx = next((i for i, p in enumerate(paras) if "официальные" in (p.text or "").lower()), None)
+    if sh_idx is None:
+        return _result(False, "subheading paragraph not found in output")
+
+    sh = paras[sh_idx]
+    if sh.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, f"subheading not centred: alignment={sh.alignment}")
+
+    pPr_sh = sh._element.find(qn("w:pPr"))
+    ind_sh = pPr_sh.find(qn("w:ind")) if pPr_sh is not None else None
+    if ind_sh is not None:
+        fli = ind_sh.get(qn("w:firstLine"))
+        left = ind_sh.get(qn("w:left"))
+        hang = ind_sh.get(qn("w:hanging"))
+        if hang and int(hang) > 100:
+            return _result(False, f"subheading has hanging indent: {hang}")
+        if fli and int(fli) > 100:
+            return _result(False, f"subheading has first-line indent: {fli}")
+        if left and int(left) > 100:
+            return _result(False, f"subheading has left indent: {left}")
+
+    bold_ok = any(r.bold for r in sh.runs if r.text.strip())
+    if not bold_ok:
+        return _result(False, "subheading runs are not bold")
+
+    if sh_idx == 0 or (paras[sh_idx - 1].text or "").strip():
+        return _result(False, "no empty paragraph before reference subheading")
+
+    # Check source entry hanging indent
+    source_paras = [p for p in paras if "некий закон" in (p.text or "").lower()]
+    if source_paras:
+        sp = source_paras[0]
+        pPr_sp = sp._element.find(qn("w:pPr"))
+        ind_sp = pPr_sp.find(qn("w:ind")) if pPr_sp is not None else None
+        if ind_sp is None:
+            return _result(False, "source entry has no w:ind")
+        left_v = ind_sp.get(qn("w:left"))
+        hang_v = ind_sp.get(qn("w:hanging"))
+        if not left_v or abs(int(left_v) - 851) > 60:
+            return _result(False, f"source entry left={left_v!r} (expected ≈851)")
+        if not hang_v or abs(int(hang_v) - 709) > 60:
+            return _result(False, f"source entry hanging={hang_v!r} (expected ≈709)")
+
+    return _result(True, "reference subheading: centred, bold, blank before; source indent OK")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -666,6 +740,7 @@ def run_all() -> None:
         ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
         ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
         ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
+        ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
     ]
 
     for asset in ASSET_FILES:

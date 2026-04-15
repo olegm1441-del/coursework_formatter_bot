@@ -1400,14 +1400,25 @@ def format_reference_subheading(paragraph):
     clear_paragraph_outline_level(paragraph)
     remove_paragraph_numbering(paragraph)
 
-    paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
+    paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.left_indent = Cm(0)
     paragraph.paragraph_format.right_indent = Cm(0)
     paragraph.paragraph_format.page_break_before = False
-    paragraph.paragraph_format.keep_with_next = False
+    paragraph.paragraph_format.keep_with_next = True
     paragraph.paragraph_format.keep_together = False
     paragraph.paragraph_format.widow_control = False
+
+    # Remove any firstLine/hanging indent via direct XML
+    _pPr = paragraph._element.get_or_add_pPr()
+    for _oi in list(_pPr.findall(qn("w:ind"))):
+        _pPr.remove(_oi)
+    _ind = OxmlElement("w:ind")
+    _ind.set(qn("w:left"), "0")
+    _ind.set(qn("w:firstLine"), "0")
+    _pPr.append(_ind)
+
+    # 1.5x line spacing
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
     for run in paragraph.runs:
         set_run_font(
@@ -2237,6 +2248,15 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         replace_paragraph_text(paragraph, normalized)
         format_body(paragraph)
 
+        # Hanging indent: left=851 twips, hanging=709 twips (≈1.5 cm left, ≈1.25 cm hang)
+        _pPr = paragraph._element.get_or_add_pPr()
+        for _oi in list(_pPr.findall(qn("w:ind"))):
+            _pPr.remove(_oi)
+        _ind = OxmlElement("w:ind")
+        _ind.set(qn("w:left"), "851")
+        _ind.set(qn("w:hanging"), "709")
+        _pPr.append(_ind)
+
 def compact_references_block(document, body_start):
     changed = True
 
@@ -2264,11 +2284,22 @@ def compact_references_block(document, body_start):
                 in_references = False
                 continue
 
-            # Полностью убираем пустые абзацы внутри блока литературы
+            # Полностью убираем пустые абзацы внутри блока литературы,
+            # но сохраняем один пустой абзац прямо перед подзаголовком раздела.
             if is_empty_paragraph(p):
-                remove_paragraph(p)
-                changed = True
-                break
+                # Peek ahead: keep blank if next non-empty para is a subheading
+                next_nonempty = None
+                for _np in paragraphs[idx + 1:]:
+                    _nt = clean_spaces(_np.text)
+                    if _nt:
+                        next_nonempty = _nt
+                        break
+                if next_nonempty and canonical_reference_subheading_text(next_nonempty):
+                    pass  # keep the blank
+                else:
+                    remove_paragraph(p)
+                    changed = True
+                    break
 
             # Сначала снимаем весь мусор разрывов / списков / заголовков
             remove_page_break_artifacts_from_paragraph(p)
@@ -2311,6 +2342,15 @@ def compact_references_block(document, body_start):
             p.paragraph_format.keep_with_next = False
             p.paragraph_format.keep_together = False
             p.paragraph_format.widow_control = False
+
+            # Hanging indent for source entries: left=851 twips, hanging=709 twips
+            _pPr = p._element.get_or_add_pPr()
+            for _oi in list(_pPr.findall(qn("w:ind"))):
+                _pPr.remove(_oi)
+            _ind = OxmlElement("w:ind")
+            _ind.set(qn("w:left"), "851")
+            _ind.set(qn("w:hanging"), "709")
+            _pPr.append(_ind)
 
 def ensure_single_blank_after_references_heading(document, body_start):
     any_changes = False
@@ -2355,7 +2395,56 @@ def ensure_single_blank_after_references_heading(document, body_start):
             break
 
     return any_changes
-    
+
+
+def ensure_blank_before_reference_subheadings(document, body_start):
+    """
+    Ensure exactly one blank paragraph appears immediately before each
+    reference subheading (e.g. "Официальные материалы"). If the preceding
+    paragraph is not empty, insert a blank one.
+    """
+    any_changes = False
+    changed = True
+    while changed:
+        changed = False
+        in_references = False
+        paragraphs = document.paragraphs
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if not in_references:
+                continue
+
+            if is_appendix_heading_text(text):
+                in_references = False
+                continue
+
+            if not canonical_reference_subheading_text(text):
+                continue
+
+            # This is a reference subheading. Check the preceding paragraph.
+            if idx == 0:
+                continue
+
+            prev_p = paragraphs[idx - 1]
+            if not is_empty_paragraph(prev_p):
+                new_el = OxmlElement("w:p")
+                p._element.addprevious(new_el)
+                changed = True
+                any_changes = True
+                break
+
+    return any_changes
+
+
 def ensure_single_blank_after_headings(document, body_start):
     paragraphs = document.paragraphs
     prev_kind = None
@@ -3495,6 +3584,13 @@ def process_document(input_path: Path, output_path: Path):
     )
 
     run_with_pass_limit(
+        "ensure_blank_before_reference_subheadings",
+        ensure_blank_before_reference_subheadings,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
         "ensure_single_blank_after_references_heading",
         ensure_single_blank_after_references_heading,
         doc,
@@ -3563,6 +3659,7 @@ def process_document(input_path: Path, output_path: Path):
     # Финальный жёсткий проход:
     # добиваем заголовки, таблицы и обычный текст уже после всех структурных вставок/удалений
     prev_nonempty_kind = None
+    _final_in_references = False
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
             continue
@@ -3573,6 +3670,11 @@ def process_document(input_path: Path, output_path: Path):
             prev_nonempty_kind = "body_text"
             continue
         text = clean_spaces(paragraph.text)
+
+        if is_references_heading_text(text):
+            _final_in_references = True
+        elif is_appendix_heading_text(text):
+            _final_in_references = False
 
         if not text:
             format_empty_paragraph(paragraph)
@@ -3650,6 +3752,15 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         format_body(paragraph)
+        # Re-apply hanging indent for numbered reference source entries
+        if _final_in_references and re.match(r"^\d+\.\s+", text):
+            _pPr2 = paragraph._element.get_or_add_pPr()
+            for _oi2 in list(_pPr2.findall(qn("w:ind"))):
+                _pPr2.remove(_oi2)
+            _ind2 = OxmlElement("w:ind")
+            _ind2.set(qn("w:left"), "851")
+            _ind2.set(qn("w:hanging"), "709")
+            _pPr2.append(_ind2)
         prev_nonempty_kind = "body_text"
 
     normalize_sections(doc)
