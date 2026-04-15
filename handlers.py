@@ -31,6 +31,7 @@ from keyboards import (
     CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE,
     get_action_inline_keyboard,
     get_back_to_menu_inline_keyboard,
+    get_compact_menu_keyboard,
     get_guides_inline_keyboard,
     get_main_menu_keyboard,
     get_no_credits_inline_keyboard,
@@ -114,17 +115,18 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     db = SessionLocal()
     try:
         referral_code = _extract_referral_code_from_start(update.message.text)
-        if referral_code:
-            logger.info(
-                "referral_start_detected code=%s telegram_id=%s",
-                referral_code,
-                update.effective_user.id,
-            )
         user, is_new = _ensure_current_user(
             db,
             update,
             referral_code_from_start=referral_code,
         )
+        if referral_code:
+            logger.info(
+                "referral_start_detected code=%s telegram_id=%s db_user_id=%s",
+                referral_code,
+                update.effective_user.id,
+                user.id,
+            )
         services.track_event(
             db,
             event_name="start_clicked",
@@ -154,6 +156,11 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             disable_web_page_preview=True,
             reply_markup=get_main_menu_keyboard(),
         )
+        if referral_code and is_new and getattr(user, "referred_by_user_id", None):
+            await update.message.reply_text(
+                "Реферальная ссылка учтена. Теперь отправь .docx на проверку.",
+                reply_markup=get_main_menu_keyboard(),
+            )
     finally:
         db.close()
 
@@ -566,7 +573,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             await update.message.reply_text(
                 services.build_file_received_text("check"),
-                reply_markup=get_main_menu_keyboard(),
+                reply_markup=get_compact_menu_keyboard(),
             )
             return
 

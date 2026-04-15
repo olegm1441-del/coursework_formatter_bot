@@ -179,9 +179,10 @@ def get_or_create_user(
                 )
                 db.add(referral)
                 logger.info(
-                    "referral_linked inviter_id=%s invited_id=%s",
+                    "referral_linked inviter_id=%s invited_id=%s invited_telegram_id=%s",
                     referred_by_user_id,
                     user.id,
+                    telegram_id,
                 )
 
             db.commit()
@@ -358,7 +359,9 @@ def _count_granted_referral_upload_bonuses(db, inviter_user_id: int) -> int:
     ) or 0
 
 
-def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | None:
+def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> dict | None:
+    invited_user = get_user_by_id(db, invited_user_id)
+    invited_telegram_id = getattr(invited_user, "telegram_id", None)
     referral = (
         db.query(Referral)
         .filter(Referral.invited_user_id == invited_user_id)
@@ -366,13 +369,18 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
     )
 
     if not referral:
-        logger.info("referral_skip reason=no_referral invited_user_id=%s", invited_user_id)
+        logger.info(
+            "referral_skip reason=no_referral invited_user_id=%s invited_telegram_id=%s",
+            invited_user_id,
+            invited_telegram_id,
+        )
         return None
 
     if referral.qualified_upload_at is not None:
         logger.info(
-            "referral_skip reason=already_qualified invited_user_id=%s inviter_id=%s",
+            "referral_skip reason=already_qualified invited_user_id=%s invited_telegram_id=%s inviter_user_id=%s",
             invited_user_id,
+            invited_telegram_id,
             referral.inviter_user_id,
         )
         return None
@@ -386,11 +394,12 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
     )
     qualified = completed_bonuses * target + progress
     logger.info(
-        "referral_progress_count inviter_id=%s qualified=%s progress=%s/%s",
+        "referral_progress_count inviter_user_id=%s qualified=%s progress=%s/%s bonus_awarded=%s",
         referral.inviter_user_id,
         qualified,
         progress,
         target,
+        completed_bonuses > _count_granted_referral_upload_bonuses(db, referral.inviter_user_id),
     )
     granted_bonuses = _count_granted_referral_upload_bonuses(
         db,
@@ -412,9 +421,23 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
 
     db.commit()
 
-    if bonus_granted:
-        return referral.inviter_user_id
-    return None
+    return {
+        "inviter_user_id": referral.inviter_user_id,
+        "progress": progress,
+        "target": target,
+        "bonus_granted": bonus_granted,
+    }
+
+
+def build_referral_progress_notification_text(progress: int, target: int) -> str:
+    return (
+        "🎉 Новый друг загрузил файл по твоей ссылке.\n"
+        f"Реферальный прогресс: {progress}/{target}."
+    )
+
+
+def build_referral_upload_bonus_awarded_text() -> str:
+    return "🎉 Ты получил +1 оформление за приглашённых друзей."
 
 def grant_referral_payment_bonus_if_needed(db, invited_user_id: int) -> None:
     referral = (

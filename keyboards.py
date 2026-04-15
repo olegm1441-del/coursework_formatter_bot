@@ -43,6 +43,20 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def get_compact_menu_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(BTN_TOP_UP_BALANCE)],
+        [KeyboardButton(BTN_REFERRAL)],
+        [KeyboardButton(BTN_SELECT_GUIDE)],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=False,
+    )
+
+
 def get_guides_inline_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(BTN_GUIDE_KFU_COURSEWORK_2025, callback_data=CB_SELECT_GUIDE_KFU_COURSEWORK_2025)],
@@ -86,6 +100,14 @@ def get_check_result_inline_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(BTN_CHECK_ANOTHER, callback_data=CB_CHECK_ANOTHER)],
         [InlineKeyboardButton(BTN_BUY_MENU, callback_data=CB_ACTION_BUY)],
         [InlineKeyboardButton(BTN_REFERRAL_LINK, callback_data=CB_ACTION_REFERRAL)],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_referral_progress_inline_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(BTN_REFERRAL_LINK, callback_data=CB_ACTION_REFERRAL)],
+        [InlineKeyboardButton(BTN_FORMAT, callback_data=CB_ACTION_FORMAT)],
     ]
     return InlineKeyboardMarkup(keyboard)
 

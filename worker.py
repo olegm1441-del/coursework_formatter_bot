@@ -19,7 +19,11 @@ from telegram.request import HTTPXRequest
 from db import Base, SessionLocal, engine
 import models  # noqa: F401
 from models import Document, FormattingRequest, User
-from keyboards import get_action_inline_keyboard, get_check_result_inline_keyboard
+from keyboards import (
+    get_action_inline_keyboard,
+    get_check_result_inline_keyboard,
+    get_referral_progress_inline_keyboard,
+)
 import services
 
 
@@ -405,7 +409,11 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 user.id,
                 input_path,
             )
-            logger.info("referral_check_upload_seen invited_user_id=%s", user.id)
+            logger.info(
+                "referral_check_upload_seen invited_user_id=%s invited_telegram_id=%s",
+                user.id,
+                user.telegram_id,
+            )
 
             problems: list[str] = []
             request.status = "done"
@@ -422,21 +430,28 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
             )
 
-            inviter_user_id = services.grant_referral_upload_bonus_if_needed(db, user.id)
-            if inviter_user_id:
-                inviter = db.query(User).filter(User.id == inviter_user_id).first()
+            referral_result = services.grant_referral_upload_bonus_if_needed(db, user.id)
+            if referral_result:
+                inviter = (
+                    db.query(User)
+                    .filter(User.id == referral_result["inviter_user_id"])
+                    .first()
+                )
                 if inviter:
-                    inviter_balance = services.get_user_credit_balance(db, inviter.id)
-                    bonus_text = services.build_referral_bonus_notification_text(
-                        balance=inviter_balance,
-                        trigger="upload",
-                    )
+                    if referral_result["bonus_granted"]:
+                        bonus_text = services.build_referral_upload_bonus_awarded_text()
+                    else:
+                        bonus_text = services.build_referral_progress_notification_text(
+                            referral_result["progress"],
+                            referral_result["target"],
+                        )
                     try:
                         asyncio.run(
-                            send_referral_bonus_notification(
+                            send_text(
                                 bot_token=bot_token,
-                                inviter_telegram_id=inviter.telegram_id,
+                                chat_id=inviter.telegram_id,
                                 text=bonus_text,
+                                reply_markup=get_referral_progress_inline_keyboard(),
                             )
                         )
                     except Exception:
