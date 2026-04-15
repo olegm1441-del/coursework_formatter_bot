@@ -678,18 +678,31 @@ def force_paragraph_xml_spacing(paragraph, line_rule="auto"):
 
 
 def hard_reset_paragraph_format(paragraph, first_line_indent_cm=None):
+    # Explicitly nuke any existing w:ind to prevent stale hanging/left attributes
+    # from paragraph styles (e.g. List Paragraph) overriding our settings.
+    _pPr = paragraph._element.find(qn("w:pPr"))
+    if _pPr is not None:
+        for _old_ind in list(_pPr.findall(qn("w:ind"))):
+            _pPr.remove(_old_ind)
+
     force_paragraph_xml_spacing(paragraph, line_rule="auto")
     fmt = paragraph.paragraph_format
     fmt.space_before = Pt(0)
     fmt.space_after = Pt(0)
     fmt.line_spacing = LINE_SPACING_BODY
-    fmt.left_indent = Cm(0)
-    fmt.right_indent = Cm(0)
 
-    if first_line_indent_cm is None:
-        fmt.first_line_indent = Cm(0)
-    else:
-        fmt.first_line_indent = Cm(first_line_indent_cm)
+    # Write w:ind directly to guarantee w:left="0" is in XML (not just "default").
+    # We include w:right="0" here instead of using fmt.right_indent to avoid
+    # python-docx creating a second w:ind element.
+    _pPr2 = paragraph._element.get_or_add_pPr()
+    _ind = OxmlElement("w:ind")
+    _ind.set(qn("w:left"), "0")
+    _ind.set(qn("w:right"), "0")
+    if first_line_indent_cm:
+        # 1.25 cm = 709 twips (1 inch = 2.54 cm = 1440 twips → 1 cm = 566.9 twips)
+        _twips = round(first_line_indent_cm * 1440 / 2.54)
+        _ind.set(qn("w:firstLine"), str(_twips))
+    _pPr2.append(_ind)
 
     fmt.keep_together = False
     fmt.keep_with_next = False
@@ -1172,6 +1185,17 @@ def format_body(paragraph, preserve_numbering=False):
         fmt.widow_control = False
 
         paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+        # Even numbered paragraphs need correct indent (body indent, not list hanging)
+        _pPr_n = paragraph._element.find(qn("w:pPr"))
+        if _pPr_n is not None:
+            for _oi in list(_pPr_n.findall(qn("w:ind"))):
+                _pPr_n.remove(_oi)
+        _pPr_n2 = paragraph._element.get_or_add_pPr()
+        _ind_n = OxmlElement("w:ind")
+        _ind_n.set(qn("w:left"), "0")
+        _ind_n.set(qn("w:firstLine"), "709")
+        _pPr_n2.append(_ind_n)
 
         for run in paragraph.runs:
             set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)

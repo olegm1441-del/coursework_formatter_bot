@@ -563,6 +563,59 @@ def test_yo_normalisation_midword_uppercase() -> tuple[bool, str]:
     return _result(True, f"all {len(cases)} ё-normalisation cases correct")
 
 
+def test_t_indent_body_paragraph_left_zero() -> tuple[bool, str]:
+    """
+    After formatting, regular body paragraphs must have:
+    - left_indent = 0 (or None, not a hanging indent)
+    - first_line_indent = 709 twips (≈1.25 cm)
+    No hanging indent (w:hanging must not be present).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    # process_document requires a paragraph with text "введение" to find body start
+    doc.add_paragraph("введение")
+    # Simulate a paragraph that originally had a List style with hanging indent
+    p = doc.add_paragraph("Это обычный абзац с текстом.")
+    # Manually inject a hanging indent (simulating "List Paragraph" style effect)
+    pPr = p._element.get_or_add_pPr()
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "709")
+    ind.set(qn("w:hanging"), "360")
+    pPr.append(ind)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result_doc = Document(out)
+
+    body_paras = [p for p in result_doc.paragraphs if "обычный абзац" in (p.text or "")]
+    if not body_paras:
+        return _result(False, "body paragraph not found in output")
+
+    bp = body_paras[0]
+    pPr_out = bp._element.find(qn("w:pPr"))
+    ind_out = pPr_out.find(qn("w:ind")) if pPr_out is not None else None
+
+    # Check no hanging
+    if ind_out is not None and ind_out.get(qn("w:hanging")):
+        return _result(False, f"w:hanging still present: {ind_out.get(qn('w:hanging'))}")
+
+    # Check left=0 (either absent or "0")
+    left_val = ind_out.get(qn("w:left")) if ind_out is not None else None
+    if left_val and left_val != "0":
+        return _result(False, f"w:left={left_val!r} (expected 0 or absent)")
+
+    # Check firstLine≈709
+    fl_val = ind_out.get(qn("w:firstLine")) if ind_out is not None else None
+    if fl_val is None or abs(int(fl_val) - 709) > 30:
+        return _result(False, f"w:firstLine={fl_val!r} (expected ≈709)")
+
+    return _result(True, f"body paragraph indent: left=0, firstLine={fl_val} ✓")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -580,6 +633,7 @@ def run_all() -> None:
         ("C2 | empty para image→caption removed",      test_c2_empty_para_between_image_and_caption_removed),
         ("C2 | numeric column minimum protected",      test_c2_number_column_minimum),
         ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
+        ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
     ]
 
     for asset in ASSET_FILES:
