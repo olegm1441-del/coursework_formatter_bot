@@ -352,14 +352,7 @@ def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, pre
     if not looks_like_heading2_title(text):
         return False
 
-    if paragraph_has_numbering(paragraph):
-        return True
-
     if is_probable_center_bold_heading(paragraph):
-        return True
-
-    # Частый кейс: сразу после главы идёт подпункт, но Word потерял номер
-    if prev_kind in {"heading1", "empty_paragraph"}:
         return True
 
     return False
@@ -392,6 +385,9 @@ def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_para
 
     # Нужна именно Word-автонумерация / numbering
     if not paragraph_has_numbering(paragraph):
+        return False
+
+    if not is_probable_center_bold_heading(paragraph):
         return False
 
     # Если это уже похоже на heading2, не считаем heading1
@@ -1349,6 +1345,9 @@ def is_probable_body_list_item(paragraph, prev_paragraph=None, prev_kind=None):
     if not paragraph_has_numbering(paragraph):
         return False
 
+    if paragraph_has_heading_style_or_outline(paragraph):
+        return False
+
     low = text.lower()
 
     forbidden_prefixes = (
@@ -1371,6 +1370,9 @@ def is_probable_body_list_item(paragraph, prev_paragraph=None, prev_kind=None):
 
     if TABLE_NUM_RE.match(text) or FIG_RE.match(text) or is_table_continuation_text(text):
         return False
+
+    if not is_probable_center_bold_heading(paragraph):
+        return True
 
     # Берём первую буквенную букву, если она есть
     first_alpha = next((ch for ch in text if ch.isalpha()), "")
@@ -1420,6 +1422,22 @@ def is_probable_center_bold_heading(paragraph):
 
     bold_runs = sum(1 for r in non_empty_runs if r.bold)
     return bold_runs >= max(1, len(non_empty_runs) // 2)
+
+
+def paragraph_has_heading_style_or_outline(paragraph):
+    try:
+        style_name = (paragraph.style.name or "").strip().lower()
+    except Exception:
+        style_name = ""
+
+    if style_name in {"heading 1", "heading 2", "заголовок 1", "заголовок 2"}:
+        return True
+
+    pPr = paragraph._element.pPr
+    if pPr is None:
+        return False
+
+    return pPr.find(qn("w:outlineLvl")) is not None
 
 
 def paragraph_has_numbering(paragraph):
@@ -2274,7 +2292,7 @@ def smart_repair_heading1(paragraph, text: str):
 
     if parsed["kind"] == "heading1_chapter":
         chapter_num = parsed["chapter_num"]
-        title = parsed["title"].upper()
+        title = parsed["title"].lstrip(".: ").upper()
         replace_paragraph_text(paragraph, f"{chapter_num}. {title}")
         remove_paragraph_numbering(paragraph)
         format_heading1(paragraph)
@@ -2356,14 +2374,7 @@ def is_likely_numbered_heading2_candidate(paragraph, current_chapter_num, next_p
     if not looks_like_heading2_title(text):
         return False
 
-    if is_probable_center_bold_heading(paragraph):
-        return True
-
-    # Частый кейс: Word-автонумерация у первого параграфа после названия главы.
-    if prev_kind in {"heading1", "empty_paragraph"}:
-        return True
-
-    return True
+    return is_probable_center_bold_heading(paragraph)
 
 
     
@@ -2387,7 +2398,7 @@ def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_
             remove_paragraph_numbering(paragraph)
         return normalized
 
-    if has_num and looks_like_heading2_title(text):
+    if has_num and looks_like_heading2_title(text) and is_probable_center_bold_heading(paragraph):
         title = text.lstrip(". ").strip()
         new_text = f"{current_chapter_num}.{next_paragraph_num}. {title}"
         replace_paragraph_text(paragraph, new_text)
@@ -2396,6 +2407,29 @@ def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_
         return new_text
 
     return None
+
+
+def is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=None):
+    if not parsed_h1:
+        return False
+
+    if parsed_h1["kind"] == "heading1_exact":
+        return True
+
+    if toc_text:
+        return True
+
+    if paragraph_has_heading_style_or_outline(paragraph):
+        return True
+
+    if is_probable_center_bold_heading(paragraph):
+        return True
+
+    title = clean_spaces(parsed_h1.get("title") or "")
+    if re.search(r"\.\s+\S", title):
+        return False
+
+    return True
 
 def normalize_table_continuation_text(paragraph):
     text = clean_spaces(paragraph.text)
@@ -3941,17 +3975,22 @@ def process_document(input_path: Path, output_path: Path):
         if parsed_h1:
             if parsed_h1["kind"] == "heading1_chapter":
                 toc_text = toc_h1_map.get(parsed_h1["chapter_num"])
-                current_text = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
+                if not is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=toc_text):
+                    parsed_h1 = None
+                    if kind == "heading1":
+                        kind = "body_text"
+                else:
+                    current_text = f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}'
 
-                if toc_text and len(current_text) < len(toc_text):
-                    replace_paragraph_text(paragraph, toc_text)
-                    text = clean_spaces(paragraph.text)
-                    parsed_h1 = parse_heading1(text)
+                    if toc_text and len(current_text) < len(toc_text):
+                        replace_paragraph_text(paragraph, toc_text)
+                        text = clean_spaces(paragraph.text)
+                        parsed_h1 = parse_heading1(text)
 
-                current_chapter_num = parsed_h1["chapter_num"]
-                next_paragraph_num = 1
-                smart_repair_heading1(paragraph, text)
-                kind = "heading1"
+                    current_chapter_num = parsed_h1["chapter_num"]
+                    next_paragraph_num = 1
+                    smart_repair_heading1(paragraph, text)
+                    kind = "heading1"
 
             elif parsed_h1["kind"] == "heading1_exact":
                 current_chapter_num = None
@@ -4245,7 +4284,12 @@ def process_document(input_path: Path, output_path: Path):
             format_body_list_item(paragraph)
             prev_nonempty_kind = "body_list_item"
             continue
-        if parse_heading1(text):
+        parsed_h1_final = parse_heading1(text)
+        if parsed_h1_final and is_heading1_promotion_safe(paragraph, parsed_h1_final, toc_text=(
+            toc_h1_map.get(parsed_h1_final["chapter_num"])
+            if parsed_h1_final["kind"] == "heading1_chapter"
+            else None
+        )):
             smart_repair_heading1(paragraph, text)
             format_heading1(paragraph)
             prev_nonempty_kind = "heading1"
