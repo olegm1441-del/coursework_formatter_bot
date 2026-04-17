@@ -1,7 +1,9 @@
 import os
+import re
 import uuid
 import unicodedata
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,6 +25,8 @@ from guides.coursework_kfu_2025.formatter_service import format_docx
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # =========================
 # Базовые настройки проекта
 # =========================
@@ -31,11 +35,15 @@ BOT_USERNAME_FALLBACK = os.getenv("BOT_USERNAME", "").strip()
 TEMP_DIR = Path("bot_storage")
 TEMP_DIR.mkdir(exist_ok=True)
 
-ASSETS_DIR = Path("assets")
-
-CONTACT_TEXT = "Контакт разработчика:\n@aelart"
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 DEFAULT_GUIDE_CODE = "kfu_coursework_2025"
+REFERRAL_UPLOAD_BONUS_SIZE = 3
+REFERRAL_UPLOAD_BONUS_ENABLED_AT_DEFAULT = "2026-04-14T20:52:03Z"
+REFERRAL_UPLOAD_BONUS_ENABLED_AT_RAW = os.getenv(
+    "REFERRAL_UPLOAD_BONUS_ENABLED_AT",
+    os.getenv("REFERRAL_PAIRS_ENABLED_AT", REFERRAL_UPLOAD_BONUS_ENABLED_AT_DEFAULT),
+).strip()
 
 TARIFFS = {
     "one": {
@@ -57,6 +65,10 @@ GUIDES = {
         "document_type": "coursework",
         "guideline_version": "2025",
         "method_basename": "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ",
+        "method_asset_names": [
+            "КР КФУ 12.2025",
+            "КР КФУ 12.2025.pdf",
+        ],
         "formatter": format_docx,
         "is_active": True,
     }
@@ -81,6 +93,14 @@ def get_user_by_id(db, user_id: int) -> User | None:
 
 def get_user_by_referral_code(db, referral_code: str) -> User | None:
     return db.query(User).filter(User.referral_code == referral_code).first()
+
+
+def get_referral_by_invited_user_id(db, invited_user_id: int) -> Referral | None:
+    return (
+        db.query(Referral)
+        .filter(Referral.invited_user_id == invited_user_id)
+        .first()
+    )
 
 
 def _user_model_supports_selected_guide() -> bool:
@@ -125,6 +145,70 @@ def get_or_create_user(
 ) -> tuple[User, bool]:
     user = get_user_by_telegram_id(db, telegram_id)
     if user:
+        if not referral_code_from_start:
+            return user, False
+
+        logger.info(
+            "referral_existing_user_link_attempt telegram_id=%s db_user_id=%s code=%s",
+            telegram_id,
+            user.id,
+            referral_code_from_start,
+        )
+
+        if user.referred_by_user_id:
+            logger.info(
+                "referral_existing_user_skip reason=already_referred telegram_id=%s db_user_id=%s inviter_id=%s",
+                telegram_id,
+                user.id,
+                user.referred_by_user_id,
+            )
+            return user, False
+
+        existing_referral = get_referral_by_invited_user_id(db, user.id)
+        if existing_referral:
+            logger.info(
+                "referral_existing_user_skip reason=already_referred telegram_id=%s db_user_id=%s inviter_id=%s",
+                telegram_id,
+                user.id,
+                existing_referral.inviter_user_id,
+            )
+            return user, False
+
+        inviter = get_user_by_referral_code(db, referral_code_from_start)
+        if not inviter:
+            logger.info(
+                "referral_existing_user_skip reason=inviter_not_found telegram_id=%s db_user_id=%s code=%s",
+                telegram_id,
+                user.id,
+                referral_code_from_start,
+            )
+            return user, False
+
+        if inviter.telegram_id == telegram_id:
+            logger.info(
+                "referral_existing_user_skip reason=self_referral telegram_id=%s db_user_id=%s inviter_id=%s",
+                telegram_id,
+                user.id,
+                inviter.id,
+            )
+            return user, False
+
+        user.referred_by_user_id = inviter.id
+        referral = Referral(
+            inviter_user_id=inviter.id,
+            invited_user_id=user.id,
+            referral_code=inviter.referral_code,
+        )
+        db.add(referral)
+        db.commit()
+        db.refresh(user)
+        setattr(user, "_referral_linked_now", True)
+        logger.info(
+            "referral_existing_user_linked inviter_id=%s invited_id=%s invited_telegram_id=%s",
+            inviter.id,
+            user.id,
+            telegram_id,
+        )
         return user, False
 
     referred_by_user_id = None
@@ -171,6 +255,13 @@ def get_or_create_user(
                     referral_code=inviter_referral_code,
                 )
                 db.add(referral)
+                logger.info(
+                    "referral_linked inviter_id=%s invited_id=%s invited_telegram_id=%s",
+                    referred_by_user_id,
+                    user.id,
+                    telegram_id,
+                )
+                setattr(user, "_referral_linked_now", True)
 
             db.commit()
             db.refresh(user)
@@ -185,20 +276,34 @@ def get_referral_link(bot_username: str, referral_code: str) -> str:
     return f"https://t.me/{bot_username}?start=ref_{referral_code}"
 
 
-def build_referral_text(bot_username: str, user: User) -> str:
+def build_referral_text(
+    bot_username: str,
+    user: User,
+    balance: int | None = None,
+    progress: int | None = None,
+    target: int | None = None,
+) -> str:
     referral_link = get_referral_link(bot_username, user.referral_code)
+    balance_text = ""
+    if balance is not None:
+        balance_text = f"Доступно оформлений: {balance}\n\n"
+    progress_text = ""
+    if progress is not None and target is not None:
+        progress_text = f"\n{build_referral_progress_text(progress, target)}\n"
+
     return (
-        "Пригласи друга по своей ссылке:\n"
+        f"{balance_text}"
+        "Твоя реферальная ссылка:\n"
         f"{referral_link}\n\n"
-        "Ты получишь:\n"
-        "• +1 оформление, когда друг впервые загрузит документ\n"
-        "• ещё +1 оформление, когда друг впервые оплатит\n\n"
-        "Отправь ссылку одногруппнику, которому тоже скоро сдавать курсовую."
+        "За каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку по твоей ссылке, начисляется +1 оформление.\n"
+        f"{progress_text}"
+        "Ещё +1 оформление, когда приглашённый друг впервые оплатит.\n\n"
+        "Можно отправить ссылку одногруппнику, которому тоже скоро сдавать курсовую."
     )
     
 def build_referral_bonus_notification_text(balance: int, trigger: str) -> str:
     if trigger == "upload":
-        reason = "приглашённый пользователь впервые загрузил документ"
+        reason = "трое приглашённых друзей впервые загрузили .docx на автопроверку"
     elif trigger == "payment":
         reason = "приглашённый пользователь впервые оплатил"
     else:
@@ -286,18 +391,49 @@ def refund_one_credit_in_new_session(user_id: int, source_id: str) -> None:
 def grant_admin_bonus(db, target_user_id: int, amount: int, admin_source_id: str) -> int:
     entry = CreditLedger(
         user_id=target_user_id,
-        operation_type="admin_bonus",
+        operation_type="admin_grant",
         amount=amount,
         source_type="admin",
         source_id=admin_source_id,
-        idempotency_key=f"admin_bonus_{target_user_id}_{amount}_{uuid.uuid4().hex[:8]}",
+        idempotency_key=f"admin_grant_{target_user_id}_{amount}_{uuid.uuid4().hex[:8]}",
     )
     db.add(entry)
     db.commit()
     return get_user_credit_balance(db, target_user_id)
 
 
-def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | None:
+def get_referral_upload_bonus_enabled_at() -> datetime:
+    raw = REFERRAL_UPLOAD_BONUS_ENABLED_AT_RAW
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    except ValueError:
+        return datetime.fromisoformat(REFERRAL_UPLOAD_BONUS_ENABLED_AT_DEFAULT)
+
+
+def get_referral_upload_bonus_progress(db, inviter_user_id: int) -> tuple[int, int, int]:
+    enabled_at = get_referral_upload_bonus_enabled_at()
+    qualified_count = (
+        db.query(func.count(Referral.id))
+        .filter(Referral.inviter_user_id == inviter_user_id)
+        .filter(Referral.qualified_upload_at.isnot(None))
+        .filter(Referral.qualified_upload_at >= enabled_at)
+        .scalar()
+    ) or 0
+
+    completed_bonuses = qualified_count // REFERRAL_UPLOAD_BONUS_SIZE
+    progress = qualified_count % REFERRAL_UPLOAD_BONUS_SIZE
+    return progress, REFERRAL_UPLOAD_BONUS_SIZE, completed_bonuses
+
+
+def grant_referral_upload_bonus_if_needed(db, invited_user_id: int):
+    """
+    Mark the invited user's referral as qualified (first upload) if not yet done.
+    Grant +1 credit to the inviter for every 3rd friend who qualifies.
+    Returns inviter_user_id if a bonus was granted, else None.
+    """
     referral = (
         db.query(Referral)
         .filter(Referral.invited_user_id == invited_user_id)
@@ -306,14 +442,32 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
     )
 
     if not referral:
+        return None   # already marked, or no referral record
+
+    # Mark this referral as qualified
+    referral.qualified_upload_at = datetime.utcnow()
+    db.commit()
+
+    # Count total qualified referrals for this inviter
+    qualified_count = (
+        db.query(Referral)
+        .filter(Referral.inviter_user_id == referral.inviter_user_id)
+        .filter(Referral.qualified_upload_at.isnot(None))
+        .count()
+    )
+
+    # Grant bonus for every 3rd qualified friend (3, 6, 9, ...)
+    if qualified_count % 3 != 0:
         return None
 
-    existing_bonus = (
+    # Unique idempotency key per milestone
+    idem_key = f"referral_upload_bonus_{referral.inviter_user_id}_count{qualified_count}"
+    existing = (
         db.query(CreditLedger)
-        .filter(CreditLedger.idempotency_key == f"referral_upload_bonus_{referral.id}")
+        .filter(CreditLedger.idempotency_key == idem_key)
         .first()
     )
-    if existing_bonus:
+    if existing:
         return None
 
     bonus = CreditLedger(
@@ -322,13 +476,30 @@ def grant_referral_upload_bonus_if_needed(db, invited_user_id: int) -> int | Non
         amount=1,
         source_type="referral",
         source_id=str(referral.id),
-        idempotency_key=f"referral_upload_bonus_{referral.id}",
+        idempotency_key=idem_key,
     )
     db.add(bonus)
-    referral.qualified_upload_at = datetime.utcnow()
     db.commit()
 
     return referral.inviter_user_id
+
+
+def build_referral_progress_notification_text(progress: int, target: int) -> str:
+    left = max(target - progress, 0)
+    if left == 1:
+        left_text = "Остался 1 друг до +1 оформления."
+    else:
+        left_text = f"Осталось {left} друга до +1 оформления."
+
+    return (
+        "🎉 Новый друг загрузил файл по твоей ссылке.\n"
+        f"Реферальный прогресс: {progress}/{target}.\n"
+        f"{left_text}"
+    )
+
+
+def build_referral_upload_bonus_awarded_text() -> str:
+    return "🎉 Ты получил +1 оформление за приглашённых друзей."
 
 def grant_referral_payment_bonus_if_needed(db, invited_user_id: int) -> None:
     referral = (
@@ -423,6 +594,14 @@ def _normalize_filename_text(value: str) -> str:
     return value.strip().lower()
 
 
+def _normalize_asset_lookup_text(value: str) -> str:
+    value = unicodedata.normalize("NFC", value).lower()
+    value = value.replace("ё", "е")
+    value = value.replace("—", "-").replace("–", "-").replace("−", "-")
+    value = re.sub(r"[^0-9a-zа-я]+", " ", value)
+    return " ".join(value.split())
+
+
 def find_method_file(guide_code: str) -> Path | None:
     guide = get_guide(guide_code)
     basename = _normalize_filename_text(guide["method_basename"])
@@ -430,23 +609,54 @@ def find_method_file(guide_code: str) -> Path | None:
     if not ASSETS_DIR.exists():
         return None
 
+    for asset_name in guide.get("method_asset_names", []):
+        explicit_path = ASSETS_DIR / asset_name
+        if explicit_path.is_file():
+            return explicit_path
+
+    normalized_asset_names = {
+        _normalize_asset_lookup_text(name)
+        for name in guide.get("method_asset_names", [])
+        if name
+    }
+    normalized_targets = {
+        _normalize_asset_lookup_text(guide["title"]),
+        _normalize_asset_lookup_text(guide["method_basename"]),
+        *normalized_asset_names,
+    }
+
     candidates = []
     for path in ASSETS_DIR.iterdir():
         if not path.is_file():
             continue
-        if path.suffix.lower() not in {".docx", ".pdf"}:
+        suffix = path.suffix.lower()
+        name_normalized = _normalize_filename_text(path.name)
+        lookup_name = _normalize_asset_lookup_text(path.name)
+        lookup_stem = _normalize_asset_lookup_text(path.stem if suffix else path.name)
+        if (
+            suffix not in {".docx", ".pdf"}
+            and name_normalized != basename
+            and lookup_name not in normalized_targets
+            and lookup_stem not in normalized_targets
+        ):
             continue
 
-        stem_normalized = _normalize_filename_text(path.stem)
-        candidates.append((path, stem_normalized))
+        filename_part = path.stem if suffix in {".docx", ".pdf"} else path.name
+        stem_normalized = _normalize_filename_text(filename_part)
+        candidates.append((path, stem_normalized, lookup_name, lookup_stem))
 
     # 1. Точное совпадение
-    for path, stem_normalized in candidates:
+    for path, stem_normalized, _, _ in candidates:
         if stem_normalized == basename:
             return path
 
-    # 2. Частичное совпадение в обе стороны
-    for path, stem_normalized in candidates:
+    # 2. Устойчивое совпадение по нормализованным именам assets
+    for path, _, lookup_name, lookup_stem in candidates:
+        if lookup_name in normalized_targets or lookup_stem in normalized_targets:
+            return path
+
+    # 3. Частичное совпадение в обе стороны
+    for path, stem_normalized, _, _ in candidates:
         if basename in stem_normalized or stem_normalized in basename:
             return path
 
@@ -460,7 +670,7 @@ def build_guide_selection_text(user: User) -> str:
     return (
         "Выберите методичку для оформления.\n\n"
         f"Сейчас активна:\n{current_guide['title']}\n\n"
-        "Эта методичка будет использоваться для следующей обработки .docx."
+        "Эта методичка будет использоваться для автооформления .docx."
     )
 
 
@@ -469,7 +679,7 @@ def build_guide_selected_text(guide_code: str) -> str:
     return (
         "Методичка выбрана.\n\n"
         f"Активная методичка: {guide['title']}\n\n"
-        "Теперь отправь .docx-файл прямо в чат — я оформлю его по этой методичке."
+        "Отправь .docx-файл, и я сразу запущу автооформление по этой методичке."
     )
 
 
@@ -493,46 +703,53 @@ def build_tariffs_text() -> str:
     )
 
 
-def build_start_text(balance: int, is_new: bool, active_guide_title: str) -> str:
-    if balance > 0:
-        if is_new:
-            return (
-                "Привет! Я оформляю курсовые работы по методичке вуза.\n\n"
-                f"Сейчас активна методичка: {active_guide_title}\n"
-                f"Доступно оформлений: {balance}\n\n"
-                "Что исправляю автоматически:\n"
-                "• поля, шрифт, интервалы\n"
-                "• заголовки, нумерацию, разрывы страниц\n"
-                "• оформление таблиц, рисунков и списка источников\n\n"
-                "У тебя уже есть 1 бесплатное оформление.\n"
-                "Просто отправь .docx-файл прямо в этот чат.\n\n"
-                "Продолжая использование бота, вы соглашаетесь на обработку персональных данных "
-                "в соответствии с Политикой обработки данных:\n"
-                "https://docs.google.com/document/d/14Sk5N1ow-x30Dh2dLqYQtUU5-LbdUlemkTleL-THJDc/edit?usp=drivesdk"
-            )
-
+def build_referral_progress_text(progress: int, target: int) -> str:
+    left = max(target - progress, 0)
+    if left == target:
         return (
-            "С возвращением!\n\n"
-            f"Активная методичка: {active_guide_title}\n"
-            f"Доступно оформлений: {balance}\n\n"
-            "Отправь .docx-файл прямо в этот чат — начну оформление сразу после загрузки."
+            f"Реферальный прогресс: {progress}/{target}.\n"
+            "Пригласи 3 друзей на автопроверку, чтобы получить +1 оформление."
         )
-
+    if left == 1:
+        return (
+            f"Реферальный прогресс: {progress}/{target}.\n"
+            "Остался 1 друг до +1 оформления."
+        )
     return (
-        "С возвращением!\n\n"
-        f"Активная методичка: {active_guide_title}\n"
-        f"Доступно оформлений: {balance}\n\n"
-        "Бесплатное оформление уже использовано.\n\n"
-        f"{build_tariffs_text()}\n\n"
-        "Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им реферальную ссылку. "
-        "Ты получишь +1 оформление, когда они загрузят файл."
+        f"Реферальный прогресс: {progress}/{target}.\n"
+        f"Осталось {left} друга до +1 оформления."
+    )
+
+
+def build_start_text(
+    balance: int,
+    is_new: bool,
+    active_guide_title: str,
+    referral_progress: int,
+    referral_target: int,
+) -> str:
+    balance_line = (
+        "У тебя есть 1 бесплатное оформление."
+        if is_new
+        else f"Доступно оформлений: {balance}."
+    )
+    return (
+        "Отправь .docx-файл, и я сразу запущу автооформление по методичке КФУ.\n"
+        "Готовый файл вернётся сюда автоматически.\n\n"
+        f"{balance_line}\n\n"
+        "Продолжая использование бота, вы соглашаетесь с "
+        "<a href=\"https://docs.google.com/document/d/14Sk5N1ow-x30Dh2dLqYQtUU5-LbdUlemkTleL-THJDc/edit?usp=drivesdk\">Политикой обработки персональных данных</a> "
+        "и <a href=\"https://docs.google.com/document/d/1x4OYZzURefM4RWWSRipuX0QQfRpmhBooUjZa11IY8Ck/edit?usp=sharing\">Условиями использования сервиса</a>.\n\n"
+        "Сервис выполняет автоматическое форматирование и не гарантирует 100% соответствие требованиям преподавателя. "
+        "Загруженные документы обрабатываются автоматически и не просматриваются вручную. "
+        "Сервис предназначен только для форматирования документов."
     )
 
 
 def build_balance_text(user: User, balance: int, bot_username: str) -> str:
     guide_code = get_user_selected_guide_code(user)
     guide = get_guide(guide_code)
-    referral_text = build_referral_text(bot_username, user)
+    referral_text = build_referral_text(bot_username, user, balance=balance)
 
     return (
         f"Ваш баланс: {balance} оформлений\n"
@@ -546,8 +763,101 @@ def build_no_credits_text(user: User, bot_username: str) -> str:
     referral_text = build_referral_text(bot_username, user)
     return (
         "У вас нет доступных оформлений.\n\n"
+        "Чтобы запустить автооформление, купите оформление или получите бонус по реферальной ссылке.\n\n"
         f"{build_tariffs_text()}\n\n"
         f"{referral_text}"
+    )
+
+
+def build_text_fallback_text() -> str:
+    return (
+        "Отправь .docx-файл прямо сюда.\n\n"
+        "Я сразу запущу автооформление по активной методичке и пришлю готовый файл."
+    )
+
+
+def build_top_up_balance_text() -> str:
+    return (
+        "Тарифы:\n"
+        "• 1 оформление — 200 ₽\n"
+        "• 3 оформления — 500 ₽\n\n"
+        "После оплаты оформления начислятся на баланс."
+    )
+
+
+def build_check_selected_text() -> str:
+    return (
+        "Отправь .docx-файл.\n"
+        "По умолчанию я бесплатно проверю оформление по методичке КФУ."
+    )
+
+
+def build_format_selected_text(balance: int) -> str:
+    if balance <= 0:
+        return (
+            "На балансе нет доступных оформлений.\n\n"
+            f"{build_tariffs_text()}\n\n"
+            "Можно купить оформление или получить +1 оформление за каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку по твоей ссылке."
+        )
+
+    return (
+        "Оформление выбрано.\n\n"
+        f"Доступно оформлений: {balance}\n\n"
+        "Отправь .docx-файл для автооформления.\n"
+        "Оформление спишет 1 оформление с баланса.\n"
+        "Если перед этим была проверка, она не списывала оформление."
+    )
+
+
+def build_file_received_text(mode: str) -> str:
+    if mode == "check":
+        return (
+            "Файл получен.\n\n"
+            "Начинаю проверку оформления по методичке КФУ."
+        )
+
+    return (
+        "Файл получен.\n\n"
+        "Начинаю оформление по методичке КФУ.\n"
+        "Готовый .docx-файл отправлю сюда автоматически."
+    )
+
+
+def build_check_result_text(problems: list[str]) -> str:
+    if not problems:
+        return (
+            "Проверка завершена.\n\n"
+            "Я не нашёл явных проблем по основным правилам оформления.\n\n"
+            "Документ можно улучшить.\n"
+            "Запусти автооформление — приведу его к требованиям КФУ за 1 оформление."
+        )
+
+    lines = "\n".join(f"• {problem}" for problem in problems)
+    return (
+        "Проверка завершена.\n\n"
+        "Найдены замечания по оформлению:\n"
+        f"{lines}\n\n"
+        "Документ можно улучшить.\n"
+        "Запусти автооформление — приведу его к требованиям КФУ за 1 оформление."
+    )
+
+
+def build_check_another_text() -> str:
+    return (
+        "Отправь .docx-файл.\n"
+        "Я бесплатно проверю оформление по методичке КФУ."
+    )
+
+
+def build_format_success_caption(bot_username: str, user: User) -> str:
+    referral_link = get_referral_link(bot_username, user.referral_code)
+    return (
+        "Готово, курсовая оформлена.\n\n"
+        "Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им бота по рефералке:\n"
+        f"{referral_link}\n\n"
+        "Ты получишь:\n"
+        "• +1 оформление за каждых 3 новых друзей, которые впервые загрузят .docx на автопроверку\n"
+        "• ещё +1 оформление, когда друг впервые оплатит"
     )
 
 
@@ -703,18 +1013,20 @@ def get_bot_username_fallback() -> str:
     return BOT_USERNAME_FALLBACK or "your_bot_username"
 
 
-def get_contact_text() -> str:
-    return CONTACT_TEXT
-
-
 def get_userinfo_text(db, user: User) -> str:
     balance = get_user_credit_balance(db, user.id)
     selected_guide_code = get_user_selected_guide_code(user)
+    referral_progress, referral_target, completed_bonuses = get_referral_upload_bonus_progress(
+        db,
+        user.id,
+    )
 
     return (
         f"user_id: {user.id}\n"
         f"telegram_id: {user.telegram_id}\n"
         f"referral_code: {user.referral_code}\n"
         f"balance: {balance}\n"
-        f"selected_guide_code: {selected_guide_code}"
+        f"selected_guide_code: {selected_guide_code}\n"
+        f"referral_upload_bonus_progress: {referral_progress}/{referral_target}\n"
+        f"referral_upload_bonuses_completed: {completed_bonuses}"
     )

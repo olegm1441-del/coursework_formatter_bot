@@ -16,17 +16,25 @@ from telegram.ext import (
 
 from db import SessionLocal
 from keyboards import (
-    BTN_CONTACT,
+    BTN_CHECK,
+    BTN_FORMAT,
     BTN_REFERRAL,
     BTN_SELECT_GUIDE,
     BTN_TOP_UP_BALANCE,
+    CB_ACTION_BUY,
+    CB_ACTION_CHECK,
+    CB_ACTION_FORMAT,
+    CB_ACTION_REFERRAL,
     CB_BACK_TO_MENU,
+    CB_CHECK_ANOTHER,
     CB_SELECT_GUIDE_KFU_COURSEWORK_2025,
     CB_SHOW_GUIDE_KFU_COURSEWORK_2025_FILE,
+    get_action_inline_keyboard,
     get_back_to_menu_inline_keyboard,
+    get_compact_menu_keyboard,
     get_guides_inline_keyboard,
     get_main_menu_keyboard,
-    get_top_up_balance_inline_keyboard,
+    get_no_credits_inline_keyboard,
 )
 import services
 
@@ -34,6 +42,9 @@ import services
 logger = logging.getLogger(__name__)
 
 PAYMENTS_API_BASE_URL = "https://courseworkformatterbot-production.up.railway.app"
+PENDING_DOCX_ACTION_KEY = "pending_docx_action"
+DOCX_ACTION_CHECK = "check"
+DOCX_ACTION_FORMAT = "format"
 
 _ADMIN_IDS: set[int] = {
     int(x) for x in os.getenv("ADMIN_TELEGRAM_IDS", "").split(",") if x.strip()
@@ -42,17 +53,16 @@ _ADMIN_IDS: set[int] = {
 
 def _is_admin(update: Update, db) -> bool:
     """Проверяет права администратора по Telegram ID ИЛИ по внутреннему user_id."""
-    if not _ADMIN_IDS:
-        logger.warning("admin_check_failed: ADMIN_TELEGRAM_IDS is empty")
-        return False
     tg_id = update.effective_user.id
     logger.info("admin_check tg_id=%s admin_ids=%s", tg_id, _ADMIN_IDS)
     if tg_id in _ADMIN_IDS:
         return True
     user = services.get_user_by_telegram_id(db, tg_id)
     logger.info("admin_check user=%s user_id=%s", user, getattr(user, "id", None))
-    if user and user.id in _ADMIN_IDS:
+    if user and (user.id == 1 or user.id in _ADMIN_IDS):
         return True
+    if not _ADMIN_IDS:
+        logger.warning("admin_check_failed: ADMIN_TELEGRAM_IDS is empty and user_id is not 1")
     return False
 
 
@@ -110,6 +120,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             update,
             referral_code_from_start=referral_code,
         )
+        if referral_code:
+            logger.info(
+                "referral_start_detected code=%s telegram_id=%s db_user_id=%s",
+                referral_code,
+                update.effective_user.id,
+                user.id,
+            )
         services.track_event(
             db,
             event_name="start_clicked",
@@ -120,17 +137,30 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         balance = services.get_user_credit_balance(db, user.id)
         guide_code = services.get_user_selected_guide_code(user)
         guide = services.get_guide(guide_code)
+        referral_progress, referral_target, _ = services.get_referral_upload_bonus_progress(
+            db,
+            user.id,
+        )
 
         text = services.build_start_text(
             balance=balance,
             is_new=is_new,
             active_guide_title=guide["title"],
+            referral_progress=referral_progress,
+            referral_target=referral_target,
         )
 
         await update.message.reply_text(
             text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
             reply_markup=get_main_menu_keyboard(),
         )
+        if referral_code and getattr(user, "_referral_linked_now", False):
+            await update.message.reply_text(
+                "Реферальная ссылка учтена. Теперь отправь .docx для автооформления.",
+                reply_markup=get_main_menu_keyboard(),
+            )
     finally:
         db.close()
 
@@ -167,7 +197,15 @@ async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         user, _ = _ensure_current_user(db, update)
         bot_username = _get_bot_username(context)
-        text = services.build_referral_text(bot_username, user)
+        balance = services.get_user_credit_balance(db, user.id)
+        progress, target, _ = services.get_referral_upload_bonus_progress(db, user.id)
+        text = services.build_referral_text(
+            bot_username,
+            user,
+            balance=balance,
+            progress=progress,
+            target=target,
+        )
 
         await update.message.reply_text(
             text,
@@ -175,16 +213,6 @@ async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     finally:
         db.close()
-
-
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-
-    await update.message.reply_text(
-        services.get_contact_text(),
-        reply_markup=get_main_menu_keyboard(),
-    )
 
 
 async def choose_guide_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,13 +237,8 @@ async def top_up_balance_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     await update.message.reply_text(
-        "Тарифы:\n"
-        "• 1 оформление — 200 ₽\n"
-        "• 3 оформления — 500 ₽\n\n"
-        "Бонусы:\n"
-        "• +1 оформление, если приглашённый пользователь впервые загрузит документ\n"
-        "• +1 оформление, если приглашённый пользователь впервые оплатит",
-        reply_markup=get_top_up_balance_inline_keyboard(),
+        services.build_top_up_balance_text(),
+        reply_markup=get_no_credits_inline_keyboard(),
     )
 
 
@@ -324,6 +347,75 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
+    if data in {CB_ACTION_CHECK, CB_ACTION_FORMAT, CB_CHECK_ANOTHER, CB_ACTION_BUY, CB_ACTION_REFERRAL}:
+        if data == CB_ACTION_BUY:
+            await query.message.reply_text(
+                services.build_top_up_balance_text(),
+                reply_markup=get_no_credits_inline_keyboard(),
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            user = services.get_user_by_telegram_id(db, query.from_user.id)
+            if not user:
+                await query.edit_message_text(
+                    "Пользователь не найден. Нажмите /start.",
+                    reply_markup=get_back_to_menu_inline_keyboard(),
+                )
+                return
+
+            if data == CB_ACTION_REFERRAL:
+                bot_username = _get_bot_username(context)
+                balance = services.get_user_credit_balance(db, user.id)
+                progress, target, _ = services.get_referral_upload_bonus_progress(db, user.id)
+                text = services.build_referral_text(
+                    bot_username,
+                    user,
+                    balance=balance,
+                    progress=progress,
+                    target=target,
+                )
+                reply_markup = get_action_inline_keyboard()
+            elif data == CB_CHECK_ANOTHER:
+                context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_CHECK
+                text = services.build_check_another_text()
+                reply_markup = get_action_inline_keyboard()
+            elif data == CB_ACTION_CHECK:
+                context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_CHECK
+                text = services.build_check_selected_text()
+                reply_markup = get_action_inline_keyboard()
+            else:
+                balance = services.get_user_credit_balance(db, user.id)
+                if balance > 0:
+                    context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_FORMAT
+                else:
+                    context.user_data.pop(PENDING_DOCX_ACTION_KEY, None)
+                text = services.build_format_selected_text(balance)
+                reply_markup = get_action_inline_keyboard() if balance > 0 else get_no_credits_inline_keyboard()
+                current_message_text = getattr(query.message, "text", "") or ""
+                if "Проверка завершена" in current_message_text:
+                    services.track_event(
+                        db,
+                        event_name="check_to_format_clicked",
+                        user_id=user.id,
+                        source="telegram_callback",
+                        payload_json=json.dumps({"balance": balance}),
+                    )
+
+            if data == CB_ACTION_CHECK:
+                services.track_event(
+                    db,
+                    event_name="check_selected",
+                    user_id=user.id,
+                    source="telegram_callback",
+                )
+
+            await query.message.reply_text(text, reply_markup=reply_markup)
+        finally:
+            db.close()
+        return
+
     if data == CB_SELECT_GUIDE_KFU_COURSEWORK_2025:
         db = SessionLocal()
         try:
@@ -356,9 +448,12 @@ async def guide_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         with open(method_file, "rb") as f:
+            filename = Path(method_file).name
+            if Path(method_file).suffix.lower() not in {".docx", ".pdf"}:
+                filename = f"{filename}.pdf"
             await query.message.reply_document(
                 document=f,
-                filename=Path(method_file).name,
+                filename=filename,
                 caption="Файл методички",
             )
 
@@ -378,7 +473,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if not filename.lower().endswith(".docx"):
         await update.message.reply_text(
-            "Принимаются только .docx файлы.",
+            "Файл не того формата. Отправь .docx файл.",
             reply_markup=get_main_menu_keyboard(),
         )
         return
@@ -391,19 +486,22 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         user, _ = _ensure_current_user(db, update)
         balance = services.get_user_credit_balance(db, user.id)
+        context.user_data.pop(PENDING_DOCX_ACTION_KEY, None)
+        service_type = DOCX_ACTION_FORMAT
 
         logger.info(
-            "docx_received user_id=%s filename=%s balance=%s",
+            "docx_received user_id=%s filename=%s balance=%s service_type=%s",
             user.id,
             filename,
             balance,
+            service_type,
         )
 
-        if balance <= 0:
+        if service_type == DOCX_ACTION_FORMAT and balance <= 0:
             text = services.build_no_credits_text(user, _get_bot_username(context))
             await update.message.reply_text(
                 text,
-                reply_markup=get_main_menu_keyboard(),
+                reply_markup=get_no_credits_inline_keyboard(),
             )
             return
 
@@ -437,7 +535,13 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             event_name="file_uploaded",
             user_id=user.id,
             source="telegram_docx",
-            payload_json=json.dumps({"document_id": doc_record.id, "filename": filename}),
+            payload_json=json.dumps(
+                {
+                    "document_id": doc_record.id,
+                    "filename": filename,
+                    "service_type": service_type,
+                }
+            ),
         )
 
         request = services.create_formatting_request(
@@ -445,14 +549,32 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user_id=user.id,
             document_id=doc_record.id,
             guide_code=guide_code,
+            service_type=service_type,
         )
 
         logger.info(
-            "request_queued request_id=%s user_id=%s guide=%s",
+            "request_queued request_id=%s user_id=%s guide=%s service_type=%s",
             request.id,
             user.id,
             guide_code,
+            service_type,
         )
+
+        if service_type == DOCX_ACTION_CHECK:
+            services.track_event(
+                db,
+                event_name="check_started",
+                user_id=user.id,
+                source="telegram_docx",
+                payload_json=json.dumps(
+                    {"request_id": request.id, "document_id": doc_record.id}
+                ),
+            )
+            await update.message.reply_text(
+                services.build_file_received_text("check"),
+                reply_markup=get_compact_menu_keyboard(),
+            )
+            return
 
         debited = services.debit_one_credit(
             db,
@@ -469,7 +591,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             text = services.build_no_credits_text(user, _get_bot_username(context))
             await update.message.reply_text(
                 text,
-                reply_markup=get_main_menu_keyboard(),
+                reply_markup=get_no_credits_inline_keyboard(),
             )
             return
 
@@ -480,11 +602,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
         await update.message.reply_text(
-            (
-                "Файл получен и поставлен в очередь на оформление.\n"
-                f"Номер заявки: {request.id}\n\n"
-                "Когда всё будет готово, я автоматически пришлю оформленный .docx обратно в этот чат."
-            ),
+            services.build_file_received_text("format"),
             reply_markup=get_main_menu_keyboard(),
         )
 
@@ -515,6 +633,16 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     finally:
         db.close()
+
+
+async def wrong_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    await update.message.reply_text(
+        "Файл не того формата. Отправь .docx файл.",
+        reply_markup=get_main_menu_keyboard(),
+    )
 
 
 async def userinfo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -560,7 +688,8 @@ async def give_credits_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             admin_source_id=str(update.effective_user.id),
         )
         await update.message.reply_text(
-            f"Готово. Баланс пользователя {target_user_id}: {balance}"
+            f"Начислено {amount} оформлений пользователю {target_user_id}\n"
+            f"Текущий баланс: {balance}"
         )
     finally:
         db.close()
@@ -606,6 +735,33 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     text = update.message.text.strip()
 
+    if text == BTN_CHECK:
+        context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_CHECK
+        await update.message.reply_text(
+            services.build_check_selected_text(),
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    if text == BTN_FORMAT:
+        db = SessionLocal()
+        try:
+            user, _ = _ensure_current_user(db, update)
+            balance = services.get_user_credit_balance(db, user.id)
+            if balance > 0:
+                context.user_data[PENDING_DOCX_ACTION_KEY] = DOCX_ACTION_FORMAT
+                reply_markup = get_main_menu_keyboard()
+            else:
+                context.user_data.pop(PENDING_DOCX_ACTION_KEY, None)
+                reply_markup = get_no_credits_inline_keyboard()
+            await update.message.reply_text(
+                services.build_format_selected_text(balance),
+                reply_markup=reply_markup,
+            )
+        finally:
+            db.close()
+        return
+
     if text == BTN_TOP_UP_BALANCE:
         await top_up_balance_handler(update, context)
         return
@@ -618,13 +774,8 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await choose_guide_handler(update, context)
         return
 
-    if text == BTN_CONTACT:
-        await contact_handler(update, context)
-        return
-
     await update.message.reply_text(
-        "Отправь .docx-файл прямо сюда — я проверю и оформлю его по активной методичке.\n\n"
-        "Если хочешь, сначала можешь выбрать методичку или открыть тарифы в меню.",
+        services.build_text_fallback_text(),
         reply_markup=get_main_menu_keyboard(),
     )
 
@@ -637,7 +788,6 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("buy3", buy3_handler))
     app.add_handler(CommandHandler("userinfo", userinfo_handler))
     app.add_handler(CommandHandler("user_info", userinfo_handler))
-    app.add_handler(CommandHandler("contact", contact_handler))
     app.add_handler(CommandHandler("method", choose_guide_handler))
     app.add_handler(CommandHandler("givecredits", give_credits_handler))
     app.add_handler(CommandHandler("give_credits", give_credits_handler))
@@ -646,8 +796,9 @@ def register_handlers(app: Application) -> None:
     app.add_handler(
         CallbackQueryHandler(
             guide_callback_handler,
-            pattern=r"^(guide:|guide_file:|menu:back|buy:)",
+            pattern=r"^(guide:|guide_file:|menu:back|buy:|action:|check:)",
         )
     )
-    app.add_handler(MessageHandler(filters.Document.FileExtension("docx"), docx_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, docx_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, wrong_file_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))

@@ -11,7 +11,7 @@ H1_EXACT = {
     "приложения",
 }
 
-CHAPTER_RE = re.compile(r"^\s*глава\s+(\d+)\s*\.?\s*(.+?)\s*$", re.IGNORECASE)
+CHAPTER_RE = re.compile(r"^\s*глава\s+(\d+)\s*\.?\s*(.{0,140}?)\s*$", re.IGNORECASE)
 NORMALIZED_H1_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
 H2_RE = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.+?)\s*$")
 BROKEN_H2_RE = re.compile(r"^\s*\.\s+(.+?)\s*$")
@@ -120,11 +120,15 @@ def parse_heading1(text: str):
 
     m = CHAPTER_RE.match(t)
     if m:
-        return {
-            "kind": "heading1_chapter",
-            "chapter_num": int(m.group(1)),
-            "title": clean_spaces(m.group(2)),
-        }
+        raw_title = clean_spaces(m.group(2))
+        # Empty title ("Глава 1") is valid — the chapter name is on the next paragraph.
+        # Non-empty title must pass the heading-title sanity check.
+        if not raw_title or is_probable_numbered_heading1_title(raw_title):
+            return {
+                "kind": "heading1_chapter",
+                "chapter_num": int(m.group(1)),
+                "title": raw_title,
+            }
 
     m = NORMALIZED_H1_RE.match(t)
     if m:

@@ -535,6 +535,314 @@ def test_c2_number_column_minimum() -> tuple[bool, str]:
     return _result(True, f"numeric columns protected: {[f'{w:.1f}' for w in widths_after_pt]}")
 
 
+def test_yo_normalisation_midword_uppercase() -> tuple[bool, str]:
+    """
+    Words starting with uppercase but containing lowercase ё mid-word
+    (e.g. "Лётчик") must have the ё replaced with е.
+    Capital Ё at the start of a word must be preserved.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_yo_in_text
+
+    cases = [
+        # (input, expected)
+        ("лётчик",       "летчик"),
+        ("ёж",           "еж"),
+        ("Ёж",           "Ёж"),        # capital Ё: preserved
+        ("Лётчик",       "Летчик"),    # starts with uppercase Л, ё is lowercase → replace
+        ("ЛЁТЧИК",       "ЛЁТЧИК"),   # Ё uppercase → preserved
+        ("неёмкий",      "неемкий"),
+        ("Чернышёв",     "Чернышев"),
+    ]
+    failures = []
+    for inp, expected in cases:
+        got = normalize_yo_in_text(inp)
+        if got != expected:
+            failures.append(f"normalize_yo_in_text({inp!r}) = {got!r}, expected {expected!r}")
+    if failures:
+        return _result(False, "\n".join(failures))
+    return _result(True, f"all {len(cases)} ё-normalisation cases correct")
+
+
+def test_t_indent_body_paragraph_left_zero() -> tuple[bool, str]:
+    """
+    After formatting, regular body paragraphs must have:
+    - left_indent = 0 (or None, not a hanging indent)
+    - first_line_indent = 709 twips (≈1.25 cm)
+    No hanging indent (w:hanging must not be present).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    # process_document requires a paragraph with text "введение" to find body start
+    doc.add_paragraph("введение")
+    # Simulate a paragraph that originally had a List style with hanging indent
+    p = doc.add_paragraph("Это обычный абзац с текстом.")
+    # Manually inject a hanging indent (simulating "List Paragraph" style effect)
+    pPr = p._element.get_or_add_pPr()
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "709")
+    ind.set(qn("w:hanging"), "360")
+    pPr.append(ind)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result_doc = Document(out)
+
+    body_paras = [p for p in result_doc.paragraphs if "обычный абзац" in (p.text or "")]
+    if not body_paras:
+        return _result(False, "body paragraph not found in output")
+
+    bp = body_paras[0]
+    pPr_out = bp._element.find(qn("w:pPr"))
+    ind_out = pPr_out.find(qn("w:ind")) if pPr_out is not None else None
+
+    # Check no hanging
+    if ind_out is not None and ind_out.get(qn("w:hanging")):
+        return _result(False, f"w:hanging still present: {ind_out.get(qn('w:hanging'))}")
+
+    # Check left=0 (either absent or "0")
+    left_val = ind_out.get(qn("w:left")) if ind_out is not None else None
+    if left_val and left_val != "0":
+        return _result(False, f"w:left={left_val!r} (expected 0 or absent)")
+
+    # Check firstLine≈709
+    fl_val = ind_out.get(qn("w:firstLine")) if ind_out is not None else None
+    if fl_val is None or abs(int(fl_val) - 709) > 30:
+        return _result(False, f"w:firstLine={fl_val!r} (expected ≈709)")
+
+    return _result(True, f"body paragraph indent: left=0, firstLine={fl_val} ✓")
+
+
+# ── Task 2 — Глава N without title ────────────────────────────────────────────
+
+def test_t2_chapter_heading_without_title() -> tuple[bool, str]:
+    """
+    "Глава 1" (no title) must be classified as heading1.
+    "Глава 1. Название" (with title) must still work.
+    """
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+
+    cases = [
+        ("Глава 1",                    True),
+        ("глава 2",                    True),
+        ("ГЛАВА 3",                    True),
+        ("Глава 1.",                   True),
+        ("Глава 1. Теоретические основы", True),
+        ("Глава 10. Заключение",       True),
+        ("Глава",                      False),  # no number
+        ("1. Теоретические основы",    True),   # normalized heading — must still work
+        ("Введение",                   True),   # exact match — must still work
+    ]
+    failures = []
+    for text, expected in cases:
+        result = parse_heading1(text)
+        got = result is not None
+        if got != expected:
+            failures.append(f"parse_heading1({text!r}) → {result}, expected match={expected}")
+    if failures:
+        return _result(False, "\n".join(failures))
+    return _result(True, f"all {len(cases)} chapter heading cases correct")
+
+
+def test_t3_reference_subheading_centred() -> tuple[bool, str]:
+    """
+    After formatting, reference section headers must be CENTER aligned, bold,
+    preceded by exactly one empty paragraph.
+    Source entries must use regular body-style indentation:
+    left=0, firstLine≈709 twips, no hanging indent.
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("Введение")
+    doc.add_paragraph("")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("Официальные материалы")
+    doc.add_paragraph("1. Некий закон.")
+    doc.add_paragraph("Интернет-ресурсы")
+    doc.add_paragraph("2. Некий сайт.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result_doc = Document(out)
+
+    paras = list(result_doc.paragraphs)
+    sh_idx = next((i for i, p in enumerate(paras) if "официальные" in (p.text or "").lower()), None)
+    if sh_idx is None:
+        return _result(False, "subheading paragraph not found in output")
+
+    sh = paras[sh_idx]
+    if sh.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, f"subheading not centred: alignment={sh.alignment}")
+
+    pPr_sh = sh._element.find(qn("w:pPr"))
+    ind_sh = pPr_sh.find(qn("w:ind")) if pPr_sh is not None else None
+    if ind_sh is not None:
+        fli = ind_sh.get(qn("w:firstLine"))
+        left = ind_sh.get(qn("w:left"))
+        hang = ind_sh.get(qn("w:hanging"))
+        if hang and int(hang) > 100:
+            return _result(False, f"subheading has hanging indent: {hang}")
+        if fli and int(fli) > 100:
+            return _result(False, f"subheading has first-line indent: {fli}")
+        if left and int(left) > 100:
+            return _result(False, f"subheading has left indent: {left}")
+
+    bold_ok = any(r.bold for r in sh.runs if r.text.strip())
+    if not bold_ok:
+        return _result(False, "subheading runs are not bold")
+
+    if sh_idx == 0 or (paras[sh_idx - 1].text or "").strip():
+        return _result(False, "no empty paragraph before reference subheading")
+
+    # Check source entry body-style indent
+    source_paras = [p for p in paras if "некий закон" in (p.text or "").lower()]
+    if source_paras:
+        sp = source_paras[0]
+        pPr_sp = sp._element.find(qn("w:pPr"))
+        ind_sp = pPr_sp.find(qn("w:ind")) if pPr_sp is not None else None
+        if ind_sp is None:
+            return _result(False, "source entry has no w:ind")
+        left_v = ind_sp.get(qn("w:left"))
+        first_line_v = ind_sp.get(qn("w:firstLine"))
+        hang_v = ind_sp.get(qn("w:hanging"))
+        if left_v not in {None, "0"}:
+            return _result(False, f"source entry left={left_v!r} (expected 0)")
+        if not first_line_v or abs(int(first_line_v) - 709) > 60:
+            return _result(False, f"source entry firstLine={first_line_v!r} (expected ≈709)")
+        if hang_v is not None:
+            return _result(False, f"source entry hanging={hang_v!r} (expected absent)")
+
+    return _result(True, "reference subheading: centred, bold, blank before; source body indent OK")
+
+
+def test_t4_citation_brackets_split() -> tuple[bool, str]:
+    """
+    Multi-source citation brackets split; single-source with page range get hyphen→en-dash.
+    p. notation is supported. Single page [5, с. 12] unchanged.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _split_citation_brackets_in_text
+
+    cases = [
+        # Multi-source split
+        ("[21, с. 30–45, 22, с. 21–33, 5, с. 3–8, 10]",
+         "[21, с. 30–45], [22, с. 21–33], [5, с. 3–8], [10]"),
+        ("[12; 13; 5]",      "[12], [13], [5]"),
+        ("[21, 22]",         "[21], [22]"),
+        # Single source — unchanged (but hyphen normalized)
+        ("[21, с. 30–45]",   "[21, с. 30–45]"),
+        ("[10]",             "[10]"),
+        # Hyphen → en-dash in single source range
+        ("[5, с. 12-15]",    "[5, с. 12–15]"),
+        ("[5, с. 12–15]",    "[5, с. 12–15]"),
+        # Single page (no range)
+        ("[5, с. 12]",       "[5, с. 12]"),
+        # p. notation → с. in output
+        ("[5, p. 12-15]",    "[5, с. 12–15]"),
+        ("[5, p. 12]",       "[5, с. 12]"),
+        # Mixed in sentence
+        ("по данным [21, 22], а также [5, с. 3–8, 10]",
+         "по данным [21], [22], а также [5, с. 3–8], [10]"),
+    ]
+    failures = []
+    for inp, expected in cases:
+        got = _split_citation_brackets_in_text(inp)
+        if got != expected:
+            failures.append(f"Input:    {inp!r}\nExpected: {expected!r}\nGot:      {got!r}")
+    if failures:
+        return _result(False, "\n\n".join(failures))
+    return _result(True, f"all {len(cases)} citation cases correct")
+
+
+def test_t5_list_formatting() -> tuple[bool, str]:
+    """
+    Numeric list items (1)/1.) after a colon-ending paragraph become а)/б)/в).
+    Level-1 items get left=906 hanging=198. Level-2 items get left=963 hanging=198.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    intro = doc.add_paragraph("Выделяют следующие виды:")
+    p1 = doc.add_paragraph("1) первый вид")
+    p2 = doc.add_paragraph("2) второй вид")
+    p3 = doc.add_paragraph("3) третий вид")
+
+    _normalize_plain_list_paragraphs([intro, p1, p2, p3])
+
+    if not p1.text.startswith("а)"):
+        return _result(False, f"p1 not converted: {p1.text!r}")
+    if not p2.text.startswith("б)"):
+        return _result(False, f"p2 not converted: {p2.text!r}")
+    if not p3.text.startswith("в)"):
+        return _result(False, f"p3 not converted: {p3.text!r}")
+
+    pPr = p1._element.find(qn("w:pPr"))
+    ind = pPr.find(qn("w:ind")) if pPr is not None else None
+    if ind is None:
+        return _result(False, "no w:ind on level-1 item")
+    left = ind.get(qn("w:left"))
+    hang = ind.get(qn("w:hanging"))
+    if left != "906" or hang != "198":
+        return _result(False, f"wrong indent: left={left}, hanging={hang} (expected 906/198)")
+
+    return _result(True, "list items converted and indented correctly ✓")
+
+
+def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
+    """
+    Figure captions require exactly one blank before the caption, but no blank
+    between the caption and its Источник line. Formatter-created blanks use
+    body font size.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        ensure_single_blank_before_figure_captions,
+        remove_empty_between_figure_caption_and_source,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Текст перед рисунком.")
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+    doc.add_paragraph("")
+    doc.add_paragraph("Источник: составлено автором.")
+
+    ensure_single_blank_before_figure_captions(doc, 0)
+    remove_empty_between_figure_caption_and_source(doc, 0)
+
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "Текст перед рисунком.",
+        "",
+        "Рис. 1.2.1. Схема процесса",
+        "Источник: составлено автором.",
+    ]
+    if texts != expected:
+        return _result(False, f"unexpected paragraph layout: {texts!r}")
+
+    blank = doc.paragraphs[1]
+    run = blank.runs[0] if blank.runs else None
+    if run is None:
+        return _result(False, "blank paragraph has no run")
+
+    sz = run._element.get_or_add_rPr().find(qn("w:sz"))
+    if sz is None or sz.get(qn("w:val")) != "28":
+        val = sz.get(qn("w:val")) if sz is not None else None
+        return _result(False, f"blank font size is {val}, expected 28 half-points")
+
+    return _result(True, "figure spacing and blank font are correct")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -551,6 +859,13 @@ def run_all() -> None:
         ("B3 | footnote para: 10pt TNR no bold",       test_b3_format_footnote_para_applies_10pt_tnr),
         ("C2 | empty para image→caption removed",      test_c2_empty_para_between_image_and_caption_removed),
         ("C2 | numeric column minimum protected",      test_c2_number_column_minimum),
+        ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
+        ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
+        ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
+        ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
+        ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
+        ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
+        ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
     ]
 
     for asset in ASSET_FILES:

@@ -19,6 +19,11 @@ from telegram.request import HTTPXRequest
 from db import Base, SessionLocal, engine
 import models  # noqa: F401
 from models import Document, FormattingRequest, User
+from keyboards import (
+    get_action_inline_keyboard,
+    get_check_result_inline_keyboard,
+    get_referral_progress_inline_keyboard,
+)
 import services
 
 
@@ -53,9 +58,9 @@ def get_bot_token() -> str:
     return token
 
 
-async def send_text(bot_token: str, chat_id: int, text: str) -> None:
+async def send_text(bot_token: str, chat_id: int, text: str, reply_markup=None) -> None:
     bot = Bot(token=bot_token)
-    await bot.send_message(chat_id=chat_id, text=text)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
 
 
 async def send_document(
@@ -397,6 +402,74 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             )
             return False
 
+        if request.service_type == "check":
+            logger.info(
+                "check_stub_start request_id=%s user_id=%s input_path=%s",
+                request.id,
+                user.id,
+                input_path,
+            )
+            logger.info(
+                "referral_check_upload_seen invited_user_id=%s invited_telegram_id=%s",
+                user.id,
+                user.telegram_id,
+            )
+
+            problems: list[str] = []
+            request.status = "done"
+            request.result_file_path = None
+            request.error_message = None
+            request.completed_at = utcnow_naive()
+            db.commit()
+
+            services.track_event(
+                db,
+                event_name="check_completed",
+                user_id=user.id,
+                source="worker",
+                payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
+            )
+
+            inviter_user_id = services.grant_referral_upload_bonus_if_needed(db, user.id)
+            if inviter_user_id:
+                inviter = (
+                    db.query(User)
+                    .filter(User.id == inviter_user_id)
+                    .first()
+                )
+                if inviter:
+                    bonus_text = services.build_referral_upload_bonus_awarded_text()
+                    try:
+                        asyncio.run(
+                            send_text(
+                                bot_token=bot_token,
+                                chat_id=inviter.telegram_id,
+                                text=bonus_text,
+                                reply_markup=get_referral_progress_inline_keyboard(),
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "referral_upload_bonus_notification_failed inviter_user_id=%s",
+                            inviter.id,
+                        )
+
+            asyncio.run(
+                send_text(
+                    bot_token=bot_token,
+                    chat_id=user.telegram_id,
+                    text=services.build_check_result_text(problems),
+                    reply_markup=get_check_result_inline_keyboard(),
+                )
+            )
+
+            logger.info("check_stub_done request_id=%s user_id=%s", request.id, user.id)
+
+            if input_path and input_path.exists():
+                services.cleanup_temp_files(input_path)
+
+            return True
+
         guide_code = services.get_user_selected_guide_code(user)
         output_path = build_worker_output_path(request.id, document.original_filename)
 
@@ -430,30 +503,6 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             payload_json=f'{{"request_id": {request.id}, "document_id": {document.id}}}',
         )
 
-        inviter_user_id = services.grant_referral_upload_bonus_if_needed(db, user.id)
-
-        if inviter_user_id:
-            inviter = db.query(User).filter(User.id == inviter_user_id).first()
-            if inviter:
-                inviter_balance = services.get_user_credit_balance(db, inviter.id)
-                bonus_text = services.build_referral_bonus_notification_text(
-                    balance=inviter_balance,
-                    trigger="upload",
-            )
-                try:
-                    asyncio.run(
-                        send_referral_bonus_notification(
-                            bot_token=bot_token,
-                            inviter_telegram_id=inviter.telegram_id,
-                            text=bonus_text,
-                        )
-                    )
-                except Exception:
-                    logger.exception(
-                        "referral_upload_bonus_notification_failed inviter_user_id=%s",
-                        inviter.id,
-                    )
-
         logger.info(
             "formatting_done request_id=%s user_id=%s output_path=%s",
             request.id,
@@ -461,15 +510,9 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             output_path,
         )
 
-        caption = (
-            "Готово — курсовая оформлена.\n\n"
-            "Быстро проверь 3 вещи перед отправкой преподавателю:\n"
-            "• не повисли ли внизу страницы заголовки или подписи таблиц\n"
-            "• есть ли «Продолжение таблицы X.Y.Z», если таблица перенеслась\n"
-            "• не осталось ли явно пустых верхних строк страницы\n\n"
-            "Если хочешь, можешь сразу отправить следующий .docx-файл.\n\n"
-            "Если у тебя есть одногруппники, которые тоже сдают курсовую — скинь им бота по рефералке.\n\n"
-            "Ты получишь +1 оформление, когда они загрузят файл."
+        caption = services.build_format_success_caption(
+            services.get_bot_username_fallback(),
+            user,
         )
         # Warnings are sent as a separate text message AFTER the document
         # (Telegram document captions are limited to 1024 chars; text messages
@@ -484,6 +527,14 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 output_path.name,
                 caption,
                 warnings=formatting_warnings or None,
+            )
+        )
+        asyncio.run(
+            send_text(
+                bot_token=bot_token,
+                chat_id=user.telegram_id,
+                text="Что дальше сделать?",
+                reply_markup=get_action_inline_keyboard(),
             )
         )
 

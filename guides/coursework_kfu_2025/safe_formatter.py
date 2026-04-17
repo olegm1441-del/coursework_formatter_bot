@@ -2,6 +2,7 @@
 import re
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Pt
 FORMULA_NUMBER_RE = re.compile(r"\((\d+\.\d+\.\d+|\d+\.\d+)\)\s*$")
 FORMULA_EXPLANATION_RE = re.compile(r"^\s*где\b", re.IGNORECASE)
@@ -551,6 +552,10 @@ FIG_RE = re.compile(
     r"^\s*(рисунок|рис\.)\s*(\d+(?:\.\d+){0,2})(?:\s*[.\-—–]?\s*(.+?))?\s*$",
     re.IGNORECASE,
 )
+FIG_SERVICE_LINE_RE = re.compile(
+    r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:",
+    re.IGNORECASE,
+)
 HEADING2_ARTIFACT_RE = re.compile(r"^\s*[•·▪■◆►→\-–—]*\s*(\d+\.\d+\.?)\s*[•·▪■◆►→\-–—]*\s*(.+?)\s*$")
 
 TABLE_CONTINUATION_RE = re.compile(r"^\s*продолжение\s+табл(?:ицы)?\.?\s*\d+(?:\.\d+){1,2}\.?\s*$", re.IGNORECASE)
@@ -573,9 +578,18 @@ REFERENCE_SUBHEADINGS_CANON = {
     "статистические материалы": "Статистические материалы",
     "справочные и архивные материалы": "Справочные и архивные материалы",
     "монографии и статьи": "Монографии и статьи",
+    "монографии и учебники": "Монографии и учебники",
     "учебники, учебные пособия и материалы": "Учебники, учебные пособия и материалы",
     "электронные ресурсы": "Электронные ресурсы",
     "материалы на иностранных языках": "Материалы на иностранных языках",
+    "нормативные правовые акты": "Нормативные правовые акты",
+    "монографии, учебники": "Монографии, учебники",
+    "монографии, учебники, учебные пособия": "Монографии, учебники, учебные пособия",
+    "статьи": "Статьи",
+    "статьи в периодических изданиях и сборниках": "Статьи в периодических изданиях и сборниках",
+    "диссертации": "Диссертации",
+    "диссертации, авторефераты диссертаций": "Диссертации, авторефераты диссертаций",
+    "материалы интернет-сайтов": "Материалы интернет-сайтов",
 }
 
 
@@ -643,6 +657,13 @@ def center_image_paragraphs(document, body_start):
 def is_empty_paragraph(paragraph):
     return clean_spaces(paragraph.text) == "" and not paragraph_has_drawing(paragraph)
 
+
+def is_reference_spacing_paragraph(paragraph):
+    return (
+        clean_spaces(paragraph.text) == ""
+        and not paragraph._element.findall(".//" + qn("w:drawing"))
+    )
+
 def ensure_empty_run(paragraph):
     if not paragraph.runs:
         paragraph.add_run("")
@@ -678,18 +699,31 @@ def force_paragraph_xml_spacing(paragraph, line_rule="auto"):
 
 
 def hard_reset_paragraph_format(paragraph, first_line_indent_cm=None):
+    # Explicitly nuke any existing w:ind to prevent stale hanging/left attributes
+    # from paragraph styles (e.g. List Paragraph) overriding our settings.
+    _pPr = paragraph._element.find(qn("w:pPr"))
+    if _pPr is not None:
+        for _old_ind in list(_pPr.findall(qn("w:ind"))):
+            _pPr.remove(_old_ind)
+
     force_paragraph_xml_spacing(paragraph, line_rule="auto")
     fmt = paragraph.paragraph_format
     fmt.space_before = Pt(0)
     fmt.space_after = Pt(0)
     fmt.line_spacing = LINE_SPACING_BODY
-    fmt.left_indent = Cm(0)
-    fmt.right_indent = Cm(0)
 
-    if first_line_indent_cm is None:
-        fmt.first_line_indent = Cm(0)
-    else:
-        fmt.first_line_indent = Cm(first_line_indent_cm)
+    # Write w:ind directly to guarantee w:left="0" is in XML (not just "default").
+    # We include w:right="0" here instead of using fmt.right_indent to avoid
+    # python-docx creating a second w:ind element.
+    _pPr2 = paragraph._element.get_or_add_pPr()
+    _ind = OxmlElement("w:ind")
+    _ind.set(qn("w:left"), "0")
+    _ind.set(qn("w:right"), "0")
+    if first_line_indent_cm:
+        # 1.25 cm = 709 twips (1 inch = 2.54 cm = 1440 twips → 1 cm = 566.9 twips)
+        _twips = round(first_line_indent_cm * 1440 / 2.54)
+        _ind.set(qn("w:firstLine"), str(_twips))
+    _pPr2.append(_ind)
 
     fmt.keep_together = False
     fmt.keep_with_next = False
@@ -864,12 +898,8 @@ _WORD_RE = re.compile(r'[А-ЯЁа-яё]+')
 
 
 def normalize_yo_in_text(text: str) -> str:
-    def replace_word(m):
-        word = m.group(0)
-        if word[0].isupper():
-            return word
-        return word.replace('ё', 'е')
-    return _WORD_RE.sub(replace_word, text)
+    """Replace lowercase ё with е. Capital Ё is preserved (Python replace is case-sensitive)."""
+    return text.replace('ё', 'е')
 
 
 def normalize_yo_in_runs(paragraph):
@@ -912,21 +942,296 @@ def normalize_semicolons_in_document(document, body_start):
                 run.text = run.text.replace(';', ',')
 
 
+# ── Source citation bracket splitting ────────────────────────────────────────
+_CITATION_ENTRY_RE = re.compile(
+    r'(\d+)(?:\s*[,;]\s*(?:с\.?|p\.?)\s*(\d+(?:\s*[–\-—]\s*\d+)?))?',
+    re.IGNORECASE
+)
+_BRACKET_GROUP_RE = re.compile(r'\[([^\]]+)\]')
+
+
+def _parse_citation_content(content: str) -> list[str]:
+    """
+    Parse inner content of a citation bracket into individual source strings.
+    Handles both с. and p. page markers, semicolon separators.
+    """
+    # Normalise semicolons to commas
+    content = content.replace(';', ',')
+    entries = []
+    pos = 0
+    s = content.strip()
+
+    while pos < len(s):
+        skip = re.match(r'[\s,]+', s[pos:])
+        if skip:
+            pos += skip.end()
+        if pos >= len(s):
+            break
+
+        m = _CITATION_ENTRY_RE.match(s, pos)
+        if not m:
+            return [s.strip()]  # unrecognised — return as single entry
+
+        num = m.group(1)
+        pages = m.group(2)
+        if pages:
+            # Normalise hyphen/em-dash to en-dash
+            pages_norm = re.sub(r'\s*[\-—]\s*', '–', pages.strip())
+            entries.append(f"{num}, с. {pages_norm}")
+        else:
+            entries.append(num)
+        pos = m.end()
+
+    return entries if entries else [s.strip()]
+
+
+def _split_citation_brackets_in_text(text: str) -> str:
+    """
+    Find all [...] citation groups and split multi-source ones.
+    Also normalises hyphens to en-dashes in page ranges within single-source citations.
+    """
+    def replace_bracket(m):
+        content = m.group(1)
+        entries = _parse_citation_content(content)
+        if len(entries) <= 1:
+            # Single source — just normalise hyphen in page range if present
+            if entries:
+                return f"[{entries[0]}]"
+            return m.group(0)
+        return ', '.join(f'[{e}]' for e in entries)
+
+    return _BRACKET_GROUP_RE.sub(replace_bracket, text)
+
+
+def normalize_citations_in_paragraph_runs(paragraph):
+    """Apply citation bracket splitting to all runs in a paragraph."""
+    for run in paragraph.runs:
+        if '[' in run.text:
+            new_text = _split_citation_brackets_in_text(run.text)
+            if new_text != run.text:
+                run.text = new_text
+
+
+def normalize_citations_in_document(document, body_start):
+    """
+    Split multi-source citation brackets in all body paragraphs.
+    Skips the references block.
+    """
+    in_references = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+            continue
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+        if in_references:
+            continue
+        if '[' in (paragraph.text or ''):
+            normalize_citations_in_paragraph_runs(paragraph)
+
+
+# ── List formatting (Level 1: а/б/в, Level 2: 1/2/3) ─────────────────────────
+
+_CYRILLIC_LIST_ALPHA = 'абвгдежзиклмнопрстуфхцчшщэюя'
+_CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яё])\)\s+(.+)$', re.DOTALL)
+_NUMERIC_PAREN_LIST_RE   = re.compile(r'^(\d+)\)\s+(.+)$',   re.DOTALL)
+_NUMERIC_DOT_LIST_RE     = re.compile(r'^(\d+)\.\s+(.+)$',   re.DOTALL)
+
+
+def _is_level1_list_text(text: str) -> bool:
+    t = clean_spaces(text)
+    return bool(
+        _CYRILLIC_LETTER_LIST_RE.match(t)
+        or _NUMERIC_PAREN_LIST_RE.match(t)
+        or _NUMERIC_DOT_LIST_RE.match(t)
+    )
+
+
+def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
+    """Set list hanging indent directly via XML."""
+    pPr = paragraph._element.get_or_add_pPr()
+    for old in list(pPr.findall(qn("w:ind"))):
+        pPr.remove(old)
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"),    str(left_twips))
+    ind.set(qn("w:hanging"), str(hanging_twips))
+    ind.set(qn("w:right"),   "0")
+    pPr.append(ind)
+
+
+def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
+    """Format a paragraph as level-1 Cyrillic list item."""
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    replace_paragraph_text(paragraph, f"{letter}) {body_text}")
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _format_level2_list_item(paragraph, number: int, body_text: str):
+    """Format a paragraph as level-2 (1)/2)/3)) list item."""
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    replace_paragraph_text(paragraph, f"{number}) {body_text}")
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    _apply_list_indent_xml(paragraph, left_twips=963, hanging_twips=198)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _normalize_plain_list_paragraphs(paragraphs: list):
+    """
+    Detect and reformat plain-text list items in a sequence of paragraphs.
+    A list context is triggered by a paragraph ending with ':'.
+    """
+    in_list = False
+    level1_counter = 0
+    level2_counter = 0
+    prev_was_level1 = False
+    prev_was_level2 = False
+
+    for p in paragraphs:
+        text = clean_spaces(p.text)
+        if not text:
+            in_list = False
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+            continue
+
+        if text.endswith(':') and not _is_level1_list_text(text):
+            in_list = True
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+            continue
+
+        if not in_list:
+            continue
+
+        m_cyr      = _CYRILLIC_LETTER_LIST_RE.match(text)
+        m_num_paren = _NUMERIC_PAREN_LIST_RE.match(text)
+        m_num_dot   = _NUMERIC_DOT_LIST_RE.match(text)
+
+        if m_cyr:
+            body = m_cyr.group(2).strip()
+            letter = _CYRILLIC_LIST_ALPHA[level1_counter] if level1_counter < len(_CYRILLIC_LIST_ALPHA) else m_cyr.group(1)
+            _format_cyrillic_list_item(p, letter, body)
+            level1_counter += 1
+            level2_counter = 0
+            prev_was_level1 = True
+            prev_was_level2 = False
+
+        elif m_num_paren or m_num_dot:
+            m = m_num_paren or m_num_dot
+            body = m.group(2).strip()
+            num = int(m.group(1))
+
+            if prev_was_level1 and num == 1:
+                level2_counter = 1
+                _format_level2_list_item(p, level2_counter, body)
+                prev_was_level1 = False
+                prev_was_level2 = True
+            elif prev_was_level2:
+                level2_counter += 1
+                _format_level2_list_item(p, level2_counter, body)
+            else:
+                letter_idx = level1_counter
+                letter = _CYRILLIC_LIST_ALPHA[letter_idx] if letter_idx < len(_CYRILLIC_LIST_ALPHA) else str(level1_counter + 1)
+                _format_cyrillic_list_item(p, letter, body)
+                level1_counter += 1
+                level2_counter = 0
+                prev_was_level1 = True
+                prev_was_level2 = False
+        else:
+            in_list = False
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+
+
+def normalize_plain_lists_in_document(document, body_start):
+    """Normalise plain-text list items in the document body. Skips references block."""
+    in_ref = False
+    body_paras = []
+    for idx, p in enumerate(document.paragraphs):
+        if idx < (body_start or 0):
+            continue
+        t = clean_spaces(p.text)
+        if is_references_heading_text(t):
+            in_ref = True
+        if in_ref and is_appendix_heading_text(t):
+            in_ref = False
+        if not in_ref:
+            body_paras.append(p)
+
+    _normalize_plain_list_paragraphs(body_paras)
+
+
 def canonical_reference_subheading_text(text: str):
     t = clean_spaces(text)
     if not t:
         return None
 
-    t = re.sub(r'^\s*[•·▪■◆►→\-–—]+\s*', '', t)
-    t = re.sub(r'^\s*\d+\.\s*', '', t)
-    t = clean_spaces(t)
-
     return REFERENCE_SUBHEADINGS_CANON.get(t.lower())
+
+
+def canonical_numbered_reference_subheading_text(text: str):
+    t = clean_spaces(text)
+    match = re.match(r"^\s*\d+\.\s+(.+)$", t)
+    if not match:
+        return None
+
+    return canonical_reference_subheading_text(match.group(1))
+
+
+def canonical_reference_block_heading_text(text: str):
+    return (
+        canonical_reference_subheading_text(text)
+        or canonical_numbered_reference_subheading_text(text)
+    )
 
 
 
 # ===== Reference list case normalization =====
 _REF_URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+_PLAIN_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
 _REF_TOKEN_RE = re.compile(r'([A-Za-zА-ЯЁа-яё]+(?:[-–—][A-Za-zА-ЯЁа-яё]+)*)')
 _REF_ACRONYM_KEEP = {
     'ФНС', 'РФ', 'РБК', 'ТТС', 'ЭДО', 'СЭД', 'СМК', 'ГОСТ', 'ИСО', 'ЕС', 'АО', 'ООО', 'ПАО',
@@ -1002,6 +1307,15 @@ def smart_normalize_reference_line_case(text: str) -> str:
         body = body.replace(f'__REFURL{i}__', url)
 
     return f'{prefix}{body}' if prefix else body
+
+
+def normalize_reference_url_spacing(text: str) -> str:
+    return re.sub(
+        r"(https?://[^\s]+?)\s*\((дата\s+обращения)",
+        r"\1 (\2",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 def strip_leading_heading_garbage(text: str) -> str:
     t = clean_spaces(text)
@@ -1177,6 +1491,17 @@ def format_body(paragraph, preserve_numbering=False):
 
         paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
+        # Even numbered paragraphs need correct indent (body indent, not list hanging)
+        _pPr_n = paragraph._element.find(qn("w:pPr"))
+        if _pPr_n is not None:
+            for _oi in list(_pPr_n.findall(qn("w:ind"))):
+                _pPr_n.remove(_oi)
+        _pPr_n2 = paragraph._element.get_or_add_pPr()
+        _ind_n = OxmlElement("w:ind")
+        _ind_n.set(qn("w:left"), "0")
+        _ind_n.set(qn("w:firstLine"), "709")
+        _pPr_n2.append(_ind_n)
+
         for run in paragraph.runs:
             set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
         return
@@ -1190,6 +1515,109 @@ def format_body(paragraph, preserve_numbering=False):
 
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+
+
+def _append_hyperlink_run(paragraph, url: str) -> None:
+    rel_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), rel_id)
+
+    run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+
+    rFonts = OxmlElement("w:rFonts")
+    rFonts.set(qn("w:ascii"), FONT_NAME)
+    rFonts.set(qn("w:hAnsi"), FONT_NAME)
+    rFonts.set(qn("w:cs"), FONT_NAME)
+    rFonts.set(qn("w:eastAsia"), FONT_NAME)
+    rPr.append(rFonts)
+
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "000000")
+    rPr.append(color)
+
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "none")
+    rPr.append(underline)
+
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), str(int(BODY_FONT_SIZE_PT * 2)))
+    rPr.append(size)
+
+    size_cs = OxmlElement("w:szCs")
+    size_cs.set(qn("w:val"), str(int(BODY_FONT_SIZE_PT * 2)))
+    rPr.append(size_cs)
+
+    run.append(rPr)
+    text_el = OxmlElement("w:t")
+    text_el.text = url
+    run.append(text_el)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def add_plain_url_hyperlinks(paragraph) -> bool:
+    text = paragraph.text
+    matches = list(_PLAIN_URL_RE.finditer(text))
+    if not matches:
+        return False
+
+    p = paragraph._element
+    for child in list(p):
+        if child.tag.endswith("}r") or child.tag.endswith("}hyperlink"):
+            p.remove(child)
+
+    pos = 0
+    for match in matches:
+        url = match.group(0)
+        trailing = ""
+        while url and url[-1] in ".,;":
+            trailing = url[-1] + trailing
+            url = url[:-1]
+
+        start = match.start()
+        end = match.start() + len(url)
+        if start > pos:
+            paragraph.add_run(text[pos:start])
+
+        _append_hyperlink_run(paragraph, url)
+        if trailing:
+            paragraph.add_run(trailing)
+        pos = match.end()
+
+    if pos < len(text):
+        paragraph.add_run(text[pos:])
+
+    return True
+
+
+def format_reference_entry(paragraph) -> None:
+    text = normalize_reference_url_spacing(clean_spaces(paragraph.text))
+    if text != paragraph.text:
+        replace_paragraph_text(paragraph, text)
+
+    format_body(paragraph)
+    paragraph.paragraph_format.left_indent = Cm(0)
+    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
+
+    pPr = paragraph._element.get_or_add_pPr()
+    for old_tabs in list(pPr.findall(qn("w:tabs"))):
+        pPr.remove(old_tabs)
+    for old_ind in list(pPr.findall(qn("w:ind"))):
+        pPr.remove(old_ind)
+
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:right"), "0")
+    ind.set(qn("w:firstLine"), "709")
+    pPr.append(ind)
+
+    add_plain_url_hyperlinks(paragraph)
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+
+
 NUMERIC_NUM_FMTS = {"decimal", "decimalZero", "ordinal", "decimalEnclosedParen", "decimalEnclosedCircle"}
 
 BULLET_CHARS_RE = re.compile(r'^[•·▪■◆►→◦●○\u2013\u2014\-]+\s*')
@@ -1380,14 +1808,25 @@ def format_reference_subheading(paragraph):
     clear_paragraph_outline_level(paragraph)
     remove_paragraph_numbering(paragraph)
 
-    paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
+    paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.left_indent = Cm(0)
     paragraph.paragraph_format.right_indent = Cm(0)
     paragraph.paragraph_format.page_break_before = False
-    paragraph.paragraph_format.keep_with_next = False
+    paragraph.paragraph_format.keep_with_next = True
     paragraph.paragraph_format.keep_together = False
     paragraph.paragraph_format.widow_control = False
+
+    # Remove any firstLine/hanging indent via direct XML
+    _pPr = paragraph._element.get_or_add_pPr()
+    for _oi in list(_pPr.findall(qn("w:ind"))):
+        _pPr.remove(_oi)
+    _ind = OxmlElement("w:ind")
+    _ind.set(qn("w:left"), "0")
+    _ind.set(qn("w:firstLine"), "0")
+    _pPr.append(_ind)
+
+    # 1.5x line spacing
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
     for run in paragraph.runs:
         set_run_font(
@@ -2159,7 +2598,7 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
         text = clean_spaces(paragraph.text)
         low = text.lower()
-        canonical = canonical_reference_subheading_text(text)
+        canonical = canonical_reference_block_heading_text(text)
 
         if low in {
             "список использованных источников",
@@ -2213,9 +2652,9 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         normalized = f"{ref_counter}. {clean}"
         ref_counter += 1
 
-        normalized = smart_normalize_reference_line_case(normalized)
+        normalized = smart_normalize_reference_line_case(normalize_reference_url_spacing(normalized))
         replace_paragraph_text(paragraph, normalized)
-        format_body(paragraph)
+        format_reference_entry(paragraph)
 
 def compact_references_block(document, body_start):
     changed = True
@@ -2231,7 +2670,7 @@ def compact_references_block(document, body_start):
 
             text = clean_spaces(p.text)
             low = text.lower()
-            canonical = canonical_reference_subheading_text(text)
+            canonical = canonical_reference_block_heading_text(text)
 
             if is_references_heading_text(text):
                 in_references = True
@@ -2244,11 +2683,22 @@ def compact_references_block(document, body_start):
                 in_references = False
                 continue
 
-            # Полностью убираем пустые абзацы внутри блока литературы
+            # Полностью убираем пустые абзацы внутри блока литературы,
+            # но сохраняем один пустой абзац прямо перед подзаголовком раздела.
             if is_empty_paragraph(p):
-                remove_paragraph(p)
-                changed = True
-                break
+                # Peek ahead: keep blank if next non-empty para is a subheading
+                next_nonempty = None
+                for _np in paragraphs[idx + 1:]:
+                    _nt = clean_spaces(_np.text)
+                    if _nt:
+                        next_nonempty = _nt
+                        break
+                if next_nonempty and canonical_reference_block_heading_text(next_nonempty):
+                    pass  # keep the blank
+                else:
+                    remove_paragraph(p)
+                    changed = True
+                    break
 
             # Сначала снимаем весь мусор разрывов / списков / заголовков
             remove_page_break_artifacts_from_paragraph(p)
@@ -2279,12 +2729,12 @@ def compact_references_block(document, body_start):
             else:
                 normalized = clean
 
-            normalized = smart_normalize_reference_line_case(normalized)
+            normalized = smart_normalize_reference_line_case(normalize_reference_url_spacing(normalized))
 
             if clean != normalized:
                 replace_paragraph_text(p, normalized)
 
-            format_body(p)
+            format_reference_entry(p)
 
             # Финальный добивающий reset именно после format_body
             p.paragraph_format.page_break_before = False
@@ -2317,7 +2767,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
 
             next_p = paragraphs[idx + 1]
 
-            if not is_empty_paragraph(next_p):
+            if not is_reference_spacing_paragraph(next_p):
                 new_p = insert_paragraph_after(p, "")
                 format_empty_paragraph(new_p)
                 changed = True
@@ -2325,7 +2775,7 @@ def ensure_single_blank_after_references_heading(document, body_start):
                 break
 
             # если пустых строк больше одной — удаляем лишние
-            while idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 2]):
+            while idx + 2 < len(paragraphs) and is_reference_spacing_paragraph(paragraphs[idx + 2]):
                 remove_paragraph(paragraphs[idx + 2])
                 paragraphs = document.paragraphs
                 changed = True
@@ -2335,7 +2785,65 @@ def ensure_single_blank_after_references_heading(document, body_start):
             break
 
     return any_changes
-    
+
+
+def ensure_blank_before_reference_subheadings(document, body_start):
+    """
+    Ensure exactly one blank paragraph appears immediately before each
+    reference subheading (e.g. "Официальные материалы").
+    """
+    any_changes = False
+    changed = True
+    while changed:
+        changed = False
+        in_references = False
+        paragraphs = document.paragraphs
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if not in_references:
+                continue
+
+            if is_appendix_heading_text(text):
+                in_references = False
+                continue
+
+            if not canonical_reference_block_heading_text(text):
+                continue
+
+            if idx == 0:
+                continue
+
+            prev_p = paragraphs[idx - 1]
+            if not is_reference_spacing_paragraph(prev_p):
+                new_el = OxmlElement("w:p")
+                p._element.addprevious(new_el)
+                changed = True
+                any_changes = True
+                break
+
+            while idx - 2 >= body_start and is_reference_spacing_paragraph(paragraphs[idx - 2]):
+                remove_paragraph(paragraphs[idx - 2])
+                changed = True
+                any_changes = True
+                break
+
+            if changed:
+                break
+
+            format_empty_paragraph(prev_p)
+
+    return any_changes
+
+
 def ensure_single_blank_after_headings(document, body_start):
     paragraphs = document.paragraphs
     prev_kind = None
@@ -2514,9 +3022,7 @@ def ensure_empty_after_source_and_note(document, body_start):
                     break
 
                 next_text = clean_spaces(paragraphs[idx + 1].text)
-                next_is_service = bool(
-                    re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", next_text, re.IGNORECASE)
-                )
+                next_is_service = bool(FIG_SERVICE_LINE_RE.match(next_text))
 
                 if next_is_service:
                     # Между подписью рисунка и Источником/Примечанием пустой строки быть не должно
@@ -2650,6 +3156,104 @@ def ensure_one_empty_after(paragraphs, index):
         remove_paragraph(paragraphs[index + 2])
         paragraphs = p._parent.paragraphs
         changed = True
+
+    return changed
+
+
+def ensure_single_blank_before_figure_captions(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        in_references = False
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            if in_references or not FIG_RE.match(text) or idx <= body_start:
+                continue
+
+            prev_idx = idx - 1
+            prev_p = paragraphs[prev_idx]
+
+            if paragraph_has_drawing(prev_p):
+                continue
+
+            if is_empty_paragraph(prev_p):
+                if prev_idx - 1 >= body_start and paragraph_has_drawing(paragraphs[prev_idx - 1]):
+                    remove_paragraph(prev_p)
+                    changed = True
+                    break
+
+                while prev_idx - 1 >= body_start and is_empty_paragraph(paragraphs[prev_idx - 1]):
+                    remove_paragraph(paragraphs[prev_idx - 1])
+                    changed = True
+                    break
+
+                if changed:
+                    break
+
+                format_empty_paragraph(prev_p)
+                continue
+
+            new_p = insert_paragraph_after(prev_p, "")
+            format_empty_paragraph(new_p)
+            changed = True
+            break
+
+    return changed
+
+
+def remove_empty_between_figure_caption_and_source(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        in_references = False
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            if in_references or not FIG_RE.match(text):
+                continue
+
+            j = idx + 1
+            empty_paragraphs = []
+            while j < len(paragraphs) and is_empty_paragraph(paragraphs[j]):
+                empty_paragraphs.append(paragraphs[j])
+                j += 1
+
+            if not empty_paragraphs or j >= len(paragraphs):
+                continue
+
+            next_text = clean_spaces(paragraphs[j].text)
+            if not FIG_SERVICE_LINE_RE.match(next_text):
+                continue
+
+            for blank in reversed(empty_paragraphs):
+                remove_paragraph(blank)
+            changed = True
+            break
 
     return changed
 
@@ -2912,26 +3516,25 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 in_references = False
                 continue
 
-            canonical = canonical_reference_subheading_text(text)
+            canonical = canonical_reference_block_heading_text(text)
             if canonical:
                 replace_paragraph_text(p, canonical)
                 remove_paragraph_numbering(p)
                 p.paragraph_format.page_break_before = False
                 format_reference_subheading(p)
 
-                if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                    if idx - 2 >= body_start:
-                        prev_prev_text = clean_spaces(paragraphs[idx - 2].text)
-                        if is_references_heading_text(prev_prev_text):
-                            pass
-                        else:
-                            remove_paragraph(paragraphs[idx - 1])
-                            changed = True
-                            break
-                    else:
-                        remove_paragraph(paragraphs[idx - 1])
-                        changed = True
-                        break
+                if idx - 1 < body_start or not is_reference_spacing_paragraph(paragraphs[idx - 1]):
+                    new_el = OxmlElement("w:p")
+                    p._element.addprevious(new_el)
+                    format_empty_paragraph(Paragraph(new_el, p._parent))
+                    changed = True
+                    break
+
+                format_empty_paragraph(paragraphs[idx - 1])
+                if idx - 2 >= body_start and is_reference_spacing_paragraph(paragraphs[idx - 2]):
+                    remove_paragraph(paragraphs[idx - 2])
+                    changed = True
+                    break
 
                 if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
                     remove_paragraph(paragraphs[idx + 1])
@@ -2946,8 +3549,9 @@ def format_empty_paragraph(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-    run = ensure_empty_run(paragraph)
-    set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+    ensure_empty_run(paragraph)
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
     
 def normalize_sections(document):
     """
@@ -3278,6 +3882,8 @@ def process_document(input_path: Path, output_path: Path):
     normalize_dashes_in_document(doc, body_start)
     normalize_yo_in_document(doc, body_start)
     normalize_semicolons_in_document(doc, body_start)
+    normalize_citations_in_document(doc, body_start)
+    normalize_plain_lists_in_document(doc, body_start)
     # Преднормализация только тела работы; содержание не трогаем
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
@@ -3289,6 +3895,7 @@ def process_document(input_path: Path, output_path: Path):
     prev_kind = None
     current_chapter_num = None
     next_paragraph_num = None
+    in_references = False
 
     # Основной проход по телу документа
     for idx, paragraph in enumerate(doc.paragraphs):
@@ -3296,8 +3903,24 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         text = clean_spaces(paragraph.text)
+        if is_references_heading_text(text):
+            in_references = True
+        elif in_references and is_appendix_heading_text(text):
+            in_references = False
+
         if not text:
             prev_kind = "empty_paragraph"
+            continue
+
+        if in_references and not is_references_heading_text(text):
+            canonical = canonical_reference_block_heading_text(text)
+            if canonical:
+                replace_paragraph_text(paragraph, canonical)
+                format_reference_subheading(paragraph)
+                prev_kind = "reference_subheading"
+            else:
+                format_reference_entry(paragraph)
+                prev_kind = "body_text"
             continue
 
         text = strip_leading_heading_garbage(text)
@@ -3441,7 +4064,7 @@ def process_document(input_path: Path, output_path: Path):
         elif kind == "body_list_item":
             format_body_list_item(paragraph)
         elif kind == "reference_subheading":
-            canonical = canonical_reference_subheading_text(text)
+            canonical = canonical_reference_block_heading_text(text)
             if canonical:
                 replace_paragraph_text(paragraph, canonical)
             format_reference_subheading(paragraph)
@@ -3475,6 +4098,13 @@ def process_document(input_path: Path, output_path: Path):
     )
 
     run_with_pass_limit(
+        "ensure_blank_before_reference_subheadings",
+        ensure_blank_before_reference_subheadings,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
         "ensure_single_blank_after_references_heading",
         ensure_single_blank_after_references_heading,
         doc,
@@ -3493,6 +4123,20 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "ensure_empty_before_table_caption",
         ensure_empty_before_table_caption,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "ensure_single_blank_before_figure_captions",
+        ensure_single_blank_before_figure_captions,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "remove_empty_between_figure_caption_and_source",
+        remove_empty_between_figure_caption_and_source,
         doc,
         body_start,
     )
@@ -3543,6 +4187,7 @@ def process_document(input_path: Path, output_path: Path):
     # Финальный жёсткий проход:
     # добиваем заголовки, таблицы и обычный текст уже после всех структурных вставок/удалений
     prev_nonempty_kind = None
+    _final_in_references = False
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
             continue
@@ -3554,8 +4199,24 @@ def process_document(input_path: Path, output_path: Path):
             continue
         text = clean_spaces(paragraph.text)
 
+        if is_references_heading_text(text):
+            _final_in_references = True
+        elif is_appendix_heading_text(text):
+            _final_in_references = False
+
         if not text:
             format_empty_paragraph(paragraph)
+            continue
+
+        if _final_in_references and not is_references_heading_text(text):
+            canonical = canonical_reference_block_heading_text(text)
+            if canonical:
+                replace_paragraph_text(paragraph, canonical)
+                format_reference_subheading(paragraph)
+                prev_nonempty_kind = "reference_subheading"
+            else:
+                format_reference_entry(paragraph)
+                prev_nonempty_kind = "body_text"
             continue
 
         text = strip_leading_heading_garbage(text)
@@ -3643,6 +4304,11 @@ def process_document(input_path: Path, output_path: Path):
     # Стандартизация сносок: TNR 10pt, без полужирного, одинарный интервал
     _format_footnotes(doc)
 
+    run_with_pass_limit(
+        "ensure_single_blank_after_references_heading_final",
+        ensure_single_blank_after_references_heading,
+        doc,
+        body_start,
+    )
+
     doc.save(str(output_path))
-
-
