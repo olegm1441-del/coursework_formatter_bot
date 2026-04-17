@@ -651,7 +651,8 @@ def test_t3_reference_subheading_centred() -> tuple[bool, str]:
     """
     After formatting, reference section headers must be CENTER aligned, bold,
     preceded by exactly one empty paragraph.
-    Source entries must have hanging indent (left≈851, hanging≈709 twips).
+    Source entries must use regular body-style indentation:
+    left=0, firstLine≈709 twips, no hanging indent.
     """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
@@ -703,7 +704,7 @@ def test_t3_reference_subheading_centred() -> tuple[bool, str]:
     if sh_idx == 0 or (paras[sh_idx - 1].text or "").strip():
         return _result(False, "no empty paragraph before reference subheading")
 
-    # Check source entry hanging indent
+    # Check source entry body-style indent
     source_paras = [p for p in paras if "некий закон" in (p.text or "").lower()]
     if source_paras:
         sp = source_paras[0]
@@ -712,13 +713,16 @@ def test_t3_reference_subheading_centred() -> tuple[bool, str]:
         if ind_sp is None:
             return _result(False, "source entry has no w:ind")
         left_v = ind_sp.get(qn("w:left"))
+        first_line_v = ind_sp.get(qn("w:firstLine"))
         hang_v = ind_sp.get(qn("w:hanging"))
-        if not left_v or abs(int(left_v) - 851) > 60:
-            return _result(False, f"source entry left={left_v!r} (expected ≈851)")
-        if not hang_v or abs(int(hang_v) - 709) > 60:
-            return _result(False, f"source entry hanging={hang_v!r} (expected ≈709)")
+        if left_v not in {None, "0"}:
+            return _result(False, f"source entry left={left_v!r} (expected 0)")
+        if not first_line_v or abs(int(first_line_v) - 709) > 60:
+            return _result(False, f"source entry firstLine={first_line_v!r} (expected ≈709)")
+        if hang_v is not None:
+            return _result(False, f"source entry hanging={hang_v!r} (expected absent)")
 
-    return _result(True, "reference subheading: centred, bold, blank before; source indent OK")
+    return _result(True, "reference subheading: centred, bold, blank before; source body indent OK")
 
 
 def test_t4_citation_brackets_split() -> tuple[bool, str]:

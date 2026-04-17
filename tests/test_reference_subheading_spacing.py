@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from guides.coursework_kfu_2025.safe_formatter import (
     canonical_reference_subheading_text,
@@ -93,7 +94,10 @@ def test_numbered_reference_entries_are_not_headings() -> tuple[bool, str]:
     doc.add_paragraph("1. Монографии и учебники")
     doc.add_paragraph("2. Бельзецкий А. И. Маркетология: монография.")
     doc.add_paragraph(false_heading)
-    doc.add_paragraph("4. Закон РФ от 07.02.1992 № 2300-1 «О защите прав потребителей».")
+    doc.add_paragraph(
+        "4. Закон РФ от 07.02.1992 № 2300-1 «О защите прав потребителей» "
+        "[Электронный ресурс]. — URL: https://example.com/(дата обращения: 06.03.2026)."
+    )
     doc.add_paragraph("")
     doc.add_paragraph("5. статьи")
     doc.add_paragraph("6. Иванов И. И. Название статьи.")
@@ -124,6 +128,8 @@ def test_numbered_reference_entries_are_not_headings() -> tuple[bool, str]:
         return False, f"numbered reference entry text changed unexpectedly: {texts[refs_idx + 4]!r}"
     if texts[refs_idx + 5].startswith("3. ") is False:
         return False, "next numbered reference entry changed unexpectedly"
+    if "https://example.com/ (дата обращения" not in texts[refs_idx + 5]:
+        return False, f"URL spacing was not normalized: {texts[refs_idx + 5]!r}"
     if texts[refs_idx + 6] != "":
         return False, "missing single blank before real reference subheading"
     if texts[refs_idx + 7] != "Статьи":
@@ -139,6 +145,21 @@ def test_numbered_reference_entries_are_not_headings() -> tuple[bool, str]:
     style_name = (false_heading_para.style.name or "").lower()
     if "heading" in style_name or "заголовок" in style_name:
         return False, f"numbered reference entry got heading style: {false_heading_para.style.name!r}"
+
+    for offset in (3, 4, 5):
+        pPr = out_doc.paragraphs[refs_idx + offset]._element.get_or_add_pPr()
+        ind = pPr.find(qn("w:ind"))
+        attrs = ind.attrib if ind is not None else {}
+        if attrs.get(qn("w:left")) != "0":
+            return False, f"reference entry has non-zero left indent: {attrs}"
+        if attrs.get(qn("w:firstLine")) != "709":
+            return False, f"reference entry does not have first-line indent 1.25 cm: {attrs}"
+        if attrs.get(qn("w:hanging")) is not None:
+            return False, f"reference entry still has hanging indent: {attrs}"
+
+    hyperlinks = out_doc.paragraphs[refs_idx + 5]._element.findall(".//" + qn("w:hyperlink"))
+    if not hyperlinks:
+        return False, "plain URL was not converted to a DOCX hyperlink"
 
     return True, "numbered reference entries stay body text inside references"
 

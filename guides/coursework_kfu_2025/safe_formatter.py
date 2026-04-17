@@ -2,6 +2,7 @@
 import re
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Pt
 FORMULA_NUMBER_RE = re.compile(r"\((\d+\.\d+\.\d+|\d+\.\d+)\)\s*$")
 FORMULA_EXPLANATION_RE = re.compile(r"^\s*где\b", re.IGNORECASE)
@@ -649,6 +650,13 @@ def center_image_paragraphs(document, body_start):
 def is_empty_paragraph(paragraph):
     return clean_spaces(paragraph.text) == "" and not paragraph_has_drawing(paragraph)
 
+
+def is_reference_spacing_paragraph(paragraph):
+    return (
+        clean_spaces(paragraph.text) == ""
+        and not paragraph._element.findall(".//" + qn("w:drawing"))
+    )
+
 def ensure_empty_run(paragraph):
     if not paragraph.runs:
         paragraph.add_run("")
@@ -1216,6 +1224,7 @@ def canonical_reference_block_heading_text(text: str):
 
 # ===== Reference list case normalization =====
 _REF_URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+_PLAIN_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
 _REF_TOKEN_RE = re.compile(r'([A-Za-zА-ЯЁа-яё]+(?:[-–—][A-Za-zА-ЯЁа-яё]+)*)')
 _REF_ACRONYM_KEEP = {
     'ФНС', 'РФ', 'РБК', 'ТТС', 'ЭДО', 'СЭД', 'СМК', 'ГОСТ', 'ИСО', 'ЕС', 'АО', 'ООО', 'ПАО',
@@ -1291,6 +1300,15 @@ def smart_normalize_reference_line_case(text: str) -> str:
         body = body.replace(f'__REFURL{i}__', url)
 
     return f'{prefix}{body}' if prefix else body
+
+
+def normalize_reference_url_spacing(text: str) -> str:
+    return re.sub(
+        r"(https?://[^\s]+?)\s*\((дата\s+обращения)",
+        r"\1 (\2",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 def strip_leading_heading_garbage(text: str) -> str:
     t = clean_spaces(text)
@@ -1490,6 +1508,109 @@ def format_body(paragraph, preserve_numbering=False):
 
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+
+
+def _append_hyperlink_run(paragraph, url: str) -> None:
+    rel_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), rel_id)
+
+    run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+
+    rFonts = OxmlElement("w:rFonts")
+    rFonts.set(qn("w:ascii"), FONT_NAME)
+    rFonts.set(qn("w:hAnsi"), FONT_NAME)
+    rFonts.set(qn("w:cs"), FONT_NAME)
+    rFonts.set(qn("w:eastAsia"), FONT_NAME)
+    rPr.append(rFonts)
+
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "000000")
+    rPr.append(color)
+
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "none")
+    rPr.append(underline)
+
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), str(int(BODY_FONT_SIZE_PT * 2)))
+    rPr.append(size)
+
+    size_cs = OxmlElement("w:szCs")
+    size_cs.set(qn("w:val"), str(int(BODY_FONT_SIZE_PT * 2)))
+    rPr.append(size_cs)
+
+    run.append(rPr)
+    text_el = OxmlElement("w:t")
+    text_el.text = url
+    run.append(text_el)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def add_plain_url_hyperlinks(paragraph) -> bool:
+    text = paragraph.text
+    matches = list(_PLAIN_URL_RE.finditer(text))
+    if not matches:
+        return False
+
+    p = paragraph._element
+    for child in list(p):
+        if child.tag.endswith("}r") or child.tag.endswith("}hyperlink"):
+            p.remove(child)
+
+    pos = 0
+    for match in matches:
+        url = match.group(0)
+        trailing = ""
+        while url and url[-1] in ".,;":
+            trailing = url[-1] + trailing
+            url = url[:-1]
+
+        start = match.start()
+        end = match.start() + len(url)
+        if start > pos:
+            paragraph.add_run(text[pos:start])
+
+        _append_hyperlink_run(paragraph, url)
+        if trailing:
+            paragraph.add_run(trailing)
+        pos = match.end()
+
+    if pos < len(text):
+        paragraph.add_run(text[pos:])
+
+    return True
+
+
+def format_reference_entry(paragraph) -> None:
+    text = normalize_reference_url_spacing(clean_spaces(paragraph.text))
+    if text != paragraph.text:
+        replace_paragraph_text(paragraph, text)
+
+    format_body(paragraph)
+    paragraph.paragraph_format.left_indent = Cm(0)
+    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
+
+    pPr = paragraph._element.get_or_add_pPr()
+    for old_tabs in list(pPr.findall(qn("w:tabs"))):
+        pPr.remove(old_tabs)
+    for old_ind in list(pPr.findall(qn("w:ind"))):
+        pPr.remove(old_ind)
+
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:right"), "0")
+    ind.set(qn("w:firstLine"), "709")
+    pPr.append(ind)
+
+    add_plain_url_hyperlinks(paragraph)
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+
+
 NUMERIC_NUM_FMTS = {"decimal", "decimalZero", "ordinal", "decimalEnclosedParen", "decimalEnclosedCircle"}
 
 BULLET_CHARS_RE = re.compile(r'^[•·▪■◆►→◦●○\u2013\u2014\-]+\s*')
@@ -2524,18 +2645,9 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         normalized = f"{ref_counter}. {clean}"
         ref_counter += 1
 
-        normalized = smart_normalize_reference_line_case(normalized)
+        normalized = smart_normalize_reference_line_case(normalize_reference_url_spacing(normalized))
         replace_paragraph_text(paragraph, normalized)
-        format_body(paragraph)
-
-        # Hanging indent: left=851 twips, hanging=709 twips (≈1.5 cm left, ≈1.25 cm hang)
-        _pPr = paragraph._element.get_or_add_pPr()
-        for _oi in list(_pPr.findall(qn("w:ind"))):
-            _pPr.remove(_oi)
-        _ind = OxmlElement("w:ind")
-        _ind.set(qn("w:left"), "851")
-        _ind.set(qn("w:hanging"), "709")
-        _pPr.append(_ind)
+        format_reference_entry(paragraph)
 
 def compact_references_block(document, body_start):
     changed = True
@@ -2610,12 +2722,12 @@ def compact_references_block(document, body_start):
             else:
                 normalized = clean
 
-            normalized = smart_normalize_reference_line_case(normalized)
+            normalized = smart_normalize_reference_line_case(normalize_reference_url_spacing(normalized))
 
             if clean != normalized:
                 replace_paragraph_text(p, normalized)
 
-            format_body(p)
+            format_reference_entry(p)
 
             # Финальный добивающий reset именно после format_body
             p.paragraph_format.page_break_before = False
@@ -2623,22 +2735,7 @@ def compact_references_block(document, body_start):
             p.paragraph_format.keep_together = False
             p.paragraph_format.widow_control = False
 
-            # Hanging indent for source entries: left=851 twips, hanging=709 twips
-            _pPr = p._element.get_or_add_pPr()
-            for _oi in list(_pPr.findall(qn("w:ind"))):
-                _pPr.remove(_oi)
-            _ind = OxmlElement("w:ind")
-            _ind.set(qn("w:left"), "851")
-            _ind.set(qn("w:hanging"), "709")
-            _pPr.append(_ind)
-
 def ensure_single_blank_after_references_heading(document, body_start):
-    def is_reference_spacing_paragraph(paragraph):
-        return (
-            clean_spaces(paragraph.text) == ""
-            and not paragraph._element.findall(".//" + qn("w:drawing"))
-        )
-
     any_changes = False
     changed = True
     while changed:
@@ -2719,14 +2816,14 @@ def ensure_blank_before_reference_subheadings(document, body_start):
                 continue
 
             prev_p = paragraphs[idx - 1]
-            if not is_empty_paragraph(prev_p):
+            if not is_reference_spacing_paragraph(prev_p):
                 new_el = OxmlElement("w:p")
                 p._element.addprevious(new_el)
                 changed = True
                 any_changes = True
                 break
 
-            while idx - 2 >= body_start and is_empty_paragraph(paragraphs[idx - 2]):
+            while idx - 2 >= body_start and is_reference_spacing_paragraph(paragraphs[idx - 2]):
                 remove_paragraph(paragraphs[idx - 2])
                 changed = True
                 any_changes = True
@@ -3323,7 +3420,7 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 p.paragraph_format.page_break_before = False
                 format_reference_subheading(p)
 
-                if idx - 1 < body_start or not is_empty_paragraph(paragraphs[idx - 1]):
+                if idx - 1 < body_start or not is_reference_spacing_paragraph(paragraphs[idx - 1]):
                     new_el = OxmlElement("w:p")
                     p._element.addprevious(new_el)
                     format_empty_paragraph(Paragraph(new_el, p._parent))
@@ -3331,7 +3428,7 @@ def cleanup_reference_subheadings_layout(document, body_start):
                     break
 
                 format_empty_paragraph(paragraphs[idx - 1])
-                if idx - 2 >= body_start and is_empty_paragraph(paragraphs[idx - 2]):
+                if idx - 2 >= body_start and is_reference_spacing_paragraph(paragraphs[idx - 2]):
                     remove_paragraph(paragraphs[idx - 2])
                     changed = True
                     break
@@ -3718,15 +3815,7 @@ def process_document(input_path: Path, output_path: Path):
                 format_reference_subheading(paragraph)
                 prev_kind = "reference_subheading"
             else:
-                format_body(paragraph)
-                if re.match(r"^\d+\.\s+", text):
-                    _pPr_ref = paragraph._element.get_or_add_pPr()
-                    for _old_ind in list(_pPr_ref.findall(qn("w:ind"))):
-                        _pPr_ref.remove(_old_ind)
-                    _ind_ref = OxmlElement("w:ind")
-                    _ind_ref.set(qn("w:left"), "851")
-                    _ind_ref.set(qn("w:hanging"), "709")
-                    _pPr_ref.append(_ind_ref)
+                format_reference_entry(paragraph)
                 prev_kind = "body_text"
             continue
 
@@ -4008,15 +4097,7 @@ def process_document(input_path: Path, output_path: Path):
                 format_reference_subheading(paragraph)
                 prev_nonempty_kind = "reference_subheading"
             else:
-                format_body(paragraph)
-                if re.match(r"^\d+\.\s+", text):
-                    _pPr2 = paragraph._element.get_or_add_pPr()
-                    for _oi2 in list(_pPr2.findall(qn("w:ind"))):
-                        _pPr2.remove(_oi2)
-                    _ind2 = OxmlElement("w:ind")
-                    _ind2.set(qn("w:left"), "851")
-                    _ind2.set(qn("w:hanging"), "709")
-                    _pPr2.append(_ind2)
+                format_reference_entry(paragraph)
                 prev_nonempty_kind = "body_text"
             continue
 
@@ -4092,15 +4173,6 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         format_body(paragraph)
-        # Re-apply hanging indent for numbered reference source entries
-        if _final_in_references and re.match(r"^\d+\.\s+", text):
-            _pPr2 = paragraph._element.get_or_add_pPr()
-            for _oi2 in list(_pPr2.findall(qn("w:ind"))):
-                _pPr2.remove(_oi2)
-            _ind2 = OxmlElement("w:ind")
-            _ind2.set(qn("w:left"), "851")
-            _ind2.set(qn("w:hanging"), "709")
-            _pPr2.append(_ind2)
         prev_nonempty_kind = "body_text"
 
     normalize_sections(doc)
