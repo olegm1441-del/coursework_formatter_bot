@@ -352,7 +352,7 @@ def auto_detect_heading2(paragraph, current_chapter_num, next_paragraph_num, pre
     if not looks_like_heading2_title(text):
         return False
 
-    if is_probable_center_bold_heading(paragraph):
+    if is_heading2_promotion_safe(paragraph):
         return True
 
     return False
@@ -387,7 +387,9 @@ def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_para
     if not paragraph_has_numbering(paragraph):
         return False
 
-    if not is_probable_center_bold_heading(paragraph):
+    has_structural_heading_signal = paragraph_has_heading_style_or_outline(paragraph)
+    has_visual_heading_signal = is_probable_center_bold_heading(paragraph)
+    if not (has_structural_heading_signal or has_visual_heading_signal):
         return False
 
     # Если это уже похоже на heading2, не считаем heading1
@@ -405,7 +407,7 @@ def auto_detect_numbered_heading1(paragraph, current_chapter_num=None, next_para
 
     # Если следующий абзац тоже numbered и тоже короткий,
     # это больше похоже на список, а не на heading1
-    if next_paragraph is not None:
+    if next_paragraph is not None and not has_structural_heading_signal:
         next_text = clean_spaces(next_paragraph.text)
         if next_text and paragraph_has_numbering(next_paragraph):
             if not parse_heading1(next_text) and not parse_heading2(next_text):
@@ -2374,7 +2376,7 @@ def is_likely_numbered_heading2_candidate(paragraph, current_chapter_num, next_p
     if not looks_like_heading2_title(text):
         return False
 
-    return is_probable_center_bold_heading(paragraph)
+    return is_heading2_promotion_safe(paragraph)
 
 
     
@@ -2398,7 +2400,7 @@ def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_
             remove_paragraph_numbering(paragraph)
         return normalized
 
-    if has_num and looks_like_heading2_title(text) and is_probable_center_bold_heading(paragraph):
+    if has_num and looks_like_heading2_title(text) and is_heading2_promotion_safe(paragraph):
         title = text.lstrip(". ").strip()
         new_text = f"{current_chapter_num}.{next_paragraph_num}. {title}"
         replace_paragraph_text(paragraph, new_text)
@@ -2407,6 +2409,22 @@ def normalize_heading2_numbering(paragraph, current_chapter_num, next_paragraph_
         return new_text
 
     return None
+
+
+def is_heading2_promotion_safe(paragraph, parsed_h2=None, toc_text=None):
+    if toc_text:
+        return True
+
+    if parsed_h2 and paragraph_has_heading_style_or_outline(paragraph):
+        return True
+
+    if paragraph_has_heading_style_or_outline(paragraph):
+        return True
+
+    if is_probable_center_bold_heading(paragraph):
+        return True
+
+    return False
 
 
 def is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=None):
@@ -4071,6 +4089,22 @@ def process_document(input_path: Path, output_path: Path):
                 heading_text = clean_spaces(paragraph.text)
                 replace_paragraph_text(paragraph, f"{inferred_chapter_num}. {heading_text}")
                 kind = "heading1"
+                current_chapter_num = inferred_chapter_num
+                next_paragraph_num = 1
+
+        if kind == "heading1" and paragraph_has_numbering(paragraph):
+            text_without_number = clean_spaces(paragraph.text)
+            if (
+                text_without_number
+                and not parse_heading1(text_without_number)
+                and auto_detect_numbered_heading1(
+                    paragraph,
+                    current_chapter_num=current_chapter_num,
+                    next_paragraph=doc.paragraphs[idx + 1] if idx + 1 < len(doc.paragraphs) else None,
+                )
+            ):
+                inferred_chapter_num = 1 if current_chapter_num is None else current_chapter_num + 1
+                replace_paragraph_text(paragraph, f"{inferred_chapter_num}. {text_without_number}")
                 current_chapter_num = inferred_chapter_num
                 next_paragraph_num = 1
 

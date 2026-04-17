@@ -647,6 +647,303 @@ def test_t2_chapter_heading_without_title() -> tuple[bool, str]:
     return _result(True, f"all {len(cases)} chapter heading cases correct")
 
 
+def _add_fake_word_numbering(paragraph, ilvl_value: str = "0") -> None:
+    pPr = paragraph._element.get_or_add_pPr()
+    numPr = OxmlElement("w:numPr")
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), ilvl_value)
+    num_id = OxmlElement("w:numId")
+    num_id.set(qn("w:val"), "1")
+    numPr.append(ilvl)
+    numPr.append(num_id)
+    pPr.append(numPr)
+
+
+def _style_name(paragraph) -> str:
+    try:
+        return (paragraph.style.name or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _find_paragraph_starting_with(document: Document, prefix: str):
+    for paragraph in document.paragraphs:
+        if " ".join(paragraph.text.split()).startswith(prefix):
+            return paragraph
+    return None
+
+
+def test_t2_manual_heading2_still_promoted() -> tuple[bool, str]:
+    """Explicit manual heading syntax '1.1. ...' remains Heading 2."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ")
+    doc.add_paragraph("1.1. Понятие конкурентоспособности организации")
+    doc.add_paragraph("Обычный текст подраздела.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result = Document(out)
+
+    heading = _find_paragraph_starting_with(result, "1.1. Понятие конкурентоспособности")
+    if heading is None:
+        return _result(False, "manual heading2 text missing after formatting")
+
+    if _style_name(heading) not in {"heading 2", "заголовок 2"}:
+        return _result(False, f"manual heading2 style is {_style_name(heading)!r}")
+
+    return _result(True, "manual heading2 remains Heading 2")
+
+
+def test_t2_word_autonumbered_heading2_with_style_still_promoted() -> tuple[bool, str]:
+    """
+    A real Word-autonumbered Heading 2 may have numPr but no visible '1.1.'
+    in paragraph.text. Heading style is enough structural evidence to promote it.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        auto_detect_heading2,
+        clean_spaces,
+        is_likely_numbered_heading2_candidate,
+        is_probable_body_list_item,
+        normalize_heading2_numbering,
+        paragraph_has_numbering,
+    )
+
+    doc = Document()
+    heading = doc.add_paragraph("Понятие конкурентоспособности организации")
+    heading.style = "Heading 2"
+    _add_fake_word_numbering(heading, ilvl_value="1")
+
+    if is_probable_body_list_item(heading):
+        return _result(False, "Word-autonumbered Heading 2 was classified as body/list")
+
+    if not auto_detect_heading2(heading, current_chapter_num=1, next_paragraph_num=1):
+        return _result(False, "Word-autonumbered Heading 2 was not auto-detected")
+
+    if not is_likely_numbered_heading2_candidate(heading, 1, 1):
+        return _result(False, "Word-autonumbered Heading 2 was not a heading2 candidate")
+
+    normalized = normalize_heading2_numbering(heading, 1, 1)
+    expected = "1.1. Понятие конкурентоспособности организации"
+    if normalized != expected or clean_spaces(heading.text) != expected:
+        return _result(False, f"unexpected Heading 2 normalization: {normalized!r}, text={heading.text!r}")
+
+    if paragraph_has_numbering(heading):
+        return _result(False, "Heading 2 Word numbering was not converted to plain text")
+
+    if _style_name(heading) not in {"heading 2", "заголовок 2"}:
+        return _result(False, f"autonumbered heading2 style is {_style_name(heading)!r}")
+
+    return _result(True, "Word-autonumbered Heading 2 remains supported")
+
+
+def test_t2_word_autonumbered_heading1_with_style_still_promoted() -> tuple[bool, str]:
+    """
+    A real Word-autonumbered Heading 1 may have numPr but no visible '1.'
+    in paragraph.text. Heading style/outline must keep it on the heading path.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        auto_detect_numbered_heading1,
+        paragraph_has_numbering,
+        process_document,
+    )
+    import tempfile, os
+
+    direct_doc = Document()
+    direct_heading = direct_doc.add_paragraph("ТЕОРЕТИЧЕСКИЕ ОСНОВЫ КОНКУРЕНТОСПОСОБНОСТИ")
+    direct_heading.style = "Heading 1"
+    _add_fake_word_numbering(direct_heading)
+    following_h2 = direct_doc.add_paragraph("Понятие конкурентоспособности организации")
+    following_h2.style = "Heading 2"
+    _add_fake_word_numbering(following_h2, ilvl_value="1")
+
+    if not auto_detect_numbered_heading1(direct_heading, current_chapter_num=None, next_paragraph=following_h2):
+        return _result(False, "Word-autonumbered Heading 1 was not auto-detected")
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    heading1 = doc.add_paragraph("ТЕОРЕТИЧЕСКИЕ ОСНОВЫ КОНКУРЕНТОСПОСОБНОСТИ")
+    heading1.style = "Heading 1"
+    _add_fake_word_numbering(heading1)
+    heading2 = doc.add_paragraph("Понятие конкурентоспособности организации")
+    heading2.style = "Heading 2"
+    _add_fake_word_numbering(heading2, ilvl_value="1")
+    doc.add_paragraph("Обычный текст подраздела.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result = Document(out)
+
+    formatted_h1 = _find_paragraph_starting_with(
+        result,
+        "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ КОНКУРЕНТОСПОСОБНОСТИ",
+    )
+    if formatted_h1 is None:
+        return _result(False, "Word-autonumbered Heading 1 did not get plain-text chapter number")
+
+    if paragraph_has_numbering(formatted_h1):
+        return _result(False, "Heading 1 Word numbering remained after formatting")
+
+    if _style_name(formatted_h1) not in {"heading 1", "заголовок 1"}:
+        return _result(False, f"autonumbered heading1 style is {_style_name(formatted_h1)!r}")
+
+    formatted_h2 = _find_paragraph_starting_with(
+        result,
+        "1.1. Понятие конкурентоспособности организации",
+    )
+    if formatted_h2 is None:
+        return _result(False, "following autonumbered Heading 2 was not normalized under Heading 1")
+
+    return _result(True, "Word-autonumbered Heading 1 remains supported")
+
+
+def test_t2_word_numbered_body_items_not_promoted_to_headings() -> tuple[bool, str]:
+    """
+    Word-numbered body list items are not heading evidence by themselves.
+    This protects real coursework lists such as "Правление и Совет директоров"
+    from becoming artificial "3.1." / "8.1." Heading 2 lines.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        auto_detect_heading2,
+        auto_detect_numbered_heading1,
+        is_likely_numbered_heading2_candidate,
+        is_probable_body_list_item,
+        normalize_heading2_numbering,
+    )
+
+    doc = Document()
+    previous = doc.add_paragraph("Организационная структура включает несколько элементов.")
+    item = doc.add_paragraph("Правление и Совет директоров")
+    _add_fake_word_numbering(item)
+
+    if not is_probable_body_list_item(item, prev_paragraph=previous, prev_kind="body_text"):
+        return _result(False, "Word-numbered body item was not classified as body_list_item")
+
+    if auto_detect_heading2(item, current_chapter_num=3, next_paragraph_num=1, prev_kind="body_text"):
+        return _result(False, "Word-numbered body item auto-detected as heading2")
+
+    if is_likely_numbered_heading2_candidate(item, 3, 1, prev_kind="body_text"):
+        return _result(False, "Word-numbered body item considered likely heading2 candidate")
+
+    if auto_detect_numbered_heading1(item, current_chapter_num=3):
+        return _result(False, "Word-numbered body item auto-detected as heading1")
+
+    before = item.text
+    normalized = normalize_heading2_numbering(item, 3, 1)
+    if normalized is not None or item.text != before:
+        return _result(False, f"body item was renumbered: normalized={normalized!r}, text={item.text!r}")
+
+    return _result(True, "Word-numbered body items stay body/list items")
+
+
+def test_t2_numbered_sentence_not_promoted_to_heading1() -> tuple[bool, str]:
+    """
+    A numbered sentence-like body paragraph must not be uppercased as Heading 1.
+    Real Heading 1 syntax without sentence boundary remains allowed.
+    """
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+    from guides.coursework_kfu_2025.safe_formatter import is_heading1_promotion_safe
+
+    doc = Document()
+    body_sentence = doc.add_paragraph("1. Маркетинговый подход. Данный подход")
+    parsed = parse_heading1(body_sentence.text)
+    if not parsed:
+        return _result(False, "test setup failed: parse_heading1 did not parse numbered sentence")
+    if is_heading1_promotion_safe(body_sentence, parsed):
+        return _result(False, "sentence-like numbered body paragraph considered safe heading1")
+
+    real_heading = doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ КОНКУРЕНТОСПОСОБНОСТИ")
+    parsed_real = parse_heading1(real_heading.text)
+    if not parsed_real or not is_heading1_promotion_safe(real_heading, parsed_real):
+        return _result(False, "real explicit heading1 was rejected")
+
+    return _result(True, "numbered sentence rejected; real heading accepted")
+
+
+def test_t2_chapter_colon_heading_repaired_without_colon_artifact() -> tuple[bool, str]:
+    """'Глава 2: Название' becomes '2. НАЗВАНИЕ', never '2.: НАЗВАНИЕ'."""
+    from guides.coursework_kfu_2025.safe_formatter import smart_repair_heading1
+
+    doc = Document()
+    paragraph = doc.add_paragraph("Глава 2: Практические аспекты критериев")
+
+    if not smart_repair_heading1(paragraph, paragraph.text):
+        return _result(False, "smart_repair_heading1 did not repair chapter heading")
+
+    expected = "2. ПРАКТИЧЕСКИЕ АСПЕКТЫ КРИТЕРИЕВ"
+    if paragraph.text != expected:
+        return _result(False, f"unexpected repaired heading: {paragraph.text!r}")
+
+    return _result(True, "chapter heading colon artifact removed")
+
+
+def test_t2_real_coursework_17_heading_regression() -> tuple[bool, str]:
+    """
+    Real regression: body/list paragraphs in coursework 17 must not become
+    artificial headings such as "3.1. Правление..." or ALL CAPS list items.
+    """
+    fixture = Path(
+        "/Users/mac/Desktop/курсовые/"
+        "курсова 17. Критерии и показатели конкурентоспособности организации.docx"
+    )
+    if not fixture.exists():
+        return _result(True, f"fixture not present, skipped: {fixture}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "coursework_17_formatted.docx"
+        try:
+            format_docx(str(fixture), str(out_path))
+        except Exception as e:
+            return _result(False, f"formatter raised on real fixture: {e}\n{traceback.format_exc()}")
+
+        doc = Document(str(out_path))
+        texts = [" ".join(p.text.split()) for p in doc.paragraphs if " ".join(p.text.split())]
+
+    forbidden = [
+        "1. МАРКЕТИНГОВЫЙ ПОДХОД. ДАННЫЙ ПОДХОД",
+        "1.1. Доля рынка продукции предприятия",
+        "3.1. Правление и Совет директоров",
+        "3.2. Интеграция с международными научными центрами",
+        "8.1. Повышение экспортного потенциала",
+        "2.:",
+    ]
+    found_forbidden = [
+        marker
+        for marker in forbidden
+        if any(text.startswith(marker) or marker in text for text in texts)
+    ]
+    if found_forbidden:
+        return _result(False, f"false heading markers found: {found_forbidden}")
+
+    required = [
+        "ВВЕДЕНИЕ",
+        "1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ",
+        "1.1. Понятие",
+        "2. ПРАКТИЧЕСКИЕ АСПЕКТЫ",
+        "2.1. Общая характеристика",
+        "ЗАКЛЮЧЕНИЕ",
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+    ]
+    missing = [
+        marker
+        for marker in required
+        if not any(marker.lower() in text.lower() for text in texts)
+    ]
+    if missing:
+        return _result(False, f"real headings missing after formatting: {missing}")
+
+    return _result(True, "real coursework 17 heading regression is clean")
+
+
 def test_t3_reference_subheading_centred() -> tuple[bool, str]:
     """
     After formatting, reference section headers must be CENTER aligned, bold,
@@ -862,6 +1159,13 @@ def run_all() -> None:
         ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
         ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
         ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
+        ("T2 | manual heading2 still works", test_t2_manual_heading2_still_promoted),
+        ("T2 | Word-autonumbered heading2 still works", test_t2_word_autonumbered_heading2_with_style_still_promoted),
+        ("T2 | Word-autonumbered heading1 still works", test_t2_word_autonumbered_heading1_with_style_still_promoted),
+        ("T2 | Word-numbered body items stay body/list", test_t2_word_numbered_body_items_not_promoted_to_headings),
+        ("T2 | numbered sentence not promoted to heading1", test_t2_numbered_sentence_not_promoted_to_heading1),
+        ("T2 | chapter colon heading repaired", test_t2_chapter_colon_heading_repaired_without_colon_artifact),
+        ("T2 | real coursework 17 heading regression", test_t2_real_coursework_17_heading_regression),
         ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
