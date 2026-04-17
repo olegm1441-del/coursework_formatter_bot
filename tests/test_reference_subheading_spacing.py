@@ -11,6 +11,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from guides.coursework_kfu_2025.safe_formatter import (
+    canonical_numbered_reference_subheading_text,
     canonical_reference_subheading_text,
     cleanup_reference_subheadings_layout,
     ensure_blank_before_reference_subheadings,
@@ -68,6 +69,7 @@ def test_reference_subheading_detection_is_strict() -> tuple[bool, str]:
         "- Статьи",
         "Статьи и монографии",
         "Материалы интернет-сайтов: сайты",
+        "статьи в периодических изданиях",
     ]
     for text in cases:
         if canonical_reference_subheading_text(text) is not None:
@@ -75,6 +77,16 @@ def test_reference_subheading_detection_is_strict() -> tuple[bool, str]:
 
     if canonical_reference_subheading_text("статьи") != "Статьи":
         return False, "exact case-insensitive subheading was not detected"
+    if (
+        canonical_reference_subheading_text("статьи в периодических изданиях и сборниках")
+        != "Статьи в периодических изданиях и сборниках"
+    ):
+        return False, "new exact reference subheading was not detected"
+    if (
+        canonical_numbered_reference_subheading_text("1. диссертации, авторефераты диссертаций")
+        != "Диссертации, авторефераты диссертаций"
+    ):
+        return False, "new numbered reference subheading was not recovered"
 
     return True, "reference subheading detection is exact-match only"
 
