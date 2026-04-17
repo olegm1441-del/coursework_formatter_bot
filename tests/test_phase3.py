@@ -798,6 +798,51 @@ def test_t5_list_formatting() -> tuple[bool, str]:
     return _result(True, "list items converted and indented correctly ✓")
 
 
+def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
+    """
+    Figure captions require exactly one blank before the caption, but no blank
+    between the caption and its Источник line. Formatter-created blanks use
+    body font size.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        ensure_single_blank_before_figure_captions,
+        remove_empty_between_figure_caption_and_source,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Текст перед рисунком.")
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+    doc.add_paragraph("")
+    doc.add_paragraph("Источник: составлено автором.")
+
+    ensure_single_blank_before_figure_captions(doc, 0)
+    remove_empty_between_figure_caption_and_source(doc, 0)
+
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "Текст перед рисунком.",
+        "",
+        "Рис. 1.2.1. Схема процесса",
+        "Источник: составлено автором.",
+    ]
+    if texts != expected:
+        return _result(False, f"unexpected paragraph layout: {texts!r}")
+
+    blank = doc.paragraphs[1]
+    run = blank.runs[0] if blank.runs else None
+    if run is None:
+        return _result(False, "blank paragraph has no run")
+
+    sz = run._element.get_or_add_rPr().find(qn("w:sz"))
+    if sz is None or sz.get(qn("w:val")) != "28":
+        val = sz.get(qn("w:val")) if sz is not None else None
+        return _result(False, f"blank font size is {val}, expected 28 half-points")
+
+    return _result(True, "figure spacing and blank font are correct")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -820,6 +865,7 @@ def run_all() -> None:
         ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
+        ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
     ]
 
     for asset in ASSET_FILES:

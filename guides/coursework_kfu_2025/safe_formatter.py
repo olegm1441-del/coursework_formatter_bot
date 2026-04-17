@@ -552,6 +552,10 @@ FIG_RE = re.compile(
     r"^\s*(рисунок|рис\.)\s*(\d+(?:\.\d+){0,2})(?:\s*[.\-—–]?\s*(.+?))?\s*$",
     re.IGNORECASE,
 )
+FIG_SERVICE_LINE_RE = re.compile(
+    r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:",
+    re.IGNORECASE,
+)
 HEADING2_ARTIFACT_RE = re.compile(r"^\s*[•·▪■◆►→\-–—]*\s*(\d+\.\d+\.?)\s*[•·▪■◆►→\-–—]*\s*(.+?)\s*$")
 
 TABLE_CONTINUATION_RE = re.compile(r"^\s*продолжение\s+табл(?:ицы)?\.?\s*\d+(?:\.\d+){1,2}\.?\s*$", re.IGNORECASE)
@@ -3018,9 +3022,7 @@ def ensure_empty_after_source_and_note(document, body_start):
                     break
 
                 next_text = clean_spaces(paragraphs[idx + 1].text)
-                next_is_service = bool(
-                    re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", next_text, re.IGNORECASE)
-                )
+                next_is_service = bool(FIG_SERVICE_LINE_RE.match(next_text))
 
                 if next_is_service:
                     # Между подписью рисунка и Источником/Примечанием пустой строки быть не должно
@@ -3154,6 +3156,104 @@ def ensure_one_empty_after(paragraphs, index):
         remove_paragraph(paragraphs[index + 2])
         paragraphs = p._parent.paragraphs
         changed = True
+
+    return changed
+
+
+def ensure_single_blank_before_figure_captions(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        in_references = False
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            if in_references or not FIG_RE.match(text) or idx <= body_start:
+                continue
+
+            prev_idx = idx - 1
+            prev_p = paragraphs[prev_idx]
+
+            if paragraph_has_drawing(prev_p):
+                continue
+
+            if is_empty_paragraph(prev_p):
+                if prev_idx - 1 >= body_start and paragraph_has_drawing(paragraphs[prev_idx - 1]):
+                    remove_paragraph(prev_p)
+                    changed = True
+                    break
+
+                while prev_idx - 1 >= body_start and is_empty_paragraph(paragraphs[prev_idx - 1]):
+                    remove_paragraph(paragraphs[prev_idx - 1])
+                    changed = True
+                    break
+
+                if changed:
+                    break
+
+                format_empty_paragraph(prev_p)
+                continue
+
+            new_p = insert_paragraph_after(prev_p, "")
+            format_empty_paragraph(new_p)
+            changed = True
+            break
+
+    return changed
+
+
+def remove_empty_between_figure_caption_and_source(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        in_references = False
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            if in_references or not FIG_RE.match(text):
+                continue
+
+            j = idx + 1
+            empty_paragraphs = []
+            while j < len(paragraphs) and is_empty_paragraph(paragraphs[j]):
+                empty_paragraphs.append(paragraphs[j])
+                j += 1
+
+            if not empty_paragraphs or j >= len(paragraphs):
+                continue
+
+            next_text = clean_spaces(paragraphs[j].text)
+            if not FIG_SERVICE_LINE_RE.match(next_text):
+                continue
+
+            for blank in reversed(empty_paragraphs):
+                remove_paragraph(blank)
+            changed = True
+            break
 
     return changed
 
@@ -3449,8 +3549,9 @@ def format_empty_paragraph(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-    run = ensure_empty_run(paragraph)
-    set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+    ensure_empty_run(paragraph)
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
     
 def normalize_sections(document):
     """
@@ -4022,6 +4123,20 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "ensure_empty_before_table_caption",
         ensure_empty_before_table_caption,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "ensure_single_blank_before_figure_captions",
+        ensure_single_blank_before_figure_captions,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "remove_empty_between_figure_caption_and_source",
+        remove_empty_between_figure_caption_and_source,
         doc,
         body_start,
     )
