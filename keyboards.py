@@ -30,7 +30,6 @@ CB_CHECK_ANOTHER = "check:another"
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(BTN_CHECK), KeyboardButton(BTN_FORMAT)],
         [KeyboardButton(BTN_TOP_UP_BALANCE)],
         [KeyboardButton(BTN_REFERRAL)],
         [KeyboardButton(BTN_SELECT_GUIDE)],
@@ -77,8 +76,6 @@ def get_top_up_balance_inline_keyboard() -> InlineKeyboardMarkup:
 
 def get_action_inline_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton(BTN_CHECK, callback_data=CB_ACTION_CHECK)],
-        [InlineKeyboardButton(BTN_FORMAT, callback_data=CB_ACTION_FORMAT)],
         [InlineKeyboardButton(BTN_BUY_MENU, callback_data=CB_ACTION_BUY)],
         [InlineKeyboardButton(BTN_REFERRAL_LINK, callback_data=CB_ACTION_REFERRAL)],
     ]
@@ -87,7 +84,6 @@ def get_action_inline_keyboard() -> InlineKeyboardMarkup:
 
 def get_no_credits_inline_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton(BTN_CHECK, callback_data=CB_ACTION_CHECK)],
         [InlineKeyboardButton(BTN_BUY_1, callback_data="buy:one")],
         [InlineKeyboardButton(BTN_BUY_3, callback_data="buy:three")],
     ]

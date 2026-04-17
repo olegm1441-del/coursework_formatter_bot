@@ -158,7 +158,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         if referral_code and getattr(user, "_referral_linked_now", False):
             await update.message.reply_text(
-                "Реферальная ссылка учтена. Теперь отправь .docx на проверку.",
+                "Реферальная ссылка учтена. Теперь отправь .docx для автооформления.",
                 reply_markup=get_main_menu_keyboard(),
             )
     finally:
@@ -473,7 +473,7 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if not filename.lower().endswith(".docx"):
         await update.message.reply_text(
-            "Принимаются только .docx файлы.",
+            "Файл не того формата. Отправь .docx файл.",
             reply_markup=get_main_menu_keyboard(),
         )
         return
@@ -486,9 +486,8 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         user, _ = _ensure_current_user(db, update)
         balance = services.get_user_credit_balance(db, user.id)
-        service_type = context.user_data.pop(PENDING_DOCX_ACTION_KEY, DOCX_ACTION_CHECK)
-        if service_type not in {DOCX_ACTION_CHECK, DOCX_ACTION_FORMAT}:
-            service_type = DOCX_ACTION_CHECK
+        context.user_data.pop(PENDING_DOCX_ACTION_KEY, None)
+        service_type = DOCX_ACTION_FORMAT
 
         logger.info(
             "docx_received user_id=%s filename=%s balance=%s service_type=%s",
@@ -636,6 +635,16 @@ async def docx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         db.close()
 
 
+async def wrong_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    await update.message.reply_text(
+        "Файл не того формата. Отправь .docx файл.",
+        reply_markup=get_main_menu_keyboard(),
+    )
+
+
 async def userinfo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -767,7 +776,7 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text(
         services.build_text_fallback_text(),
-        reply_markup=get_action_inline_keyboard(),
+        reply_markup=get_main_menu_keyboard(),
     )
 
 
@@ -790,5 +799,6 @@ def register_handlers(app: Application) -> None:
             pattern=r"^(guide:|guide_file:|menu:back|buy:|action:|check:)",
         )
     )
-    app.add_handler(MessageHandler(filters.Document.FileExtension("docx"), docx_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, docx_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, wrong_file_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))

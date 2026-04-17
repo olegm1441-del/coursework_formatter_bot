@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import unicodedata
 import logging
@@ -34,7 +35,7 @@ BOT_USERNAME_FALLBACK = os.getenv("BOT_USERNAME", "").strip()
 TEMP_DIR = Path("bot_storage")
 TEMP_DIR.mkdir(exist_ok=True)
 
-ASSETS_DIR = Path("assets")
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 DEFAULT_GUIDE_CODE = "kfu_coursework_2025"
 REFERRAL_UPLOAD_BONUS_SIZE = 3
@@ -64,6 +65,10 @@ GUIDES = {
         "document_type": "coursework",
         "guideline_version": "2025",
         "method_basename": "Методические рекомендации по подготовке и написанию курсовой работы 2025 КФУ",
+        "method_asset_names": [
+            "КР КФУ 12.2025",
+            "КР КФУ 12.2025.pdf",
+        ],
         "formatter": format_docx,
         "is_active": True,
     }
@@ -589,6 +594,14 @@ def _normalize_filename_text(value: str) -> str:
     return value.strip().lower()
 
 
+def _normalize_asset_lookup_text(value: str) -> str:
+    value = unicodedata.normalize("NFC", value).lower()
+    value = value.replace("ё", "е")
+    value = value.replace("—", "-").replace("–", "-").replace("−", "-")
+    value = re.sub(r"[^0-9a-zа-я]+", " ", value)
+    return " ".join(value.split())
+
+
 def find_method_file(guide_code: str) -> Path | None:
     guide = get_guide(guide_code)
     basename = _normalize_filename_text(guide["method_basename"])
@@ -596,26 +609,54 @@ def find_method_file(guide_code: str) -> Path | None:
     if not ASSETS_DIR.exists():
         return None
 
+    for asset_name in guide.get("method_asset_names", []):
+        explicit_path = ASSETS_DIR / asset_name
+        if explicit_path.is_file():
+            return explicit_path
+
+    normalized_asset_names = {
+        _normalize_asset_lookup_text(name)
+        for name in guide.get("method_asset_names", [])
+        if name
+    }
+    normalized_targets = {
+        _normalize_asset_lookup_text(guide["title"]),
+        _normalize_asset_lookup_text(guide["method_basename"]),
+        *normalized_asset_names,
+    }
+
     candidates = []
     for path in ASSETS_DIR.iterdir():
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
         name_normalized = _normalize_filename_text(path.name)
-        if suffix not in {".docx", ".pdf"} and name_normalized != basename:
+        lookup_name = _normalize_asset_lookup_text(path.name)
+        lookup_stem = _normalize_asset_lookup_text(path.stem if suffix else path.name)
+        if (
+            suffix not in {".docx", ".pdf"}
+            and name_normalized != basename
+            and lookup_name not in normalized_targets
+            and lookup_stem not in normalized_targets
+        ):
             continue
 
         filename_part = path.stem if suffix in {".docx", ".pdf"} else path.name
         stem_normalized = _normalize_filename_text(filename_part)
-        candidates.append((path, stem_normalized))
+        candidates.append((path, stem_normalized, lookup_name, lookup_stem))
 
     # 1. Точное совпадение
-    for path, stem_normalized in candidates:
+    for path, stem_normalized, _, _ in candidates:
         if stem_normalized == basename:
             return path
 
-    # 2. Частичное совпадение в обе стороны
-    for path, stem_normalized in candidates:
+    # 2. Устойчивое совпадение по нормализованным именам assets
+    for path, _, lookup_name, lookup_stem in candidates:
+        if lookup_name in normalized_targets or lookup_stem in normalized_targets:
+            return path
+
+    # 3. Частичное совпадение в обе стороны
+    for path, stem_normalized, _, _ in candidates:
         if basename in stem_normalized or stem_normalized in basename:
             return path
 
@@ -629,7 +670,7 @@ def build_guide_selection_text(user: User) -> str:
     return (
         "Выберите методичку для оформления.\n\n"
         f"Сейчас активна:\n{current_guide['title']}\n\n"
-        "Эта методичка будет использоваться для следующей проверки или обработки .docx."
+        "Эта методичка будет использоваться для автооформления .docx."
     )
 
 
@@ -638,9 +679,7 @@ def build_guide_selected_text(guide_code: str) -> str:
     return (
         "Методичка выбрана.\n\n"
         f"Активная методичка: {guide['title']}\n\n"
-        "Теперь можно:\n"
-        "• проверить оформление .docx\n"
-        "• или оформить его по этой методичке"
+        "Отправь .docx-файл, и я сразу запущу автооформление по этой методичке."
     )
 
 
@@ -695,11 +734,8 @@ def build_start_text(
         else f"Доступно оформлений: {balance}."
     )
     return (
-        "Что можно сделать:\n\n"
-        "🔍 <b>Проверить оформление</b>\n"
-        "— загрузи файл и получи список ошибок\n\n"
-        "✍️ <b>Оформить работу</b>\n"
-        "— автоматически исправлю документ по методичке КФУ\n\n"
+        "Отправь .docx-файл, и я сразу запущу автооформление по методичке КФУ.\n"
+        "Готовый файл вернётся сюда автоматически.\n\n"
         f"{balance_line}\n\n"
         "Продолжая использование бота, вы соглашаетесь с "
         "<a href=\"https://docs.google.com/document/d/14Sk5N1ow-x30Dh2dLqYQtUU5-LbdUlemkTleL-THJDc/edit?usp=drivesdk\">Политикой обработки персональных данных</a> "
@@ -727,7 +763,7 @@ def build_no_credits_text(user: User, bot_username: str) -> str:
     referral_text = build_referral_text(bot_username, user)
     return (
         "У вас нет доступных оформлений.\n\n"
-        "Автооформление сейчас не запущено. Можно купить оформление или бесплатно проверить файл по методичке.\n\n"
+        "Чтобы запустить автооформление, купите оформление или получите бонус по реферальной ссылке.\n\n"
         f"{build_tariffs_text()}\n\n"
         f"{referral_text}"
     )
@@ -736,10 +772,7 @@ def build_no_credits_text(user: User, bot_username: str) -> str:
 def build_text_fallback_text() -> str:
     return (
         "Отправь .docx-файл прямо сюда.\n\n"
-        "Я могу:\n"
-        "• бесплатно проверить оформление\n"
-        "• или оформить работу по активной методичке\n\n"
-        "Если просто отправить файл, я запущу бесплатную проверку. Для оформления сначала нажми «Оформить работу»."
+        "Я сразу запущу автооформление по активной методичке и пришлю готовый файл."
     )
 
 
@@ -748,8 +781,7 @@ def build_top_up_balance_text() -> str:
         "Тарифы:\n"
         "• 1 оформление — 200 ₽\n"
         "• 3 оформления — 500 ₽\n\n"
-        "После оплаты оформления начислятся на баланс.\n\n"
-        "Если не хочешь покупать сразу, можно бесплатно проверить оформление файла."
+        "После оплаты оформления начислятся на баланс."
     )
 
 
