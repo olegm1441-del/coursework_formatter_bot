@@ -891,6 +891,8 @@ def test_t2_real_coursework_17_heading_regression() -> tuple[bool, str]:
     Real regression: body/list paragraphs in coursework 17 must not become
     artificial headings such as "3.1. Правление..." or ALL CAPS list items.
     """
+    from guides.coursework_kfu_2025.safe_formatter import is_empty_paragraph
+
     fixture = Path(
         "/Users/mac/Desktop/курсовые/"
         "курсова 17. Критерии и показатели конкурентоспособности организации.docx"
@@ -906,7 +908,8 @@ def test_t2_real_coursework_17_heading_regression() -> tuple[bool, str]:
             return _result(False, f"formatter raised on real fixture: {e}\n{traceback.format_exc()}")
 
         doc = Document(str(out_path))
-        texts = [" ".join(p.text.split()) for p in doc.paragraphs if " ".join(p.text.split())]
+        paragraphs = doc.paragraphs
+        texts = [" ".join(p.text.split()) for p in paragraphs if " ".join(p.text.split())]
 
     forbidden = [
         "1. МАРКЕТИНГОВЫЙ ПОДХОД. ДАННЫЙ ПОДХОД",
@@ -940,6 +943,16 @@ def test_t2_real_coursework_17_heading_regression() -> tuple[bool, str]:
     ]
     if missing:
         return _result(False, f"real headings missing after formatting: {missing}")
+
+    for idx, paragraph in enumerate(paragraphs):
+        if " ".join(paragraph.text.split()).startswith("1.3. Методы оценки конкурентоспособности"):
+            if idx < 1 or not is_empty_paragraph(paragraphs[idx - 1]):
+                return _result(False, "real fixture: missing blank before 1.3 heading")
+            if idx >= 2 and is_empty_paragraph(paragraphs[idx - 2]):
+                return _result(False, "real fixture: double blank before 1.3 heading")
+            break
+    else:
+        return _result(False, "real fixture: 1.3 heading missing")
 
     return _result(True, "real coursework 17 heading regression is clean")
 
@@ -1140,6 +1153,117 @@ def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
     return _result(True, "figure spacing and blank font are correct")
 
 
+def test_heading2_late_spacing_before_13() -> tuple[bool, str]:
+    """Late/final Heading 2 formatting still leaves one blank before 1.3."""
+    from guides.coursework_kfu_2025.safe_formatter import is_empty_paragraph, process_document
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ")
+    doc.add_paragraph("1.2. Критерии конкурентоспособности организации")
+    doc.add_paragraph("Текст подраздела 1.2.")
+    doc.add_paragraph("Эти критерии позволят перейти к разделу 1.3.")
+    doc.add_paragraph("1.3. Методы оценки конкурентоспособности организации")
+    doc.add_paragraph("В процессе оценки конкурентоспособности применяются методы.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        result = Document(out)
+
+    paragraphs = result.paragraphs
+    target_idx = None
+    for idx, paragraph in enumerate(paragraphs):
+        if " ".join(paragraph.text.split()).startswith("1.3. Методы оценки"):
+            target_idx = idx
+            break
+
+    if target_idx is None:
+        return _result(False, "1.3 heading not found after formatting")
+
+    if target_idx < 1 or not is_empty_paragraph(paragraphs[target_idx - 1]):
+        return _result(False, "missing blank before 1.3 heading")
+
+    if target_idx >= 2 and is_empty_paragraph(paragraphs[target_idx - 2]):
+        return _result(False, "double blank before 1.3 heading")
+
+    if target_idx + 1 >= len(paragraphs) or not is_empty_paragraph(paragraphs[target_idx + 1]):
+        return _result(False, "missing blank after 1.3 heading")
+
+    if target_idx + 2 < len(paragraphs) and is_empty_paragraph(paragraphs[target_idx + 2]):
+        return _result(False, "double blank after 1.3 heading")
+
+    return _result(True, "1.3 heading has exactly one blank before and after")
+
+
+def test_blank_before_figure_block() -> tuple[bool, str]:
+    """
+    A drawing paragraph that follows body text must have exactly one blank before it.
+    The caption/source spacing rules remain untouched.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        ensure_single_blank_before_figure_blocks,
+        is_empty_paragraph,
+        remove_empty_between_figure_caption_and_source,
+        paragraph_has_drawing,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Текст перед рисунком.")
+    drawing_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    run = OxmlElement("w:r")
+    run.append(drawing)
+    drawing_p._element.append(run)
+    doc.add_paragraph("Рис. 1.1.1. Схема процесса")
+    doc.add_paragraph("")
+    doc.add_paragraph("Источник: составлено автором.")
+
+    ensure_single_blank_before_figure_blocks(doc, 0)
+    remove_empty_between_figure_caption_and_source(doc, 0)
+
+    drawing_idx = None
+    for idx, paragraph in enumerate(doc.paragraphs):
+        if paragraph_has_drawing(paragraph):
+            drawing_idx = idx
+            break
+
+    if drawing_idx is None:
+        return _result(False, "drawing paragraph not found")
+
+    if drawing_idx < 1 or not is_empty_paragraph(doc.paragraphs[drawing_idx - 1]):
+        return _result(False, "missing blank before drawing paragraph")
+
+    if drawing_idx >= 2 and is_empty_paragraph(doc.paragraphs[drawing_idx - 2]):
+        return _result(False, "double blank before drawing paragraph")
+
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "Текст перед рисунком.",
+        "",
+        "",
+        "Рис. 1.1.1. Схема процесса",
+        "Источник: составлено автором.",
+    ]
+    if texts != expected:
+        return _result(False, f"unexpected figure block layout: {texts!r}")
+
+    blank = doc.paragraphs[drawing_idx - 1]
+    run = blank.runs[0] if blank.runs else None
+    if run is None:
+        return _result(False, "blank before drawing has no run")
+
+    sz = run._element.get_or_add_rPr().find(qn("w:sz"))
+    if sz is None or sz.get(qn("w:val")) != "28":
+        val = sz.get(qn("w:val")) if sz is not None else None
+        return _result(False, f"blank before drawing font size is {val}, expected 28 half-points")
+
+    return _result(True, "drawing paragraph has one TNR 14 blank before it")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -1170,6 +1294,8 @@ def run_all() -> None:
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
+        ("T6 | heading2 late spacing before 1.3", test_heading2_late_spacing_before_13),
+        ("T6 | blank before figure block", test_blank_before_figure_block),
     ]
 
     for asset in ASSET_FILES:
