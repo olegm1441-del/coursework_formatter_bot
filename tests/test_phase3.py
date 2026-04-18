@@ -237,11 +237,10 @@ def test_c_apply_table_merging_keeps_valid_manual_split() -> tuple[bool, str]:
     return _result(True, "valid manual split preserved")
 
 
-def test_c_apply_table_continuation_inserts_marker_and_header_repeat() -> tuple[bool, str]:
+def test_c_apply_table_continuation_does_not_heuristic_split() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
 
     doc = Document()
-    # Fill page close to bottom so the table needs a split
     for _ in range(22):
         doc.add_paragraph("Текст абзаца для заполнения страницы.")
 
@@ -255,57 +254,53 @@ def test_c_apply_table_continuation_inserts_marker_and_header_repeat() -> tuple[
         tbl.rows[i].cells[0].text = f"a{i}"
         tbl.rows[i].cells[1].text = f"b{i}"
 
+    before_rows = len(doc.tables[0].rows)
     n = apply_table_continuation(doc)
-    if n < 1:
-        return _result(False, "expected at least 1 split")
-    if len(doc.tables) < 2:
-        return _result(False, "expected table continuation part")
-
     markers = [p for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
-    if not markers:
-        return _result(False, "continuation marker not inserted")
-    marker_text = " ".join(markers[0].text.split())
-    if marker_text != "Продолжение таблицы 2.3":
-        return _result(False, f"unexpected marker text: {marker_text!r}")
 
-    first_header = [c.text for c in doc.tables[0].rows[0].cells]
-    second_header = [c.text for c in doc.tables[1].rows[0].cells]
-    if first_header != second_header:
-        return _result(False, f"header not repeated: {first_header!r} != {second_header!r}")
-    return _result(True, "split inserted marker + repeated header")
+    if n != 0:
+        return _result(False, f"expected no width changes in split fixture, got {n}")
+    if len(doc.tables) != 1:
+        return _result(False, f"heuristic split created extra table(s): {len(doc.tables)}")
+    if len(doc.tables[0].rows) != before_rows:
+        return _result(False, f"row count changed: {before_rows} -> {len(doc.tables[0].rows)}")
+    if markers:
+        return _result(False, f"heuristic continuation marker inserted: {[p.text for p in markers]!r}")
+    return _result(True, "heuristic split disabled")
 
 
-def test_c_apply_table_continuation_fallback_marker_without_number() -> tuple[bool, str]:
+def test_c_apply_table_continuation_width_normalization_only() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
 
     doc = Document()
-    for _ in range(22):
-        doc.add_paragraph("Текст абзаца для заполнения страницы.")
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[1].cells[0].text = "1"
+    tbl.rows[1].cells[1].text = "2"
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    if grid is None:
+        return _result(False, "test setup failed: no tblGrid")
+    for gc in grid.findall(qn("w:gridCol")):
+        gc.set(qn("w:w"), "12000")
 
-    doc.add_paragraph("Таблица абв")
-    doc.add_paragraph("Название таблицы")
-
-    tbl = doc.add_table(rows=8, cols=2)
-    tbl.rows[0].cells[0].text = "H1"
-    tbl.rows[0].cells[1].text = "H2"
-    for i in range(1, 8):
-        tbl.rows[i].cells[0].text = f"x{i}"
-        tbl.rows[i].cells[1].text = f"y{i}"
-
+    before_tables = len(doc.tables)
+    before_rows = len(doc.tables[0].rows)
     n = apply_table_continuation(doc)
-    if n < 1:
-        return _result(False, "expected split for fallback case")
-
     markers = [p for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
-    if not markers:
-        return _result(False, "fallback continuation marker not inserted")
-    marker_text = " ".join(markers[0].text.split())
-    if marker_text != "Продолжение таблицы":
-        return _result(False, f"expected exact fallback marker, got {marker_text!r}")
-    return _result(True, "fallback marker is exact")
+
+    if n != 1:
+        return _result(False, f"expected one width-normalised table, got {n}")
+    if len(doc.tables) != before_tables:
+        return _result(False, f"table count changed: {before_tables} -> {len(doc.tables)}")
+    if len(doc.tables[0].rows) != before_rows:
+        return _result(False, f"row count changed: {before_rows} -> {len(doc.tables[0].rows)}")
+    if markers:
+        return _result(False, f"unexpected continuation marker: {[p.text for p in markers]!r}")
+    return _result(True, "width normalisation remained active without splitting")
 
 
-def test_c_apply_table_continuation_double_run_idempotent() -> tuple[bool, str]:
+def test_c_apply_table_continuation_no_split_double_run_idempotent() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
 
     doc = Document()
@@ -321,8 +316,6 @@ def test_c_apply_table_continuation_double_run_idempotent() -> tuple[bool, str]:
         tbl.rows[i].cells[1].text = f"b{i}"
 
     first = apply_table_continuation(doc)
-    if first < 1:
-        return _result(False, f"first run did not split, got {first}")
     marker_count_1 = sum(1 for p in doc.paragraphs if "Продолжение таблицы" in (p.text or ""))
     table_count_1 = len(doc.tables)
     table_rows_1 = [len(t.rows) for t in doc.tables]
@@ -332,65 +325,91 @@ def test_c_apply_table_continuation_double_run_idempotent() -> tuple[bool, str]:
     table_count_2 = len(doc.tables)
     table_rows_2 = [len(t.rows) for t in doc.tables]
 
-    if second != 0:
-        return _result(False, f"second run should be no-op, got {second}")
+    if first != 0 or second != 0:
+        return _result(False, f"expected no heuristic changes, got first={first}, second={second}")
     if marker_count_2 != marker_count_1:
         return _result(False, f"marker count changed: {marker_count_1} -> {marker_count_2}")
     if table_count_2 != table_count_1:
         return _result(False, f"table count changed: {table_count_1} -> {table_count_2}")
     if table_rows_2 != table_rows_1:
         return _result(False, f"table structure changed: {table_rows_1!r} -> {table_rows_2!r}")
-    return _result(True, "second run did not add markers or split structure")
+    return _result(True, "double run did not add markers or split structure")
 
 
-def test_c_apply_table_continuation_skips_when_safe_split_impossible() -> tuple[bool, str]:
+def test_c_apply_rendered_table_continuation_warns_when_lo_unavailable() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
 
     doc = Document()
-    doc.add_paragraph("Текст абзаца для заполнения страницы.")
+    doc.add_paragraph("Таблица 1.1")
+    doc.add_table(rows=3, cols=2)
 
-    doc.add_paragraph("Таблица 3.2")
-    tbl = doc.add_table(rows=3, cols=2)
-    tbl.rows[0].cells[0].text = "H1"
-    tbl.rows[0].cells[1].text = "H2"
-    tbl.rows[1].cells[0].text = "merge start"
-    tbl.rows[1].cells[1].text = "x1"
-    tbl.rows[2].cells[0].text = "merge continue"
-    tbl.rows[2].cells[1].text = "x2"
-    tbl.cell(1, 0).merge(tbl.cell(2, 0))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "in.docx"
+        doc.save(path)
 
-    before_rows = len(doc.tables[0].rows)
-    old_body_h = tc._body_height_pt
-    old_para_h = tc._estimate_para_height
-    old_row_h = tc._estimate_row_height
-    try:
-        tc._body_height_pt = lambda _doc: 100.0
-        tc._estimate_para_height = lambda _para: 40.0
+        old_render = tc.render_docx_to_pdf
+        report = FormattingReport()
+        try:
+            def raise_lo(_path):
+                raise tc.LibreOfficeNotFoundError("missing LO")
 
-        def fake_row_height(row, _body_w, _col_widths):
-            if row.cells[0].text == "H1":
-                return 20.0
-            if row.cells[1].text == "x1":
-                return 20.0
-            return 200.0
+            tc.render_docx_to_pdf = raise_lo
+            n = tc.apply_rendered_table_continuation(path, report=report)
+        finally:
+            tc.render_docx_to_pdf = old_render
 
-        tc._estimate_row_height = fake_row_height
-        n = tc.apply_table_continuation(doc)
-        markers = [p.text for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
-    finally:
-        tc._body_height_pt = old_body_h
-        tc._estimate_para_height = old_para_h
-        tc._estimate_row_height = old_row_h
+        reread = Document(str(path))
 
     if n != 0:
-        return _result(False, f"expected no split, got {n}")
-    if len(doc.tables) != 1:
-        return _result(False, f"expected one whole table, got {len(doc.tables)}")
-    if len(doc.tables[0].rows) != before_rows:
-        return _result(False, f"table row count changed: {before_rows} -> {len(doc.tables[0].rows)}")
-    if markers:
-        return _result(False, f"unexpected continuation markers: {markers!r}")
-    return _result(True, "safe-split-impossible case left table whole")
+        return _result(False, f"expected 0 rendered splits, got {n}")
+    if not report.warnings:
+        return _result(False, "expected rendered split warning")
+    if len(reread.tables) != 1:
+        return _result(False, f"DOCX mutated unexpectedly, tables={len(reread.tables)}")
+    return _result(True, "LO unavailable path warns and does not mutate")
+
+
+def test_c_apply_rendered_table_continuation_warns_when_pdf_analysis_fails() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1")
+    doc.add_table(rows=3, cols=2)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "in.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "in.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf
+        report = FormattingReport()
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+
+            def raise_analysis(_path):
+                raise RuntimeError("pdf parse failed")
+
+            tc.analyze_pdf = raise_analysis
+            n = tc.apply_rendered_table_continuation(path, report=report)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf = old_analyze
+
+        reread = Document(str(path))
+
+    if n != 0:
+        return _result(False, f"expected 0 rendered splits, got {n}")
+    if not report.warnings:
+        return _result(False, "expected PDF analysis warning")
+    if len(reread.tables) != 1:
+        return _result(False, f"DOCX mutated unexpectedly, tables={len(reread.tables)}")
+    return _result(True, "PDF analysis failure warns and does not mutate")
 
 
 def test_c_vmerge_guard_rejects_boundary_inside_merge_zone() -> tuple[bool, str]:
@@ -1527,10 +1546,11 @@ def run_all() -> None:
         ("C  | strict caption-number extraction",      test_c_caption_number_extraction_strict),
         ("C  | merge invalid manual split",            test_c_apply_table_merging_rebuilds_invalid_split),
         ("C  | keep valid manual split",               test_c_apply_table_merging_keeps_valid_manual_split),
-        ("C  | split marker + header repeat",          test_c_apply_table_continuation_inserts_marker_and_header_repeat),
-        ("C  | fallback marker without number",        test_c_apply_table_continuation_fallback_marker_without_number),
-        ("C  | double-run idempotency",                test_c_apply_table_continuation_double_run_idempotent),
-        ("C  | safe split impossible skips",           test_c_apply_table_continuation_skips_when_safe_split_impossible),
+        ("C  | heuristic split disabled",              test_c_apply_table_continuation_does_not_heuristic_split),
+        ("C  | width normalisation only",              test_c_apply_table_continuation_width_normalization_only),
+        ("C  | no-split double-run idempotency",       test_c_apply_table_continuation_no_split_double_run_idempotent),
+        ("C  | rendered split LO fallback",            test_c_apply_rendered_table_continuation_warns_when_lo_unavailable),
+        ("C  | rendered split PDF fallback",           test_c_apply_rendered_table_continuation_warns_when_pdf_analysis_fails),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
         ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),

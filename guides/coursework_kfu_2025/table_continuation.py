@@ -51,7 +51,9 @@ from __future__ import annotations
 import logging
 import math
 import re
+import shutil
 from copy import deepcopy
+from pathlib import Path
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -59,6 +61,8 @@ from docx.oxml.ns import qn
 
 
 from .docx_utils import xml_has_image, is_source_or_note_line, FormattingReport
+from .layout_render import LibreOfficeNotFoundError, render_docx_to_pdf
+from .pdf_layout_analyzer import analyze_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -911,7 +915,8 @@ def apply_table_continuation(
     The splitting part is disabled because reliable page-break detection
     requires a rendering engine.  See module docstring for the FUTURE plan.
 
-    Returns 0 (no splits performed).
+    Returns the number of tables whose widths were normalised.
+    Does not split tables or insert continuation markers.
     """
     # ── Column-width optimisation (always active) ──────────────────────────
     body_w = _body_width_pt(doc)
@@ -924,107 +929,51 @@ def apply_table_continuation(
     if n_col_fixed:
         logger.info("table_continuation: col-width optimised %d table(s)", n_col_fixed)
 
-    body_h = _body_height_pt(doc)
-    split_count = 0
-    # Up to 4 passes to support multi-page tables after each mutation.
-    for _ in range(4):
-        changed = False
-        body_elems = list(_iter_body(doc))
-        current_h = 0.0
+    return n_col_fixed
 
-        i = 0
-        while i < len(body_elems):
-            kind, xml_elem, py_obj = body_elems[i]
 
-            if kind == "paragraph":
-                h = _estimate_para_height(py_obj)
-                if current_h + h > body_h:
-                    current_h = h
-                else:
-                    current_h += h
-                i += 1
-                continue
+def _warn_rendered_split_unavailable(
+    report: FormattingReport | None,
+    reason: str,
+) -> None:
+    logger.info("rendered table continuation skipped: %s", reason)
+    if report is not None:
+        report.warn("Автоперенос таблиц по PDF временно недоступен")
 
-            # table
-            tbl_xml = xml_elem
-            tbl_obj = py_obj
-            rows = tbl_obj.rows
-            col_widths = _tbl_col_widths_pt(tbl_xml)
-            row_heights = [_estimate_row_height(r, body_w, col_widths) for r in rows]
-            tbl_total_h = sum(row_heights)
 
-            # Idempotency: if table already follows a continuation marker, keep it.
-            prev = tbl_xml.getprevious()
-            if prev is not None and prev.tag == qn("w:p"):
-                prev_p = next((p for p in doc.paragraphs if p._element is prev), None)
-                if prev_p is not None and _is_any_continuation_marker(prev_p.text):
-                    if current_h + tbl_total_h > body_h:
-                        current_h = tbl_total_h
-                    else:
-                        current_h += tbl_total_h
-                    i += 1
-                    continue
+def apply_rendered_table_continuation(
+    docx_path: Path,
+    report: FormattingReport | None = None,
+    max_passes: int = 1,
+) -> int:
+    """
+    Phase 3 rendered table continuation entry point.
 
-            # Fits as-is
-            if current_h + tbl_total_h <= body_h or len(rows) < 3:
-                if current_h + tbl_total_h > body_h:
-                    current_h = tbl_total_h
-                else:
-                    current_h += tbl_total_h
-                i += 1
-                continue
+    Patch 1 only wires LibreOffice/PDF availability checks and disables the
+    previous heuristic splitter. Actual rendered row-to-page splitting is added
+    in a later patch.
+    """
+    docx_path = Path(docx_path)
+    doc = Document(str(docx_path))
+    if not doc.tables:
+        return 0
 
-            # Need split candidate: keep header + as many data rows as fit.
-            avail = body_h - current_h
-            if avail <= 0:
-                # Page full; defer to next page handling.
-                current_h = 0.0
-                i += 1
-                continue
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(docx_path)
+        analyze_pdf(pdf_path)
+    except LibreOfficeNotFoundError as exc:
+        _warn_rendered_split_unavailable(report, str(exc))
+        return 0
+    except Exception as exc:
+        _warn_rendered_split_unavailable(report, str(exc))
+        return 0
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
-            acc = row_heights[0]  # header
-            candidate_after = None
-            for r_idx in range(1, len(row_heights)):
-                if acc + row_heights[r_idx] <= avail:
-                    acc += row_heights[r_idx]
-                    candidate_after = r_idx
-                else:
-                    break
-
-            # Need at least header + 1 data row in part 1.
-            if candidate_after is None or candidate_after < 1:
-                # safe split impossible -> keep table whole
-                current_h = tbl_total_h if current_h > 0 else min(tbl_total_h, body_h)
-                i += 1
-                continue
-
-            rows_xml = tbl_xml.findall(qn("w:tr"))
-            safe_after = _find_safe_split_after(rows_xml, candidate_after)
-            if safe_after is None or safe_after < 1:
-                current_h = tbl_total_h if current_h > 0 else min(tbl_total_h, body_h)
-                i += 1
-                continue
-
-            # Need at least 1 data row left for continuation part.
-            if len(rows_xml) - (safe_after + 1) < 1:
-                current_h = tbl_total_h if current_h > 0 else min(tbl_total_h, body_h)
-                i += 1
-                continue
-
-            num = _find_caption_number_before_table(doc, tbl_xml)
-            continuation_text = f"Продолжение таблицы {num}" if num else "Продолжение таблицы"
-
-            if _split_table_at(doc, tbl_xml, safe_after, continuation_text):
-                split_count += 1
-                changed = True
-                break
-
-            i += 1
-
-        if not changed:
-            break
-
-    return split_count
+    _warn_rendered_split_unavailable(report, "rendered splitting is not implemented in Patch 1")
+    return 0
 
 
 # ── Remove empty paragraphs between image and figure caption ─────────────────
