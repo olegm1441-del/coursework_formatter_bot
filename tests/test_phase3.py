@@ -160,6 +160,259 @@ def test_c_continuation_length_guard() -> tuple[bool, str]:
     return _result(True, f"all {len(cases)} cases correct")
 
 
+def test_c_caption_number_extraction_strict() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import _extract_table_num
+    cases = [
+        ("Таблица 2.3", "2.3"),
+        ("Таблица 2.3.4", "2.3.4"),
+        ("Продолжение таблицы 2.3", None),
+        ("Таблица абв", None),
+    ]
+    bad = []
+    for text, expected in cases:
+        got = _extract_table_num(text)
+        if got != expected:
+            bad.append(f"{text!r}: expected={expected!r}, got={got!r}")
+    return _result(not bad, "; ".join(bad) if bad else "strict caption extraction OK")
+
+
+def test_c_apply_table_merging_rebuilds_invalid_split() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    t1 = doc.add_table(rows=3, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "a"
+    t1.rows[1].cells[1].text = "b"
+    t1.rows[2].cells[0].text = "c"
+    t1.rows[2].cells[1].text = "d"
+
+    doc.add_paragraph("Продолжение таблицы 1.1")
+
+    # invalid continuation: header row does NOT match source header
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.rows[0].cells[0].text = "X"
+    t2.rows[0].cells[1].text = "Y"
+    t2.rows[1].cells[0].text = "e"
+    t2.rows[1].cells[1].text = "f"
+
+    n = apply_table_merging(doc)
+    if n != 1:
+        return _result(False, f"expected 1 merge, got {n}")
+    if len(doc.tables) != 1:
+        return _result(False, f"expected 1 table after merge, got {len(doc.tables)}")
+    texts = [p.text for p in doc.paragraphs]
+    if any("Продолжение таблицы" in (t or "") for t in texts):
+        return _result(False, "continuation marker paragraph was not removed for invalid split")
+    return _result(True, "invalid manual split was rebuilt")
+
+
+def test_c_apply_table_merging_keeps_valid_manual_split() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    t1 = doc.add_table(rows=3, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "a"
+    t1.rows[1].cells[1].text = "b"
+    t1.rows[2].cells[0].text = "c"
+    t1.rows[2].cells[1].text = "d"
+
+    doc.add_paragraph("Продолжение таблицы 1.1")
+
+    t2 = doc.add_table(rows=2, cols=2)
+    # valid continuation header equals source header
+    t2.rows[0].cells[0].text = "H1"
+    t2.rows[0].cells[1].text = "H2"
+    t2.rows[1].cells[0].text = "e"
+    t2.rows[1].cells[1].text = "f"
+
+    n = apply_table_merging(doc)
+    if n != 0:
+        return _result(False, f"expected 0 merges for valid manual split, got {n}")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 tables preserved, got {len(doc.tables)}")
+    return _result(True, "valid manual split preserved")
+
+
+def test_c_apply_table_continuation_inserts_marker_and_header_repeat() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    # Fill page close to bottom so the table needs a split
+    for _ in range(22):
+        doc.add_paragraph("Текст абзаца для заполнения страницы.")
+
+    doc.add_paragraph("Таблица 2.3")
+    doc.add_paragraph("Название таблицы")
+
+    tbl = doc.add_table(rows=8, cols=2)
+    tbl.rows[0].cells[0].text = "Колонка A"
+    tbl.rows[0].cells[1].text = "Колонка B"
+    for i in range(1, 8):
+        tbl.rows[i].cells[0].text = f"a{i}"
+        tbl.rows[i].cells[1].text = f"b{i}"
+
+    n = apply_table_continuation(doc)
+    if n < 1:
+        return _result(False, "expected at least 1 split")
+    if len(doc.tables) < 2:
+        return _result(False, "expected table continuation part")
+
+    markers = [p for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
+    if not markers:
+        return _result(False, "continuation marker not inserted")
+    marker_text = " ".join(markers[0].text.split())
+    if marker_text != "Продолжение таблицы 2.3":
+        return _result(False, f"unexpected marker text: {marker_text!r}")
+
+    first_header = [c.text for c in doc.tables[0].rows[0].cells]
+    second_header = [c.text for c in doc.tables[1].rows[0].cells]
+    if first_header != second_header:
+        return _result(False, f"header not repeated: {first_header!r} != {second_header!r}")
+    return _result(True, "split inserted marker + repeated header")
+
+
+def test_c_apply_table_continuation_fallback_marker_without_number() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    for _ in range(22):
+        doc.add_paragraph("Текст абзаца для заполнения страницы.")
+
+    doc.add_paragraph("Таблица абв")
+    doc.add_paragraph("Название таблицы")
+
+    tbl = doc.add_table(rows=8, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    for i in range(1, 8):
+        tbl.rows[i].cells[0].text = f"x{i}"
+        tbl.rows[i].cells[1].text = f"y{i}"
+
+    n = apply_table_continuation(doc)
+    if n < 1:
+        return _result(False, "expected split for fallback case")
+
+    markers = [p for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
+    if not markers:
+        return _result(False, "fallback continuation marker not inserted")
+    marker_text = " ".join(markers[0].text.split())
+    if marker_text != "Продолжение таблицы":
+        return _result(False, f"expected exact fallback marker, got {marker_text!r}")
+    return _result(True, "fallback marker is exact")
+
+
+def test_c_apply_table_continuation_double_run_idempotent() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    for _ in range(22):
+        doc.add_paragraph("Текст абзаца для заполнения страницы.")
+
+    doc.add_paragraph("Таблица 3.1")
+    tbl = doc.add_table(rows=8, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    for i in range(1, 8):
+        tbl.rows[i].cells[0].text = f"a{i}"
+        tbl.rows[i].cells[1].text = f"b{i}"
+
+    first = apply_table_continuation(doc)
+    if first < 1:
+        return _result(False, f"first run did not split, got {first}")
+    marker_count_1 = sum(1 for p in doc.paragraphs if "Продолжение таблицы" in (p.text or ""))
+    table_count_1 = len(doc.tables)
+    table_rows_1 = [len(t.rows) for t in doc.tables]
+
+    second = apply_table_continuation(doc)
+    marker_count_2 = sum(1 for p in doc.paragraphs if "Продолжение таблицы" in (p.text or ""))
+    table_count_2 = len(doc.tables)
+    table_rows_2 = [len(t.rows) for t in doc.tables]
+
+    if second != 0:
+        return _result(False, f"second run should be no-op, got {second}")
+    if marker_count_2 != marker_count_1:
+        return _result(False, f"marker count changed: {marker_count_1} -> {marker_count_2}")
+    if table_count_2 != table_count_1:
+        return _result(False, f"table count changed: {table_count_1} -> {table_count_2}")
+    if table_rows_2 != table_rows_1:
+        return _result(False, f"table structure changed: {table_rows_1!r} -> {table_rows_2!r}")
+    return _result(True, "second run did not add markers or split structure")
+
+
+def test_c_apply_table_continuation_skips_when_safe_split_impossible() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = Document()
+    doc.add_paragraph("Текст абзаца для заполнения страницы.")
+
+    doc.add_paragraph("Таблица 3.2")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "merge start"
+    tbl.rows[1].cells[1].text = "x1"
+    tbl.rows[2].cells[0].text = "merge continue"
+    tbl.rows[2].cells[1].text = "x2"
+    tbl.cell(1, 0).merge(tbl.cell(2, 0))
+
+    before_rows = len(doc.tables[0].rows)
+    old_body_h = tc._body_height_pt
+    old_para_h = tc._estimate_para_height
+    old_row_h = tc._estimate_row_height
+    try:
+        tc._body_height_pt = lambda _doc: 100.0
+        tc._estimate_para_height = lambda _para: 40.0
+
+        def fake_row_height(row, _body_w, _col_widths):
+            if row.cells[0].text == "H1":
+                return 20.0
+            if row.cells[1].text == "x1":
+                return 20.0
+            return 200.0
+
+        tc._estimate_row_height = fake_row_height
+        n = tc.apply_table_continuation(doc)
+        markers = [p.text for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
+    finally:
+        tc._body_height_pt = old_body_h
+        tc._estimate_para_height = old_para_h
+        tc._estimate_row_height = old_row_h
+
+    if n != 0:
+        return _result(False, f"expected no split, got {n}")
+    if len(doc.tables) != 1:
+        return _result(False, f"expected one whole table, got {len(doc.tables)}")
+    if len(doc.tables[0].rows) != before_rows:
+        return _result(False, f"table row count changed: {before_rows} -> {len(doc.tables[0].rows)}")
+    if markers:
+        return _result(False, f"unexpected continuation markers: {markers!r}")
+    return _result(True, "safe-split-impossible case left table whole")
+
+
+def test_c_vmerge_guard_rejects_boundary_inside_merge_zone() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import _is_split_boundary_safe
+
+    doc = Document()
+    tbl = doc.add_table(rows=4, cols=2)
+    for r_idx, row in enumerate(tbl.rows):
+        row.cells[0].text = f"A{r_idx}"
+        row.cells[1].text = f"B{r_idx}"
+
+    merged = tbl.cell(1, 0).merge(tbl.cell(2, 0))
+    merged.text = "merged"
+
+    rows_xml = tbl._tbl.findall(qn("w:tr"))
+    if _is_split_boundary_safe(rows_xml, 1):
+        return _result(False, "boundary before vMerge continuation row was considered safe")
+    if not _is_split_boundary_safe(rows_xml, 2):
+        return _result(False, "boundary after vMerge continuation row was considered unsafe")
+    return _result(True, "vMerge guard rejects split inside merge zone")
+
+
 
 # ── Asset regression ──────────────────────────────────────────────────────────
 
@@ -1271,6 +1524,14 @@ def run_all() -> None:
         ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
         ("A  | _para_has_image helper",                test_a_para_has_image_helper),
         ("C  | continuation length guard",             test_c_continuation_length_guard),
+        ("C  | strict caption-number extraction",      test_c_caption_number_extraction_strict),
+        ("C  | merge invalid manual split",            test_c_apply_table_merging_rebuilds_invalid_split),
+        ("C  | keep valid manual split",               test_c_apply_table_merging_keeps_valid_manual_split),
+        ("C  | split marker + header repeat",          test_c_apply_table_continuation_inserts_marker_and_header_repeat),
+        ("C  | fallback marker without number",        test_c_apply_table_continuation_fallback_marker_without_number),
+        ("C  | double-run idempotency",                test_c_apply_table_continuation_double_run_idempotent),
+        ("C  | safe split impossible skips",           test_c_apply_table_continuation_skips_when_safe_split_impossible),
+        ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
         ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),
         ("B2 | keepTogether on table_caption",         test_b2_keep_together_on_table_caption),

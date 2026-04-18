@@ -51,6 +51,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from copy import deepcopy
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -444,6 +445,218 @@ def _is_student_continuation(text: str) -> bool:
     return bool(_CONT_RE.search(text) and _TBL_WORD_RE.search(text))
 
 
+def _norm_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _is_any_continuation_marker(text: str) -> bool:
+    t = _norm_text(text)
+    return bool(t and t.lower().startswith("продолжение таблицы"))
+
+
+def _table_col_count(tbl_xml) -> int:
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is not None:
+        cols = grid.findall(qn("w:gridCol"))
+        if cols:
+            return len(cols)
+
+    first_row = tbl_xml.find(qn("w:tr"))
+    if first_row is None:
+        return 0
+    count = 0
+    for tc in first_row.findall(qn("w:tc")):
+        tcPr = tc.find(qn("w:tcPr"))
+        gs = tcPr.find(qn("w:gridSpan")) if tcPr is not None else None
+        span = int(gs.get(qn("w:val"), 1)) if gs is not None else 1
+        count += max(1, span)
+    return count
+
+
+def _row_cell_texts(tr_xml) -> list[str]:
+    vals: list[str] = []
+    for tc in tr_xml.findall(qn("w:tc")):
+        txt = "".join(
+            (t.text or "")
+            for t in tc.findall(".//" + qn("w:t"))
+            if t.text
+        )
+        vals.append(_norm_text(txt))
+    return vals
+
+
+def _rows_match(row1_xml, row2_xml) -> bool:
+    return _row_cell_texts(row1_xml) == _row_cell_texts(row2_xml)
+
+
+def _tbl_has_at_least_two_rows(tbl_xml) -> bool:
+    return len(tbl_xml.findall(qn("w:tr"))) >= 2
+
+
+def _is_vmerge_continue(tc_xml) -> bool:
+    tcPr = tc_xml.find(qn("w:tcPr"))
+    if tcPr is None:
+        return False
+    vm = tcPr.find(qn("w:vMerge"))
+    if vm is None:
+        return False
+    val = vm.get(qn("w:val"))
+    # w:vMerge with no val is "continue" by spec.
+    return val is None or val == "continue"
+
+
+def _is_split_boundary_safe(rows_xml: list, split_after: int) -> bool:
+    """
+    split_after is index of the last row in part 1.
+    Boundary is between rows[split_after] and rows[split_after+1].
+    """
+    if split_after < 0 or split_after + 1 >= len(rows_xml):
+        return False
+    next_row = rows_xml[split_after + 1]
+    for tc in next_row.findall(qn("w:tc")):
+        if _is_vmerge_continue(tc):
+            return False
+    return True
+
+
+def _find_safe_split_after(rows_xml: list, candidate_after: int) -> int | None:
+    """
+    Move split boundary upward until it is safe and leaves at least
+    header + 1 data row in part 1.
+    """
+    s = candidate_after
+    while s >= 1:
+        if _is_split_boundary_safe(rows_xml, s):
+            return s
+        s -= 1
+    return None
+
+
+def _find_caption_number_before_table(doc: Document, tbl_xml) -> str | None:
+    """
+    Strict source of truth: caption paragraph before the table.
+    Supports:
+      - "Таблица X.X"
+      - "Таблица X.X.X"
+    and two-paragraph format (caption line + title line).
+    """
+    body = doc.element.body
+    children = list(body)
+    try:
+        idx = children.index(tbl_xml)
+    except ValueError:
+        return None
+
+    # Build a fast map of paragraph XML -> paragraph text
+    para_text = {p._element: _norm_text(p.text) for p in doc.paragraphs}
+
+    j = idx - 1
+    nonempty_seen = 0
+    while j >= 0 and nonempty_seen < 4:
+        node = children[j]
+        if node.tag == qn("w:p"):
+            txt = para_text.get(node, "")
+            if txt:
+                nonempty_seen += 1
+                m = _TBL_NUM_RE.match(txt)
+                if m:
+                    return m.group(1)
+        elif node.tag == qn("w:tbl"):
+            break
+        j -= 1
+    return None
+
+
+def _build_continuation_para(text: str):
+    """
+    Create:
+      - left align
+      - Times New Roman 14 pt
+      - no first-line indent
+      - keepWithNext=True
+    """
+    p = OxmlElement("w:p")
+    pPr = OxmlElement("w:pPr")
+    p.append(pPr)
+
+    jc = OxmlElement("w:jc")
+    jc.set(qn("w:val"), "left")
+    pPr.append(jc)
+
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:firstLine"), "0")
+    ind.set(qn("w:left"), "0")
+    pPr.append(ind)
+
+    keep_next = OxmlElement("w:keepNext")
+    pPr.append(keep_next)
+
+    r = OxmlElement("w:r")
+    p.append(r)
+    rPr = OxmlElement("w:rPr")
+    r.append(rPr)
+
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), "Times New Roman")
+    fonts.set(qn("w:hAnsi"), "Times New Roman")
+    fonts.set(qn("w:cs"), "Times New Roman")
+    rPr.append(fonts)
+
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), "28")  # 14 pt
+    rPr.append(sz)
+    szCs = OxmlElement("w:szCs")
+    szCs.set(qn("w:val"), "28")
+    rPr.append(szCs)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
+    return p
+
+
+def _split_table_at(doc: Document, tbl_xml, split_after: int, continuation_text: str) -> bool:
+    rows = tbl_xml.findall(qn("w:tr"))
+    if len(rows) < 3:  # header + at least 2 data rows to split
+        return False
+    if split_after < 1 or split_after >= len(rows) - 1:
+        return False
+
+    header_row = deepcopy(rows[0])
+    tail_rows = [deepcopy(r) for r in rows[split_after + 1:]]
+    if not tail_rows:
+        return False
+
+    # part2 must have at least header + 1 data row
+    if len(tail_rows) < 1:
+        return False
+
+    tbl2 = deepcopy(tbl_xml)
+    for tr in list(tbl2.findall(qn("w:tr"))):
+        tbl2.remove(tr)
+    tbl2.append(header_row)
+    for tr in tail_rows:
+        tbl2.append(tr)
+
+    # mark repeated header row
+    trPr = header_row.find(qn("w:trPr"))
+    if trPr is None:
+        trPr = OxmlElement("w:trPr")
+        header_row.insert(0, trPr)
+    if trPr.find(qn("w:tblHeader")) is None:
+        trPr.append(OxmlElement("w:tblHeader"))
+
+    # trim part1
+    for tr in rows[split_after + 1:]:
+        tbl_xml.remove(tr)
+
+    body = doc.element.body
+    marker = _build_continuation_para(continuation_text)
+    tbl_xml.addnext(marker)
+    marker.addnext(tbl2)
+    return True
+
+
 
 _NUMERIC_CELL_RE = re.compile(r"^[\d\s\+\-−–,.%]+$")
 _PT_PER_CHAR_NUMERIC = 6.0   # approx pt/char for 12pt TNR digits
@@ -624,39 +837,62 @@ def apply_table_merging(doc: Document) -> int:
 
     Returns 0 (no changes made).
     """
-    # ## FUTURE: LibreOffice-based implementation ##
-    #
-    # Algorithm (to restore when a rendering engine is available):
-    #
-    # 1. Walk body elements in order tracking the last-seen table index.
-    #
-    # 2. CASE A — "Продолжение таблицы X" paragraph between two tables:
-    #    a. Detect via _is_student_continuation(text) (and NOT
-    #       _is_formatter_continuation() to skip our own previously inserted ones).
-    #    b. Confirm the next non-empty body element is a table with the same
-    #       number of grid columns as the preceding table.
-    #    c. Merge tbl2 into tbl1 via _merge_tables() (skipping duplicate header).
-    #    d. Remove the "Продолжение" paragraph from the body.
-    #    e. Record the student's split point in _MERGED_SPLIT_HINTS so
-    #       apply_table_continuation can use it as a priority hint.
-    #
-    # 3. CASE B — Adjacent tables with no body text between them (silent split):
-    #    Same merge logic, but without a "Продолжение" paragraph to remove.
-    #    Only merge if LRPB markers (or rendering data) confirm a page break
-    #    existed — otherwise the student's break is intentional (e.g. two
-    #    separate tables on the same page).
-    #
-    # 4. Apply merges in reverse body order so indices stay valid.
-    #
-    # Key helpers needed:
-    #   _is_formatter_continuation(para) — checks w:rsidR == _FORMATTER_RSID
-    #   _rows_match(row1, row2)          — compares cell texts for dup-header detection
-    #   _merge_tables(tbl1_xml, tbl1_obj, tbl2_xml, tbl2_obj) — appends rows
-    #   _MERGED_SPLIT_HINTS: dict[int, int] — maps id(tbl_xml) → split_after_row
-    #
-    # All of the above were implemented and removed from this file.
-    # Restore from git history (last commit before this docstring was added).
-    return 0
+    body = doc.element.body
+    children = list(body)
+    merges = 0
+
+    i = 1
+    while i < len(children) - 1:
+        prev_node = children[i - 1]
+        node = children[i]
+        next_node = children[i + 1]
+
+        if prev_node.tag != qn("w:tbl") or node.tag != qn("w:p") or next_node.tag != qn("w:tbl"):
+            i += 1
+            continue
+
+        p_obj = next((p for p in doc.paragraphs if p._element is node), None)
+        marker_text = _norm_text(p_obj.text if p_obj is not None else "")
+        if not _is_any_continuation_marker(marker_text):
+            i += 1
+            continue
+
+        tbl1 = prev_node
+        tbl2 = next_node
+
+        # "correct manual split" criteria:
+        # - marker paragraph exists (we are here)
+        # - continuation part is a table (true by pattern)
+        # - header row of continuation matches original header row
+        # - compatible by column count
+        compatible = _table_col_count(tbl1) == _table_col_count(tbl2) and _table_col_count(tbl1) > 0
+        rows1 = tbl1.findall(qn("w:tr"))
+        rows2 = tbl2.findall(qn("w:tr"))
+        headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
+        keep_manual_split = compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
+
+        if keep_manual_split:
+            i += 1
+            continue
+
+        # Rebuild invalid split: merge tbl2 into tbl1, skipping duplicate header if present.
+        start_idx = 1 if headers_match else 0
+        for tr in rows2[start_idx:]:
+            tbl1.append(deepcopy(tr))
+
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+        parent2 = tbl2.getparent()
+        if parent2 is not None:
+            parent2.remove(tbl2)
+        merges += 1
+
+        # refresh snapshot after mutations
+        children = list(body)
+        i = max(1, i - 1)
+
+    return merges
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -677,35 +913,6 @@ def apply_table_continuation(
 
     Returns 0 (no splits performed).
     """
-    # ## FUTURE: LibreOffice-based splitting implementation ##
-    #
-    # Algorithm (to restore when a rendering engine is available):
-    #
-    # 1. Pre-pass: call apply_table_merging() to undo student-split table pairs.
-    #
-    # 2. For each table in the document body:
-    #    a. Look up the rendering engine's page-break report to find which rows
-    #       straddle a page boundary (replaces stale LRPB detection).
-    #    b. Collect all split points (there can be multiple for long tables).
-    #    c. Apply splits from last to first (so earlier indices stay valid):
-    #         _split_table(tbl_xml, split_after_row, table_num)
-    #       which:
-    #         • deep-copies the table → tbl2
-    #         • trims tbl1 to rows 0..split_after
-    #         • prepends header row to tbl2 + marks it w:tblHeader
-    #         • inserts "Продолжение таблицы X" para between tbl1 and tbl2
-    #
-    # 3. Stale-signal guards (needed even with rendering engine):
-    #    _MIN_ROWS_TO_SPLIT = 4  — skip split if <4 rows land on page 1
-    #    table-fits-on-one-page  — skip if total height ≤ body height
-    #
-    # 4. Warn via report.warn() for tables where no reliable split was found.
-    #
-    # Key helpers needed (restore from git history):
-    #   _split_table(tbl_elem, split_after_row, table_num) → bool
-    #   _make_continuation_para(table_num) → OxmlElement
-    #   _MERGED_SPLIT_HINTS: dict[int, int]
-
     # ── Column-width optimisation (always active) ──────────────────────────
     body_w = _body_width_pt(doc)
     n_col_fixed = 0
@@ -717,7 +924,107 @@ def apply_table_continuation(
     if n_col_fixed:
         logger.info("table_continuation: col-width optimised %d table(s)", n_col_fixed)
 
-    return 0
+    body_h = _body_height_pt(doc)
+    split_count = 0
+    # Up to 4 passes to support multi-page tables after each mutation.
+    for _ in range(4):
+        changed = False
+        body_elems = list(_iter_body(doc))
+        current_h = 0.0
+
+        i = 0
+        while i < len(body_elems):
+            kind, xml_elem, py_obj = body_elems[i]
+
+            if kind == "paragraph":
+                h = _estimate_para_height(py_obj)
+                if current_h + h > body_h:
+                    current_h = h
+                else:
+                    current_h += h
+                i += 1
+                continue
+
+            # table
+            tbl_xml = xml_elem
+            tbl_obj = py_obj
+            rows = tbl_obj.rows
+            col_widths = _tbl_col_widths_pt(tbl_xml)
+            row_heights = [_estimate_row_height(r, body_w, col_widths) for r in rows]
+            tbl_total_h = sum(row_heights)
+
+            # Idempotency: if table already follows a continuation marker, keep it.
+            prev = tbl_xml.getprevious()
+            if prev is not None and prev.tag == qn("w:p"):
+                prev_p = next((p for p in doc.paragraphs if p._element is prev), None)
+                if prev_p is not None and _is_any_continuation_marker(prev_p.text):
+                    if current_h + tbl_total_h > body_h:
+                        current_h = tbl_total_h
+                    else:
+                        current_h += tbl_total_h
+                    i += 1
+                    continue
+
+            # Fits as-is
+            if current_h + tbl_total_h <= body_h or len(rows) < 3:
+                if current_h + tbl_total_h > body_h:
+                    current_h = tbl_total_h
+                else:
+                    current_h += tbl_total_h
+                i += 1
+                continue
+
+            # Need split candidate: keep header + as many data rows as fit.
+            avail = body_h - current_h
+            if avail <= 0:
+                # Page full; defer to next page handling.
+                current_h = 0.0
+                i += 1
+                continue
+
+            acc = row_heights[0]  # header
+            candidate_after = None
+            for r_idx in range(1, len(row_heights)):
+                if acc + row_heights[r_idx] <= avail:
+                    acc += row_heights[r_idx]
+                    candidate_after = r_idx
+                else:
+                    break
+
+            # Need at least header + 1 data row in part 1.
+            if candidate_after is None or candidate_after < 1:
+                # safe split impossible -> keep table whole
+                current_h = tbl_total_h if current_h > 0 else min(tbl_total_h, body_h)
+                i += 1
+                continue
+
+            rows_xml = tbl_xml.findall(qn("w:tr"))
+            safe_after = _find_safe_split_after(rows_xml, candidate_after)
+            if safe_after is None or safe_after < 1:
+                current_h = tbl_total_h if current_h > 0 else min(tbl_total_h, body_h)
+                i += 1
+                continue
+
+            # Need at least 1 data row left for continuation part.
+            if len(rows_xml) - (safe_after + 1) < 1:
+                current_h = tbl_total_h if current_h > 0 else min(tbl_total_h, body_h)
+                i += 1
+                continue
+
+            num = _find_caption_number_before_table(doc, tbl_xml)
+            continuation_text = f"Продолжение таблицы {num}" if num else "Продолжение таблицы"
+
+            if _split_table_at(doc, tbl_xml, safe_after, continuation_text):
+                split_count += 1
+                changed = True
+                break
+
+            i += 1
+
+        if not changed:
+            break
+
+    return split_count
 
 
 # ── Remove empty paragraphs between image and figure caption ─────────────────
