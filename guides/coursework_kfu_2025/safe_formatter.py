@@ -3266,6 +3266,67 @@ def ensure_single_blank_before_figure_captions(document, body_start):
     return changed
 
 
+def ensure_single_blank_before_figure_blocks(document, body_start):
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        in_references = False
+
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+
+            text = clean_spaces(p.text)
+
+            if is_references_heading_text(text):
+                in_references = True
+                continue
+
+            if in_references and is_appendix_heading_text(text):
+                in_references = False
+
+            if in_references or not paragraph_has_drawing(p) or idx <= body_start:
+                continue
+
+            prev_idx = idx - 1
+            prev_p = paragraphs[prev_idx]
+
+            if is_empty_paragraph(prev_p):
+                while prev_idx - 1 >= body_start and is_empty_paragraph(paragraphs[prev_idx - 1]):
+                    remove_paragraph(paragraphs[prev_idx - 1])
+                    changed = True
+                    break
+
+                if changed:
+                    break
+
+                format_empty_paragraph(prev_p)
+                continue
+
+            prev_text = clean_spaces(prev_p.text)
+            prev_kind = detect_kind_from_paragraph_object(prev_p, prev_text, prev_kind=None)
+            if prev_kind in {
+                "figure_caption",
+                "table_caption",
+                "table_continuation",
+                "table_title",
+                "source_line",
+                "heading1",
+                "heading2",
+                "reference_subheading",
+                "toc_heading",
+            }:
+                continue
+
+            new_p = insert_paragraph_after(prev_p, "")
+            format_empty_paragraph(new_p)
+            changed = True
+            break
+
+    return changed
+
+
 def remove_empty_between_figure_caption_and_source(document, body_start):
     changed = True
     while changed:
@@ -3401,6 +3462,7 @@ def ensure_compact_heading2_spacing(document, body_start):
             if idx - 1 < body_start or not is_empty_paragraph(paragraphs[idx - 1]):
                 new_p = OxmlElement("w:p")
                 p._element.addprevious(new_p)
+                format_heading2_spacing_paragraph(Paragraph(new_p, p._parent))
                 paragraphs = document.paragraphs
                 idx += 1
                 changed = True
@@ -3412,7 +3474,7 @@ def ensure_compact_heading2_spacing(document, body_start):
                 changed = True
 
             if idx - 1 >= body_start and is_empty_paragraph(paragraphs[idx - 1]):
-                hard_reset_paragraph_format(paragraphs[idx - 1], first_line_indent_cm=None)
+                format_heading2_spacing_paragraph(paragraphs[idx - 1])
 
         # ПОСЛЕ heading2:
         # всегда ровно одна пустая строка
@@ -3604,6 +3666,14 @@ def format_empty_paragraph(paragraph):
     ensure_empty_run(paragraph)
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def format_heading2_spacing_paragraph(paragraph):
+    format_empty_paragraph(paragraph)
+    # Phase 3 removes empty first lines at page top unless they are meaningful
+    # spacers. A tiny space_before marks this as intentional while preserving
+    # the visual one-blank-line layout before Heading 2.
+    paragraph.paragraph_format.space_before = Pt(3)
     
 def normalize_sections(document):
     """
@@ -4201,6 +4271,13 @@ def process_document(input_path: Path, output_path: Path):
     )
 
     run_with_pass_limit(
+        "ensure_single_blank_before_figure_blocks",
+        ensure_single_blank_before_figure_blocks,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
         "ensure_single_blank_before_figure_captions",
         ensure_single_blank_before_figure_captions,
         doc,
@@ -4371,6 +4448,13 @@ def process_document(input_path: Path, output_path: Path):
         format_body(paragraph)
         prev_nonempty_kind = "body_text"
 
+    run_with_pass_limit(
+        "ensure_compact_heading2_spacing_final",
+        ensure_compact_heading2_spacing,
+        doc,
+        body_start,
+    )
+
     normalize_sections(doc)
     ensure_front_matter_layout(doc, body_start)
     apply_page_breaks(doc, body_start)
@@ -4385,6 +4469,13 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "ensure_single_blank_after_references_heading_final",
         ensure_single_blank_after_references_heading,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "ensure_compact_heading2_spacing_ultimate",
+        ensure_compact_heading2_spacing,
         doc,
         body_start,
     )
