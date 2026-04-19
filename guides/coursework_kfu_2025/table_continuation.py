@@ -515,6 +515,18 @@ class RenderedSplitCandidate:
     split_after: int
 
 
+@dataclass(frozen=True)
+class RenderedWholeTableMoveCandidate:
+    table_idx: int
+    tbl_xml: object
+    caption_para_xml: object
+
+
+_START_HAS_COMPLETE_DATA_ROW = "has_complete_data_row"
+_START_NO_COMPLETE_DATA_ROW = "no_complete_data_row"
+_START_AMBIGUOUS = "ambiguous"
+
+
 def _tbl_has_at_least_two_rows(tbl_xml) -> bool:
     return len(tbl_xml.findall(qn("w:tr"))) >= 2
 
@@ -587,6 +599,38 @@ def _find_caption_number_before_table(doc: Document, tbl_xml) -> str | None:
                 m = _TBL_NUM_RE.match(txt)
                 if m:
                     return m.group(1)
+        elif node.tag == qn("w:tbl"):
+            break
+        j -= 1
+    return None
+
+
+def _find_caption_paragraph_before_table(doc: Document, tbl_xml):
+    """
+    Return the strict table caption paragraph XML and number before tbl_xml.
+    The caption paragraph, not the title paragraph, is the only safe anchor for
+    whole-table moves.
+    """
+    body = doc.element.body
+    children = list(body)
+    try:
+        idx = children.index(tbl_xml)
+    except ValueError:
+        return None
+
+    para_text = {p._element: _norm_text(p.text) for p in doc.paragraphs}
+
+    j = idx - 1
+    nonempty_seen = 0
+    while j >= 0 and nonempty_seen < 4:
+        node = children[j]
+        if node.tag == qn("w:p"):
+            txt = para_text.get(node, "")
+            if txt:
+                nonempty_seen += 1
+                m = _TBL_NUM_RE.match(txt)
+                if m:
+                    return node, m.group(1)
         elif node.tag == qn("w:tbl"):
             break
         j -= 1
@@ -693,6 +737,196 @@ def _match_row_pages(table_sig: TableSignature, pdf_lines: list[PdfLine]) -> dic
         row_pages[sig.row_idx] = page_num
 
     return row_pages
+
+
+_TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
+
+
+def _distinctive_tokens(text: str) -> set[str]:
+    tokens = {
+        token.lower()
+        for token in _TOKEN_RE.findall(_norm_text(text))
+        if len(token) >= 4 and not token.isdigit()
+    }
+    return tokens
+
+
+def _row_distinctive_tokens(sig: RowSignature) -> set[str]:
+    out: set[str] = set()
+    for fragment in sig.fragments:
+        out.update(_distinctive_tokens(fragment))
+    return out
+
+
+def _unique_data_row_tokens(data_rows: list[RowSignature]) -> dict[int, set[str]]:
+    all_tokens: dict[str, int] = {}
+    row_tokens: dict[int, set[str]] = {}
+    for sig in data_rows:
+        tokens = _row_distinctive_tokens(sig)
+        row_tokens[sig.row_idx] = tokens
+        for token in tokens:
+            all_tokens[token] = all_tokens.get(token, 0) + 1
+    return {
+        row_idx: {token for token in tokens if all_tokens[token] == 1}
+        for row_idx, tokens in row_tokens.items()
+    }
+
+
+def _line_matches_caption_number(line_text: str, num: str) -> bool:
+    m = _TBL_NUM_RE.match(_norm_text(line_text))
+    return bool(m and m.group(1) == num)
+
+
+def _row_has_any_token_in_text(sig: RowSignature, text: str) -> bool:
+    tokens = _row_distinctive_tokens(sig)
+    if not tokens:
+        return False
+    text_tokens = _distinctive_tokens(text)
+    return bool(tokens & text_tokens)
+
+
+def _tokens_in_text(tokens: set[str], text: str) -> bool:
+    if not tokens:
+        return False
+    return bool(tokens & _distinctive_tokens(text))
+
+
+def _has_complete_data_row_in_page_window(
+    data_rows: list[RowSignature],
+    unique_tokens: dict[int, set[str]],
+    page_texts: list[str],
+) -> bool:
+    max_window = 4
+    for sig in data_rows:
+        tokens = unique_tokens[sig.row_idx]
+        if len(tokens) < 2:
+            continue
+        for start in range(len(page_texts)):
+            for end in range(start + 1, min(len(page_texts), start + max_window) + 1):
+                window_text = " ".join(page_texts[start:end])
+                if tokens <= _distinctive_tokens(window_text):
+                    return True
+    return False
+
+
+def _classify_start_page_usability(
+    table_sig: TableSignature,
+    caption_num: str,
+    pdf_lines: list[PdfLine],
+) -> str:
+    """
+    Conservative Patch 2.1 detector.
+
+    It does not reconstruct the table. It only answers whether the rendered
+    caption page contains one clearly complete data row. Ambiguous evidence is
+    intentionally treated as no-op by the caller.
+    """
+    caption_matches = [
+        (idx, line)
+        for idx, line in enumerate(pdf_lines)
+        if _line_matches_caption_number(line.text, caption_num)
+    ]
+    if len(caption_matches) != 1:
+        return _START_AMBIGUOUS
+
+    caption_idx, caption_line = caption_matches[0]
+    start_page = caption_line.page_num
+    same_page_lines = [
+        line
+        for idx, line in enumerate(pdf_lines)
+        if idx > caption_idx and line.page_num == start_page
+    ]
+    if not same_page_lines:
+        return _START_AMBIGUOUS
+
+    header = next((sig for sig in table_sig.rows if sig.row_idx == 0), None)
+    data_rows = [sig for sig in table_sig.rows if sig.row_idx > 0]
+    if header is None or not data_rows:
+        return _START_AMBIGUOUS
+
+    data_keys = [sig.key for sig in data_rows]
+    if len(data_keys) != len(set(data_keys)):
+        return _START_AMBIGUOUS
+    unique_tokens = _unique_data_row_tokens(data_rows)
+    if any(not unique_tokens.get(sig.row_idx) for sig in data_rows):
+        return _START_AMBIGUOUS
+
+    same_page_texts = [_norm_match_text(line.text) for line in same_page_lines]
+    same_page_joined = " ".join(same_page_texts)
+    header_search_limit = min(len(same_page_texts), 12)
+    header_line_indexes = [
+        idx
+        for idx, line_text in enumerate(same_page_texts[:header_search_limit])
+        if _row_matches_line(header, line_text) or _row_has_any_token_in_text(header, line_text)
+    ]
+    if not header_line_indexes and not _row_has_any_token_in_text(header, same_page_joined):
+        return _START_AMBIGUOUS
+
+    data_page_texts = same_page_texts[(max(header_line_indexes) + 1):] if header_line_indexes else same_page_texts
+    data_page_joined = " ".join(data_page_texts)
+
+    for sig in data_rows:
+        if any(_row_matches_line(sig, line_text) for line_text in data_page_texts):
+            return _START_HAS_COMPLETE_DATA_ROW
+    if _has_complete_data_row_in_page_window(data_rows, unique_tokens, data_page_texts):
+        return _START_HAS_COMPLETE_DATA_ROW
+
+    rows_with_start_page_tokens = [
+        sig for sig in data_rows if _tokens_in_text(unique_tokens[sig.row_idx], data_page_joined)
+    ]
+    if not rows_with_start_page_tokens:
+        return _START_NO_COMPLETE_DATA_ROW
+
+    later_text = " ".join(
+        _norm_match_text(line.text)
+        for idx, line in enumerate(pdf_lines)
+        if idx > caption_idx and line.page_num > start_page
+    )
+    split_like_rows = [
+        sig for sig in rows_with_start_page_tokens
+        if _tokens_in_text(unique_tokens[sig.row_idx], later_text)
+    ]
+    if len(split_like_rows) == 1:
+        return _START_NO_COMPLETE_DATA_ROW
+
+    return _START_AMBIGUOUS
+
+
+def _find_rendered_whole_table_move_candidate(
+    doc: Document,
+    pdf_lines: list[PdfLine],
+) -> RenderedWholeTableMoveCandidate | None:
+    manual_skip = _valid_manual_continuation_table_ids(doc)
+
+    for table_sig in _collect_table_signatures(doc):
+        if id(table_sig.tbl_xml) in manual_skip:
+            continue
+
+        caption = _find_caption_paragraph_before_table(doc, table_sig.tbl_xml)
+        if caption is None:
+            continue
+        caption_para_xml, caption_num = caption
+
+        usability = _classify_start_page_usability(table_sig, caption_num, pdf_lines)
+        if usability == _START_NO_COMPLETE_DATA_ROW:
+            return RenderedWholeTableMoveCandidate(
+                table_idx=table_sig.table_idx,
+                tbl_xml=table_sig.tbl_xml,
+                caption_para_xml=caption_para_xml,
+            )
+
+    return None
+
+
+def _ensure_page_break_before(para_elem) -> bool:
+    pPr = para_elem.find(qn("w:pPr"))
+    if pPr is not None and pPr.find(qn("w:pageBreakBefore")) is not None:
+        return False
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        para_elem.insert(0, pPr)
+    pPr.append(OxmlElement("w:pageBreakBefore"))
+    return True
 
 
 def _find_rendered_split_candidate(
@@ -1132,6 +1366,13 @@ def apply_rendered_table_continuation(
     finally:
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    move_candidate = _find_rendered_whole_table_move_candidate(doc, pdf_lines)
+    if move_candidate is not None:
+        if not _ensure_page_break_before(move_candidate.caption_para_xml):
+            return 0
+        doc.save(str(docx_path))
+        return 1
 
     candidate = _find_rendered_split_candidate(doc, pdf_lines)
     if candidate is None:

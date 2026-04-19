@@ -720,6 +720,169 @@ def test_c_rendered_split_caption_number_and_fallback() -> tuple[bool, str]:
     return _result(True, "strict caption number and fallback markers correct")
 
 
+def test_c_rendered_start_page_moves_whole_table_without_complete_data_row() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    caption = doc.add_paragraph("Таблица 2.2.3")
+    doc.add_paragraph("Показатели эффективности")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Показатель"
+    tbl.rows[0].cells[1].text = "Экономия"
+    tbl.rows[1].cells[0].text = "Почтовые расходы"
+    tbl.rows[1].cells[1].text = "переход на электронный документооборот"
+    tbl.rows[2].cells[0].text = "Архивное хранение"
+    tbl.rows[2].cells[1].text = "высокая экономия архива"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "move.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "move.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.2.3", 1, 686.5, 700.0),
+                PdfLine("Показатели эффективности", 1, 710.8, 724.0),
+                PdfLine("Показатель Экономия", 1, 741.8, 755.0),
+                PdfLine("Почтовые расходы переход", 1, 763.2, 776.0),
+                PdfLine("на электронный документооборот", 2, 86.8, 99.0),
+                PdfLine("Архивное хранение высокая экономия архива", 2, 108.0, 121.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == caption.text)
+
+    pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+    markers = [p.text for p in reread.paragraphs if "Продолжение таблицы" in (p.text or "")]
+
+    if n != 1:
+        return _result(False, f"expected whole-table move, got {n}")
+    if page_break is None:
+        return _result(False, "caption did not receive pageBreakBefore")
+    if len(reread.tables) != 1:
+        return _result(False, f"whole-table move should not split, got {len(reread.tables)} tables")
+    if markers:
+        return _result(False, f"whole-table move inserted continuation marker: {markers!r}")
+    return _result(True, "whole-table move applied to caption")
+
+
+def test_c_rendered_start_page_skips_ambiguous_usability() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.4")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Год"
+    tbl.rows[0].cells[1].text = "Значение"
+    tbl.rows[1].cells[0].text = "2023"
+    tbl.rows[1].cells[1].text = "10"
+    tbl.rows[2].cells[0].text = "2024"
+    tbl.rows[2].cells[1].text = "10"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "ambiguous_move.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "ambiguous_move.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.2.4", 1, 690.0, 702.0),
+                PdfLine("Год Значение", 1, 735.0, 748.0),
+                PdfLine("2023", 1, 763.0, 776.0),
+                PdfLine("10", 2, 86.0, 98.0),
+                PdfLine("2024 10", 2, 108.0, 120.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == "Таблица 2.2.4")
+
+    pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+
+    if n != 0:
+        return _result(False, f"ambiguous start-page evidence should skip, got {n}")
+    if page_break is not None:
+        return _result(False, "ambiguous start-page evidence added pageBreakBefore")
+    if len(reread.tables) != 1:
+        return _result(False, f"ambiguous start-page evidence changed tables: {len(reread.tables)}")
+    return _result(True, "ambiguous start-page usability skipped")
+
+
+def test_c_rendered_start_page_keeps_table_with_clear_complete_data_row() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.5")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Показатель"
+    tbl.rows[0].cells[1].text = "Эффект"
+    tbl.rows[1].cells[0].text = "Почтовые расходы"
+    tbl.rows[1].cells[1].text = "экономия бюджета"
+    tbl.rows[2].cells[0].text = "Архивное хранение"
+    tbl.rows[2].cells[1].text = "снижение затрат"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "clear_row.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "clear_row.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.2.5", 1, 400.0, 412.0),
+                PdfLine("Показатель Эффект", 1, 430.0, 442.0),
+                PdfLine("Почтовые расходы экономия бюджета", 1, 455.0, 467.0),
+                PdfLine("Архивное хранение снижение затрат", 1, 480.0, 492.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == "Таблица 2.2.5")
+
+    pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+
+    if n != 0:
+        return _result(False, f"clear complete data row should not move table, got {n}")
+    if page_break is not None:
+        return _result(False, "clear complete data row still added pageBreakBefore")
+    if len(reread.tables) != 1:
+        return _result(False, f"clear complete data row changed tables: {len(reread.tables)}")
+    return _result(True, "clear complete data row prevents whole-table move")
+
+
 def test_c_vmerge_guard_rejects_boundary_inside_merge_zone() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_continuation import _is_split_boundary_safe
 
@@ -1865,6 +2028,9 @@ def run_all() -> None:
         ("C  | rendered merged-boundary skip",         test_c_rendered_split_skips_merged_boundary_conflict),
         ("C  | rendered marker formatting",            test_c_rendered_split_marker_is_right_aligned),
         ("C  | rendered caption number/fallback",      test_c_rendered_split_caption_number_and_fallback),
+        ("C  | rendered whole-table move",             test_c_rendered_start_page_moves_whole_table_without_complete_data_row),
+        ("C  | rendered start-page ambiguity skip",    test_c_rendered_start_page_skips_ambiguous_usability),
+        ("C  | rendered start-page complete row",      test_c_rendered_start_page_keeps_table_with_clear_complete_data_row),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
         ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),
