@@ -212,6 +212,7 @@ def test_c_apply_table_merging_keeps_valid_manual_split() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_continuation import apply_table_merging
 
     doc = Document()
+    doc.add_paragraph("Таблица 1.1")
     t1 = doc.add_table(rows=3, cols=2)
     t1.rows[0].cells[0].text = "H1"
     t1.rows[0].cells[1].text = "H2"
@@ -220,7 +221,9 @@ def test_c_apply_table_merging_keeps_valid_manual_split() -> tuple[bool, str]:
     t1.rows[2].cells[0].text = "c"
     t1.rows[2].cells[1].text = "d"
 
-    doc.add_paragraph("Продолжение таблицы 1.1")
+    marker = doc.add_paragraph("Продолжение таблицы 1.1")
+    marker.alignment = 2
+    marker.paragraph_format.keep_with_next = True
 
     t2 = doc.add_table(rows=2, cols=2)
     # valid continuation header equals source header
@@ -235,6 +238,38 @@ def test_c_apply_table_merging_keeps_valid_manual_split() -> tuple[bool, str]:
     if len(doc.tables) != 2:
         return _result(False, f"expected 2 tables preserved, got {len(doc.tables)}")
     return _result(True, "valid manual split preserved")
+
+
+def test_c_apply_table_merging_rebuilds_marker_without_keep_next() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1")
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "a"
+    t1.rows[1].cells[1].text = "b"
+
+    marker = doc.add_paragraph("Продолжение таблицы 1.3.1")
+    marker.alignment = 2  # right, but not tightly coupled to the continuation table
+
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.rows[0].cells[0].text = "H1"
+    t2.rows[0].cells[1].text = "H2"
+    t2.rows[1].cells[0].text = "c"
+    t2.rows[1].cells[1].text = "d"
+
+    n = apply_table_merging(doc)
+    if n != 1:
+        return _result(False, f"expected malformed manual chain to be rebuilt, got {n}")
+    if len(doc.tables) != 1:
+        return _result(False, f"expected 1 table after rebuild, got {len(doc.tables)}")
+    if any("Продолжение таблицы" in (p.text or "") for p in doc.paragraphs):
+        return _result(False, "malformed continuation marker was preserved")
+    if len(doc.tables[0].rows) != 3:
+        return _result(False, f"expected duplicate header skipped after merge, rows={len(doc.tables[0].rows)}")
+    return _result(True, "manual chain without keepWithNext rebuilt")
 
 
 def test_c_apply_table_continuation_does_not_heuristic_split() -> tuple[bool, str]:
@@ -477,6 +512,7 @@ def test_c_rendered_split_preserves_valid_manual_split() -> tuple[bool, str]:
     t1.rows[1].cells[1].text = "beta"
     marker = doc.add_paragraph("Продолжение таблицы 1.1")
     marker.alignment = 2  # right; must be preserved exactly
+    marker.paragraph_format.keep_with_next = True
     t2 = doc.add_table(rows=2, cols=2)
     t2.rows[0].cells[0].text = "H1"
     t2.rows[0].cells[1].text = "H2"
@@ -1082,6 +1118,39 @@ def test_b2_rule6_propagates_through_empty_para() -> tuple[bool, str]:
             "keep_with_next not set on empty paragraph between image and caption",
         )
     return _result(True, "keepWithNext propagated through empty paragraph to caption")
+
+
+def test_b2_table_source_note_normalised_and_chained() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "a"
+    tbl.rows[1].cells[1].text = "b"
+    source = doc.add_paragraph("Источник: составлено автором.")
+    source.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    note = doc.add_paragraph("Примечание: расчет ориентировочный.")
+    note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    apply_pagination_rules(doc)
+
+    last_cell_p = tbl.rows[-1].cells[-1].paragraphs[-1]
+    if not last_cell_p.paragraph_format.keep_with_next:
+        return _result(False, "table tail is not chained to source/note")
+    if not source.paragraph_format.keep_with_next:
+        return _result(False, "source is not chained to following note")
+    if source.alignment != WD_ALIGN_PARAGRAPH.JUSTIFY:
+        return _result(False, f"source alignment not normalised: {source.alignment}")
+    if note.alignment != WD_ALIGN_PARAGRAPH.JUSTIFY:
+        return _result(False, f"note alignment not normalised: {note.alignment}")
+    if source.paragraph_format.first_line_indent is None:
+        return _result(False, "source first-line indent was not restored")
+    if note.paragraph_format.first_line_indent is None:
+        return _result(False, "note first-line indent was not restored")
+    return _result(True, "table source/note normalised and chained")
 
 
 def test_b2_image_height_from_emu() -> tuple[bool, str]:
@@ -2017,6 +2086,7 @@ def run_all() -> None:
         ("C  | strict caption-number extraction",      test_c_caption_number_extraction_strict),
         ("C  | merge invalid manual split",            test_c_apply_table_merging_rebuilds_invalid_split),
         ("C  | keep valid manual split",               test_c_apply_table_merging_keeps_valid_manual_split),
+        ("C  | rebuild loose manual marker",           test_c_apply_table_merging_rebuilds_marker_without_keep_next),
         ("C  | heuristic split disabled",              test_c_apply_table_continuation_does_not_heuristic_split),
         ("C  | width normalisation only",              test_c_apply_table_continuation_width_normalization_only),
         ("C  | no-split double-run idempotency",       test_c_apply_table_continuation_no_split_double_run_idempotent),
@@ -2037,6 +2107,7 @@ def run_all() -> None:
         ("B2 | keepTogether on table_caption",         test_b2_keep_together_on_table_caption),
         ("B2 | keepTogether on heading1/heading2",     test_b2_keep_together_on_headings),
         ("B2 | rule6 keepWithNext through empty para", test_b2_rule6_propagates_through_empty_para),
+        ("B2 | table source/note chained",             test_b2_table_source_note_normalised_and_chained),
         ("B2 | image height from wp:extent cy",        test_b2_image_height_from_emu),
         ("B3 | footnote para: 10pt TNR no bold",       test_b3_format_footnote_para_applies_10pt_tnr),
         ("C2 | empty para image→caption removed",      test_c2_empty_para_between_image_and_caption_removed),

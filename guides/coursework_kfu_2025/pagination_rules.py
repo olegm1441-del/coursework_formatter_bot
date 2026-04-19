@@ -15,10 +15,14 @@ Rules NOT implemented here (require real page rendering → Phase 3):
 
 import logging
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Cm
 
 from .classifier import classify_paragraph, paragraph_text
 from .docx_utils import is_source_or_note_line
+from .rules import FIRST_LINE_INDENT_CM
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,20 @@ def _set_keep_with_next(paragraph, value: bool = True) -> None:
 def _set_keep_together(paragraph, value: bool = True) -> None:
     """Set keep_together (w:keepLines) — prevents a paragraph from being split mid-text."""
     paragraph.paragraph_format.keep_together = value
+
+
+def _set_keep_next_xml(p_elem) -> None:
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        p_elem.insert(0, pPr)
+    if pPr.find(qn("w:keepNext")) is None:
+        pPr.append(OxmlElement("w:keepNext"))
+
+
+def _normalise_source_note(paragraph) -> None:
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
 
 
 def _has_image(paragraph) -> bool:
@@ -64,13 +82,12 @@ def _apply_rule3(paragraphs: list, kinds: list[str]) -> int:
     """
     count = 0
     for p, kind in zip(paragraphs, kinds):
-        if kind in ("table_caption", "table_title", "table_continuation"):
+        if kind in ("table_caption", "table_title"):
             _set_keep_with_next(p)
             # keep_together prevents a long multi-line title from being split
             # across pages by Word's line-breaker (keepWithNext alone won't stop
             # that — it only keeps the paragraph joined to the NEXT element).
-            if kind in ("table_caption", "table_title"):
-                _set_keep_together(p)
+            _set_keep_together(p)
             count += 1
     return count
 
@@ -212,15 +229,33 @@ def _apply_rule_source_note(doc: Document) -> int:
                         last_tc = tc_elems[-1]
                         p_elems = last_tc.findall(qn("w:p"))
                         if p_elems:
-                            last_p_elem = p_elems[-1]
-                            para = para_map.get(last_p_elem)
-                            if para is not None:
-                                _set_keep_with_next(para)
-                                count += 1
-                                logger.debug(
-                                    "rule_source_note: keepWithNext on last row of table "
-                                    "before '%s'", text[:40]
-                                )
+                            _set_keep_next_xml(p_elems[-1])
+                            count += 1
+                            logger.debug(
+                                "rule_source_note: keepWithNext on last row of table "
+                                "before '%s'", text[:40]
+                            )
+
+                source_note_paras = []
+                k = j
+                while k < n:
+                    pelem = children[k]
+                    plocal = pelem.tag.split("}")[-1] if "}" in pelem.tag else pelem.tag
+                    if plocal != "p":
+                        break
+                    p_text = "".join(t.text or "" for t in pelem.findall(".//" + qn("w:t"))).strip()
+                    if not is_source_or_note_line(p_text):
+                        break
+                    para = para_map.get(pelem)
+                    if para is None:
+                        break
+                    source_note_paras.append(para)
+                    k += 1
+
+                for idx, para in enumerate(source_note_paras):
+                    _normalise_source_note(para)
+                    if idx < len(source_note_paras) - 1:
+                        _set_keep_with_next(para)
             break  # done with this table regardless
         i += 1
 

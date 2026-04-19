@@ -422,6 +422,10 @@ _TBL_NUM_RE = re.compile(
     r"(?:таблица|table)\s+(\d+(?:\.\d+){0,2})",
     re.IGNORECASE,
 )
+_CONT_NUM_RE = re.compile(
+    r"продолжение\s+таблицы\s+(\d+(?:\.\d+){0,2})",
+    re.IGNORECASE,
+)
 
 
 def _extract_table_num(text: str) -> str | None:
@@ -689,17 +693,61 @@ def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
             i += 1
             continue
 
-        compatible = _table_col_count(prev_node) == _table_col_count(next_node) and _table_col_count(prev_node) > 0
-        rows1 = prev_node.findall(qn("w:tr"))
-        rows2 = next_node.findall(qn("w:tr"))
-        headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
-        if compatible and headers_match and _tbl_has_at_least_two_rows(next_node):
+        if _is_valid_manual_continuation_chain(doc, prev_node, node, next_node):
             skip.add(id(prev_node))
             skip.add(id(next_node))
 
         i += 1
 
     return skip
+
+
+def _paragraph_has_keep_next(p_xml) -> bool:
+    pPr = p_xml.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    keep = pPr.find(qn("w:keepNext"))
+    if keep is None:
+        return False
+    return keep.get(qn("w:val")) not in {"0", "false", "False"}
+
+
+def _paragraph_is_right_aligned(p_xml) -> bool:
+    pPr = p_xml.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    jc = pPr.find(qn("w:jc"))
+    return bool(jc is not None and jc.get(qn("w:val")) == "right")
+
+
+def _manual_marker_matches_caption(doc: Document, tbl_xml, marker_text: str) -> bool:
+    caption_num = _find_caption_number_before_table(doc, tbl_xml)
+    marker_match = _CONT_NUM_RE.search(marker_text)
+    marker_num = marker_match.group(1) if marker_match else None
+    if caption_num is None and marker_num is None:
+        return True
+    return caption_num == marker_num
+
+
+def _is_valid_manual_continuation_chain(doc: Document, tbl1, marker_p, tbl2) -> bool:
+    marker_text = ""
+    for text_node in marker_p.findall(".//" + qn("w:t")):
+        marker_text += text_node.text or ""
+    marker_text = _norm_text(marker_text)
+    if not _is_any_continuation_marker(marker_text):
+        return False
+    if not _manual_marker_matches_caption(doc, tbl1, marker_text):
+        return False
+    if not _paragraph_is_right_aligned(marker_p):
+        return False
+    if not _paragraph_has_keep_next(marker_p):
+        return False
+
+    compatible = _table_col_count(tbl1) == _table_col_count(tbl2) and _table_col_count(tbl1) > 0
+    rows1 = tbl1.findall(qn("w:tr"))
+    rows2 = tbl2.findall(qn("w:tr"))
+    headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
+    return compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
 
 
 def _row_matches_line(sig: RowSignature, line_text: str) -> bool:
@@ -1259,16 +1307,10 @@ def apply_table_merging(doc: Document) -> int:
         tbl1 = prev_node
         tbl2 = next_node
 
-        # "correct manual split" criteria:
-        # - marker paragraph exists (we are here)
-        # - continuation part is a table (true by pattern)
-        # - header row of continuation matches original header row
-        # - compatible by column count
-        compatible = _table_col_count(tbl1) == _table_col_count(tbl2) and _table_col_count(tbl1) > 0
         rows1 = tbl1.findall(qn("w:tr"))
         rows2 = tbl2.findall(qn("w:tr"))
         headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
-        keep_manual_split = compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
+        keep_manual_split = _is_valid_manual_continuation_chain(doc, tbl1, node, tbl2)
 
         if keep_manual_split:
             i += 1
