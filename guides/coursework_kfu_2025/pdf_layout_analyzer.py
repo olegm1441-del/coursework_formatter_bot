@@ -35,6 +35,26 @@ class TextBlock:
 
 
 @dataclass
+class PdfWord:
+    """One rendered PDF word with page-local coordinates."""
+    text: str
+    page_num: int
+    x0: float
+    x1: float
+    top: float
+    bottom: float
+
+
+@dataclass
+class PdfLine:
+    """One rendered PDF text line with page-local coordinates."""
+    text: str
+    page_num: int
+    top: float
+    bottom: float
+
+
+@dataclass
 class PageInfo:
     """All text blocks found on one page."""
     page_num: int      # 1-based
@@ -210,3 +230,65 @@ def analyze_pdf(pdf_path: Path) -> list[PageInfo]:
 
     logger.info("pdf_layout_analyzer: analyzed %d pages", len(pages))
     return pages
+
+
+def analyze_pdf_lines(pdf_path: Path) -> list[PdfLine]:
+    """
+    Parse the PDF and return rendered text lines with page numbers.
+
+    This is additive to analyze_pdf(); existing block extraction remains
+    unchanged. Table splitting uses line-level data to map DOCX rows to the
+    page where LibreOffice actually rendered them.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        raise ImportError(
+            "pdfplumber is required for Phase 3. "
+            "Install it: pip install pdfplumber"
+        )
+
+    pdf_path = Path(pdf_path)
+    out: list[PdfLine] = []
+
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            words = page.extract_words(
+                x_tolerance=3,
+                y_tolerance=3,
+                keep_blank_chars=False,
+            )
+            if not words:
+                continue
+
+            lines: list[list[dict]] = []
+            current_line: list[dict] = []
+            last_top: float | None = None
+
+            for word in sorted(words, key=lambda w: (round(w["top"], 1), w["x0"])):
+                top = float(word["top"])
+                if last_top is None or abs(top - last_top) <= 2:
+                    current_line.append(word)
+                    last_top = top
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = [word]
+                    last_top = top
+
+            if current_line:
+                lines.append(current_line)
+
+            for line in lines:
+                text = _clean(" ".join(w["text"] for w in sorted(line, key=lambda w: w["x0"])))
+                if not text:
+                    continue
+                out.append(PdfLine(
+                    text=text,
+                    page_num=page_num,
+                    top=float(min(w["top"] for w in line)),
+                    bottom=float(max(w["bottom"] for w in line)),
+                ))
+
+    logger.info("pdf_layout_analyzer: extracted %d lines", len(out))
+    return out

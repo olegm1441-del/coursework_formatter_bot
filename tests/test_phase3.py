@@ -387,7 +387,7 @@ def test_c_apply_rendered_table_continuation_warns_when_pdf_analysis_fails() -> 
         doc.save(path)
 
         old_render = tc.render_docx_to_pdf
-        old_analyze = tc.analyze_pdf
+        old_analyze = tc.analyze_pdf_lines
         report = FormattingReport()
         try:
             tc.render_docx_to_pdf = lambda _path: pdf_path
@@ -395,11 +395,11 @@ def test_c_apply_rendered_table_continuation_warns_when_pdf_analysis_fails() -> 
             def raise_analysis(_path):
                 raise RuntimeError("pdf parse failed")
 
-            tc.analyze_pdf = raise_analysis
+            tc.analyze_pdf_lines = raise_analysis
             n = tc.apply_rendered_table_continuation(path, report=report)
         finally:
             tc.render_docx_to_pdf = old_render
-            tc.analyze_pdf = old_analyze
+            tc.analyze_pdf_lines = old_analyze
 
         reread = Document(str(path))
 
@@ -410,6 +410,314 @@ def test_c_apply_rendered_table_continuation_warns_when_pdf_analysis_fails() -> 
     if len(reread.tables) != 1:
         return _result(False, f"DOCX mutated unexpectedly, tables={len(reread.tables)}")
     return _result(True, "PDF analysis failure warns and does not mutate")
+
+
+def test_c_rendered_split_single_boundary_success() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.3")
+    tbl = doc.add_table(rows=4, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "alpha one"
+    tbl.rows[1].cells[1].text = "beta one"
+    tbl.rows[2].cells[0].text = "gamma two"
+    tbl.rows[2].cells[1].text = "delta two"
+    tbl.rows[3].cells[0].text = "epsilon three"
+    tbl.rows[3].cells[1].text = "zeta three"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "in.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "in.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("H1 H2", 1, 100.0, 112.0),
+                PdfLine("alpha one beta one", 1, 120.0, 132.0),
+                PdfLine("gamma two delta two", 2, 80.0, 92.0),
+                PdfLine("epsilon three zeta three", 2, 100.0, 112.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+
+    if n != 1:
+        return _result(False, f"expected one rendered split, got {n}")
+    if len(reread.tables) != 2:
+        return _result(False, f"expected 2 tables after split, got {len(reread.tables)}")
+    markers = [p.text for p in reread.paragraphs if "Продолжение таблицы" in (p.text or "")]
+    if markers != ["Продолжение таблицы 2.3"]:
+        return _result(False, f"unexpected markers: {markers!r}")
+    if [c.text for c in reread.tables[0].rows[0].cells] != [c.text for c in reread.tables[1].rows[0].cells]:
+        return _result(False, "continuation table header was not repeated")
+    return _result(True, "rendered single-boundary split succeeded")
+
+
+def test_c_rendered_split_preserves_valid_manual_split() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "alpha"
+    t1.rows[1].cells[1].text = "beta"
+    marker = doc.add_paragraph("Продолжение таблицы 1.1")
+    marker.alignment = 2  # right; must be preserved exactly
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.rows[0].cells[0].text = "H1"
+    t2.rows[0].cells[1].text = "H2"
+    t2.rows[1].cells[0].text = "gamma"
+    t2.rows[1].cells[1].text = "delta"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "manual.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "manual.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+        before_xml = marker._element.xml
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("H1 H2", 1, 100.0, 112.0),
+                PdfLine("alpha beta", 1, 120.0, 132.0),
+                PdfLine("gamma delta", 2, 80.0, 92.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        markers = [p for p in reread.paragraphs if "Продолжение таблицы" in (p.text or "")]
+
+    if n != 0:
+        return _result(False, f"valid manual split should be preserved, got split count {n}")
+    if len(reread.tables) != 2:
+        return _result(False, f"manual split table count changed: {len(reread.tables)}")
+    if len(markers) != 1 or markers[0]._element.xml != before_xml:
+        return _result(False, "manual continuation marker XML changed")
+    return _result(True, "valid manual split preserved exactly")
+
+
+def test_c_rendered_split_skips_ambiguous_repeated_rows() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.4")
+    tbl = doc.add_table(rows=4, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    for idx in range(1, 4):
+        tbl.rows[idx].cells[0].text = "same"
+        tbl.rows[idx].cells[1].text = "row"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "ambiguous.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "ambiguous.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("same row", 1, 120.0, 132.0),
+                PdfLine("same row", 2, 80.0, 92.0),
+                PdfLine("same row", 2, 100.0, 112.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+
+    if n != 0:
+        return _result(False, f"ambiguous repeated rows should skip, got {n}")
+    if len(reread.tables) != 1:
+        return _result(False, f"ambiguous split mutated table count: {len(reread.tables)}")
+    return _result(True, "ambiguous repeated rows skipped")
+
+
+def test_c_rendered_split_skips_merged_boundary_conflict() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.5")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "merge start"
+    tbl.rows[1].cells[1].text = "alpha"
+    tbl.rows[2].cells[0].text = "merge continue"
+    tbl.rows[2].cells[1].text = "beta"
+    tbl.cell(1, 0).merge(tbl.cell(2, 0))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "merged.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "merged.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("H1 H2", 1, 100.0, 112.0),
+                PdfLine("merge start alpha", 1, 120.0, 132.0),
+                PdfLine("merge continue beta", 2, 80.0, 92.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+
+    if n != 0:
+        return _result(False, f"merged boundary conflict should skip, got {n}")
+    if len(reread.tables) != 1:
+        return _result(False, f"merged conflict mutated table count: {len(reread.tables)}")
+    return _result(True, "merged boundary conflict skipped")
+
+
+def test_c_rendered_split_marker_is_right_aligned() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.6")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "alpha"
+    tbl.rows[1].cells[1].text = "beta"
+    tbl.rows[2].cells[0].text = "gamma"
+    tbl.rows[2].cells[1].text = "delta"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "format.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "format.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("H1 H2", 1, 100.0, 112.0),
+                PdfLine("alpha beta", 1, 120.0, 132.0),
+                PdfLine("gamma delta", 2, 80.0, 92.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        markers = [p for p in reread.paragraphs if "Продолжение таблицы" in (p.text or "")]
+
+    if n != 1 or len(markers) != 1:
+        return _result(False, f"expected one generated marker, n={n}, markers={len(markers)}")
+    pPr = markers[0]._element.find(qn("w:pPr"))
+    jc = pPr.find(qn("w:jc")) if pPr is not None else None
+    ind = pPr.find(qn("w:ind")) if pPr is not None else None
+    keep = pPr.find(qn("w:keepNext")) if pPr is not None else None
+    sz = markers[0]._element.find(".//" + qn("w:sz"))
+    if jc is None or jc.get(qn("w:val")) != "right":
+        return _result(False, "marker is not right-aligned")
+    if ind is None or ind.get(qn("w:firstLine")) != "0":
+        return _result(False, "marker first-line indent is not zero")
+    if keep is None:
+        return _result(False, "marker keepWithNext missing")
+    if sz is None or sz.get(qn("w:val")) != "28":
+        return _result(False, "marker font size is not 14pt")
+    return _result(True, "generated marker formatting is correct")
+
+
+def test_c_rendered_split_caption_number_and_fallback() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    def run_case(caption: str, expected_marker: str) -> tuple[bool, str]:
+        doc = Document()
+        doc.add_paragraph(caption)
+        tbl = doc.add_table(rows=3, cols=2)
+        tbl.rows[0].cells[0].text = "H1"
+        tbl.rows[0].cells[1].text = "H2"
+        tbl.rows[1].cells[0].text = "alpha"
+        tbl.rows[1].cells[1].text = "beta"
+        tbl.rows[2].cells[0].text = "gamma"
+        tbl.rows[2].cells[1].text = "delta"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "caption.docx"
+            pdf_dir = Path(tmp) / "pdf"
+            pdf_dir.mkdir()
+            pdf_path = pdf_dir / "caption.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            doc.save(path)
+
+            old_render = tc.render_docx_to_pdf
+            old_analyze = tc.analyze_pdf_lines
+            try:
+                tc.render_docx_to_pdf = lambda _path: pdf_path
+                tc.analyze_pdf_lines = lambda _path: [
+                    PdfLine("H1 H2", 1, 100.0, 112.0),
+                    PdfLine("alpha beta", 1, 120.0, 132.0),
+                    PdfLine("gamma delta", 2, 80.0, 92.0),
+                ]
+                n = tc.apply_rendered_table_continuation(path)
+            finally:
+                tc.render_docx_to_pdf = old_render
+                tc.analyze_pdf_lines = old_analyze
+
+            reread = Document(str(path))
+            markers = [p.text for p in reread.paragraphs if "Продолжение таблицы" in (p.text or "")]
+
+        if n != 1:
+            return _result(False, f"{caption!r}: expected split, got {n}")
+        if markers != [expected_marker]:
+            return _result(False, f"{caption!r}: expected {expected_marker!r}, got {markers!r}")
+        return _result(True, "")
+
+    ok, msg = run_case("Таблица 2.3.4", "Продолжение таблицы 2.3.4")
+    if not ok:
+        return _result(False, msg)
+    ok, msg = run_case("Таблица абв", "Продолжение таблицы")
+    if not ok:
+        return _result(False, msg)
+    return _result(True, "strict caption number and fallback markers correct")
 
 
 def test_c_vmerge_guard_rejects_boundary_inside_merge_zone() -> tuple[bool, str]:
@@ -1551,6 +1859,12 @@ def run_all() -> None:
         ("C  | no-split double-run idempotency",       test_c_apply_table_continuation_no_split_double_run_idempotent),
         ("C  | rendered split LO fallback",            test_c_apply_rendered_table_continuation_warns_when_lo_unavailable),
         ("C  | rendered split PDF fallback",           test_c_apply_rendered_table_continuation_warns_when_pdf_analysis_fails),
+        ("C  | rendered single-boundary split",        test_c_rendered_split_single_boundary_success),
+        ("C  | rendered preserves manual split",       test_c_rendered_split_preserves_valid_manual_split),
+        ("C  | rendered ambiguity skip",               test_c_rendered_split_skips_ambiguous_repeated_rows),
+        ("C  | rendered merged-boundary skip",         test_c_rendered_split_skips_merged_boundary_conflict),
+        ("C  | rendered marker formatting",            test_c_rendered_split_marker_is_right_aligned),
+        ("C  | rendered caption number/fallback",      test_c_rendered_split_caption_number_and_fallback),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
         ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),

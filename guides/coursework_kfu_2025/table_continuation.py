@@ -53,6 +53,7 @@ import math
 import re
 import shutil
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 
 from docx import Document
@@ -62,7 +63,7 @@ from docx.oxml.ns import qn
 
 from .docx_utils import xml_has_image, is_source_or_note_line, FormattingReport
 from .layout_render import LibreOfficeNotFoundError, render_docx_to_pdf
-from .pdf_layout_analyzer import analyze_pdf
+from .pdf_layout_analyzer import PdfLine, analyze_pdf_lines
 
 logger = logging.getLogger(__name__)
 
@@ -493,6 +494,27 @@ def _rows_match(row1_xml, row2_xml) -> bool:
     return _row_cell_texts(row1_xml) == _row_cell_texts(row2_xml)
 
 
+@dataclass(frozen=True)
+class RowSignature:
+    row_idx: int
+    key: str
+    fragments: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TableSignature:
+    table_idx: int
+    tbl_xml: object
+    rows: tuple[RowSignature, ...]
+
+
+@dataclass(frozen=True)
+class RenderedSplitCandidate:
+    table_idx: int
+    tbl_xml: object
+    split_after: int
+
+
 def _tbl_has_at_least_two_rows(tbl_xml) -> bool:
     return len(tbl_xml.findall(qn("w:tr"))) >= 2
 
@@ -571,10 +593,149 @@ def _find_caption_number_before_table(doc: Document, tbl_xml) -> str | None:
     return None
 
 
+def _norm_match_text(text: str) -> str:
+    return _norm_text(text).lower()
+
+
+def _row_signature(tr_xml, row_idx: int) -> RowSignature | None:
+    fragments = tuple(
+        frag
+        for frag in (_norm_match_text(t) for t in _row_cell_texts(tr_xml))
+        if frag
+    )
+    if not fragments:
+        return None
+    return RowSignature(row_idx=row_idx, key=" || ".join(fragments), fragments=fragments)
+
+
+def _collect_table_signatures(doc: Document) -> list[TableSignature]:
+    out: list[TableSignature] = []
+    for table_idx, table in enumerate(doc.tables):
+        rows: list[RowSignature] = []
+        for row_idx, tr in enumerate(table._tbl.findall(qn("w:tr"))):
+            sig = _row_signature(tr, row_idx)
+            if sig is not None:
+                rows.append(sig)
+        out.append(TableSignature(table_idx=table_idx, tbl_xml=table._tbl, rows=tuple(rows)))
+    return out
+
+
+def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
+    """
+    Return table XML ids that are already part of a valid manual continuation.
+    Valid manual chains must be preserved exactly.
+    """
+    body = doc.element.body
+    children = list(body)
+    skip: set[int] = set()
+
+    i = 1
+    while i < len(children) - 1:
+        prev_node = children[i - 1]
+        node = children[i]
+        next_node = children[i + 1]
+
+        if prev_node.tag != qn("w:tbl") or node.tag != qn("w:p") or next_node.tag != qn("w:tbl"):
+            i += 1
+            continue
+
+        p_obj = next((p for p in doc.paragraphs if p._element is node), None)
+        marker_text = _norm_text(p_obj.text if p_obj is not None else "")
+        if not _is_any_continuation_marker(marker_text):
+            i += 1
+            continue
+
+        compatible = _table_col_count(prev_node) == _table_col_count(next_node) and _table_col_count(prev_node) > 0
+        rows1 = prev_node.findall(qn("w:tr"))
+        rows2 = next_node.findall(qn("w:tr"))
+        headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
+        if compatible and headers_match and _tbl_has_at_least_two_rows(next_node):
+            skip.add(id(prev_node))
+            skip.add(id(next_node))
+
+        i += 1
+
+    return skip
+
+
+def _row_matches_line(sig: RowSignature, line_text: str) -> bool:
+    pos = 0
+    for fragment in sig.fragments:
+        found = line_text.find(fragment, pos)
+        if found < 0:
+            return False
+        pos = found + len(fragment)
+    return True
+
+
+def _match_row_pages(table_sig: TableSignature, pdf_lines: list[PdfLine]) -> dict[int, int] | None:
+    data_rows = [sig for sig in table_sig.rows if sig.row_idx > 0]
+    if len(data_rows) < 2:
+        return None
+
+    keys = [sig.key for sig in data_rows]
+    if len(keys) != len(set(keys)):
+        return None
+
+    line_texts = [(_norm_match_text(line.text), line.page_num) for line in pdf_lines]
+    row_pages: dict[int, int] = {}
+    last_match_idx = -1
+
+    for sig in data_rows:
+        matches = [
+            (idx, page_num)
+            for idx, (line_text, page_num) in enumerate(line_texts)
+            if idx > last_match_idx and _row_matches_line(sig, line_text)
+        ]
+        if len(matches) != 1:
+            return None
+        last_match_idx, page_num = matches[0]
+        row_pages[sig.row_idx] = page_num
+
+    return row_pages
+
+
+def _find_rendered_split_candidate(
+    doc: Document,
+    pdf_lines: list[PdfLine],
+) -> RenderedSplitCandidate | None:
+    manual_skip = _valid_manual_continuation_table_ids(doc)
+
+    for table_sig in _collect_table_signatures(doc):
+        if id(table_sig.tbl_xml) in manual_skip:
+            continue
+
+        rows_xml = table_sig.tbl_xml.findall(qn("w:tr"))
+        if len(rows_xml) < 3:
+            continue
+
+        row_pages = _match_row_pages(table_sig, pdf_lines)
+        if row_pages is None:
+            continue
+
+        for row_idx in sorted(row_pages):
+            next_idx = row_idx + 1
+            if next_idx not in row_pages:
+                continue
+            if row_pages[row_idx] < row_pages[next_idx]:
+                safe_after = _find_safe_split_after(rows_xml, row_idx)
+                if safe_after is None or safe_after < 1:
+                    return None
+                if len(rows_xml) - (safe_after + 1) < 1:
+                    return None
+                return RenderedSplitCandidate(
+                    table_idx=table_sig.table_idx,
+                    tbl_xml=table_sig.tbl_xml,
+                    split_after=safe_after,
+                )
+
+    return None
+
+
 def _build_continuation_para(text: str):
     """
     Create:
-      - left align
+      - right align
       - Times New Roman 14 pt
       - no first-line indent
       - keepWithNext=True
@@ -584,7 +745,7 @@ def _build_continuation_para(text: str):
     p.append(pPr)
 
     jc = OxmlElement("w:jc")
-    jc.set(qn("w:val"), "left")
+    jc.set(qn("w:val"), "right")
     pPr.append(jc)
 
     ind = OxmlElement("w:ind")
@@ -961,7 +1122,7 @@ def apply_rendered_table_continuation(
     pdf_path: Path | None = None
     try:
         pdf_path = render_docx_to_pdf(docx_path)
-        analyze_pdf(pdf_path)
+        pdf_lines = analyze_pdf_lines(pdf_path)
     except LibreOfficeNotFoundError as exc:
         _warn_rendered_split_unavailable(report, str(exc))
         return 0
@@ -972,8 +1133,17 @@ def apply_rendered_table_continuation(
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
-    _warn_rendered_split_unavailable(report, "rendered splitting is not implemented in Patch 1")
-    return 0
+    candidate = _find_rendered_split_candidate(doc, pdf_lines)
+    if candidate is None:
+        return 0
+
+    num = _find_caption_number_before_table(doc, candidate.tbl_xml)
+    continuation_text = f"Продолжение таблицы {num}" if num else "Продолжение таблицы"
+    if not _split_table_at(doc, candidate.tbl_xml, candidate.split_after, continuation_text):
+        return 0
+
+    doc.save(str(docx_path))
+    return 1
 
 
 # ── Remove empty paragraphs between image and figure caption ─────────────────
