@@ -12,8 +12,27 @@
 ## LibreOffice для форматирования таблиц
 - `worker` должен иметь доступ к `soffice`, потому что rendered table continuation
   строит PDF через LibreOffice.
-- LibreOffice ставится в Railway build через `nixpacks.toml`.
 - Новый Railway service не нужен: текущий `worker` остаётся самодостаточным.
+- Railway сейчас собирает сервис через Railpack, поэтому `nixpacks.toml` не является
+  рабочим способом поставить LibreOffice для этого окружения.
+- Для `worker` используется отдельный Dockerfile: `Dockerfile.worker`.
+- Root `Dockerfile` не добавляется, чтобы `web` продолжал собираться Railpack.
+
+## Настройка Railway UI
+1. Открой существующий `worker` service.
+2. В Build settings включи Dockerfile-based build только для `worker`.
+3. Укажи custom Dockerfile path:
+   `Dockerfile.worker`
+4. Если Railway использует переменную вместо UI-поля, добавь только в `worker`:
+   `RAILWAY_DOCKERFILE_PATH=Dockerfile.worker`
+5. Start command для `worker` оставь прежним:
+   `python worker.py`
+   или используй `CMD` из `Dockerfile.worker`, если Railway не переопределяет command.
+6. `web` service не меняй:
+   - builder остаётся Railpack
+   - start command остаётся `python bot.py`
+   - custom Dockerfile path для `web` не задавать
+7. Не создавай новый service и не добавляй sidecar.
 
 ## Диагностика worker
 При старте worker в логах должна быть одна из строк:
