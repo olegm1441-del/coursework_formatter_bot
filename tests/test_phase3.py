@@ -882,6 +882,64 @@ def test_c_rendered_start_page_skips_existing_page_break_candidate() -> tuple[bo
     return _result(True, "existing page-break candidate skipped and later candidate moved")
 
 
+def test_c_rendered_start_page_upgrades_disabled_page_break() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    caption = doc.add_paragraph("Таблица 2.4.1")
+    pPr = caption._element.get_or_add_pPr()
+    disabled_break = OxmlElement("w:pageBreakBefore")
+    disabled_break.set(qn("w:val"), "0")
+    pPr.append(disabled_break)
+
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "Показатель"
+    tbl.rows[0].cells[1].text = "Комментарий"
+    tbl.rows[1].cells[0].text = "Первый показатель"
+    tbl.rows[1].cells[1].text = "обучение сотрудников"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "disabled_page_break.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "disabled_page_break.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.4.1", 1, 680.0, 692.0),
+                PdfLine("Показатель Комментарий", 1, 705.0, 717.0),
+                PdfLine("Первый показатель", 2, 80.0, 92.0),
+                PdfLine("обучение сотрудников", 2, 100.0, 112.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == "Таблица 2.4.1")
+
+    reread_pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = reread_pPr.find(qn("w:pageBreakBefore")) if reread_pPr is not None else None
+    page_break_val = page_break.get(qn("w:val")) if page_break is not None else None
+
+    if n != 1:
+        return _result(False, f"disabled pageBreakBefore should not block move, got {n}")
+    if page_break is None:
+        return _result(False, "disabled pageBreakBefore was not upgraded")
+    if page_break_val in {"0", "false", "False", "off"}:
+        return _result(False, f"pageBreakBefore still disabled: {page_break_val!r}")
+    if len(reread.tables) != 1:
+        return _result(False, f"whole-table move should not split tables, got {len(reread.tables)}")
+    return _result(True, "disabled pageBreakBefore upgraded to active")
+
+
 def test_c_rendered_start_page_skips_ambiguous_usability() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
     from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
@@ -2232,6 +2290,7 @@ def run_all() -> None:
         ("C  | rendered caption number/fallback",      test_c_rendered_split_caption_number_and_fallback),
         ("C  | rendered whole-table move",             test_c_rendered_start_page_moves_whole_table_without_complete_data_row),
         ("C  | rendered skip existing page break",     test_c_rendered_start_page_skips_existing_page_break_candidate),
+        ("C  | rendered disabled page break",          test_c_rendered_start_page_upgrades_disabled_page_break),
         ("C  | rendered start-page ambiguity skip",    test_c_rendered_start_page_skips_ambiguous_usability),
         ("C  | rendered decision logging",             test_c_rendered_decision_logging_for_ambiguous_skip),
         ("C  | rendered start-page complete row",      test_c_rendered_start_page_keeps_table_with_clear_complete_data_row),

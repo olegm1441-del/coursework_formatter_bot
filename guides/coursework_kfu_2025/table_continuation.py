@@ -825,6 +825,21 @@ def _line_matches_caption_number(line_text: str, num: str) -> bool:
     return bool(m and m.group(1) == num)
 
 
+_DISABLED_PAGE_BREAK_VALUES = {"0", "false", "False", "off"}
+
+
+def _is_active_page_break_before(page_break_elem) -> bool:
+    if page_break_elem is None:
+        return False
+    return page_break_elem.get(qn("w:val")) not in _DISABLED_PAGE_BREAK_VALUES
+
+
+def _find_page_break_before(pPr):
+    if pPr is None:
+        return None
+    return pPr.find(qn("w:pageBreakBefore"))
+
+
 def _pdf_caption_match_count(caption_num: str, pdf_lines: list[PdfLine]) -> int:
     return sum(1 for line in pdf_lines if _line_matches_caption_number(line.text, caption_num))
 
@@ -971,9 +986,9 @@ def _find_rendered_whole_table_move_candidate(
         caption_para_xml, caption_num = caption
         pdf_caption_matches = _pdf_caption_match_count(caption_num, pdf_lines)
         caption_pPr = caption_para_xml.find(qn("w:pPr"))
-        if caption_pPr is not None and caption_pPr.find(qn("w:pageBreakBefore")) is not None:
+        if _is_active_page_break_before(_find_page_break_before(caption_pPr)):
             logger.info(
-                "rendered_whole_table_candidate table_idx=%s caption=%s pdf_caption_matches=%s strict_caption_found=%s skip=existing_page_break",
+                "rendered_whole_table_candidate table_idx=%s caption=%s pdf_caption_matches=%s strict_caption_found=%s skip=existing_active_page_break",
                 table_sig.table_idx,
                 caption_num,
                 pdf_caption_matches,
@@ -1018,12 +1033,16 @@ def _find_rendered_whole_table_move_candidate(
 
 def _ensure_page_break_before(para_elem) -> bool:
     pPr = para_elem.find(qn("w:pPr"))
-    if pPr is not None and pPr.find(qn("w:pageBreakBefore")) is not None:
+    page_break = _find_page_break_before(pPr)
+    if _is_active_page_break_before(page_break):
         return False
     if pPr is None:
         pPr = OxmlElement("w:pPr")
         para_elem.insert(0, pPr)
-    pPr.append(OxmlElement("w:pageBreakBefore"))
+    if page_break is None:
+        pPr.append(OxmlElement("w:pageBreakBefore"))
+    else:
+        page_break.attrib.pop(qn("w:val"), None)
     return True
 
 
