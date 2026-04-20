@@ -2,6 +2,8 @@ import asyncio
 
 import logging
 import os
+import shutil
+import subprocess
 import time
 import traceback
 from datetime import UTC, datetime, timedelta
@@ -35,6 +37,7 @@ SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 45
 SEND_DOCUMENT_READ_TIMEOUT_SECONDS = 120
 SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS = 30
 SEND_DOCUMENT_POOL_TIMEOUT_SECONDS = 30
+SOFFICE_VERSION_TIMEOUT_SECONDS = 5
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,44 @@ def get_bot_token() -> str:
     if not token:
         raise RuntimeError("Переменная BOT_TOKEN не задана")
     return token
+
+
+def log_libreoffice_diagnostics() -> None:
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        logger.warning("worker_libreoffice_missing soffice_not_found_in_path")
+        return
+
+    try:
+        result = subprocess.run(
+            [soffice, "--version"],
+            timeout=SOFFICE_VERSION_TIMEOUT_SECONDS,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "worker_libreoffice_version_failed binary=%s error=%s",
+            soffice,
+            exc,
+        )
+        return
+
+    version = (result.stdout or result.stderr or "").strip()
+    if result.returncode == 0:
+        logger.info(
+            "worker_libreoffice_available binary=%s version=%s",
+            soffice,
+            version,
+        )
+        return
+
+    logger.warning(
+        "worker_libreoffice_version_failed binary=%s returncode=%s output=%s",
+        soffice,
+        result.returncode,
+        version[:300],
+    )
 
 
 async def send_text(bot_token: str, chat_id: int, text: str, reply_markup=None) -> None:
@@ -638,6 +679,7 @@ def main() -> None:
 
     Base.metadata.create_all(bind=engine)
     bot_token = get_bot_token()
+    log_libreoffice_diagnostics()
 
     logger.info(
         "worker_started timeout=%s stale_timeout=%s poll_interval=%s",

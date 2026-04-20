@@ -1,5 +1,9 @@
 # nixpacks.toml
-# LibreOffice removed from build — not used in production pipeline.
-# Add back when Phase 3 LibreOffice rendering is needed:
-#   [phases.setup]
-#   aptPkgs = ["libreoffice", "libreoffice-writer"]
+
+[phases.setup]
+aptPkgs = [
+    "libreoffice-writer",
+    "fontconfig",
+    "fonts-dejavu",
+    "fonts-liberation",
+]
