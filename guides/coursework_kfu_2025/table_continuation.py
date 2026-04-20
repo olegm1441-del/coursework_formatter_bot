@@ -825,6 +825,10 @@ def _line_matches_caption_number(line_text: str, num: str) -> bool:
     return bool(m and m.group(1) == num)
 
 
+def _pdf_caption_match_count(caption_num: str, pdf_lines: list[PdfLine]) -> int:
+    return sum(1 for line in pdf_lines if _line_matches_caption_number(line.text, caption_num))
+
+
 def _row_has_any_token_in_text(sig: RowSignature, text: str) -> bool:
     tokens = _row_distinctive_tokens(sig)
     if not tokens:
@@ -943,29 +947,72 @@ def _classify_start_page_usability(
 def _find_rendered_whole_table_move_candidate(
     doc: Document,
     pdf_lines: list[PdfLine],
+    diagnostics: dict[str, bool] | None = None,
 ) -> RenderedWholeTableMoveCandidate | None:
     manual_skip = _valid_manual_continuation_table_ids(doc)
+    inspected = 0
 
     for table_sig in _collect_table_signatures(doc):
+        inspected += 1
         if id(table_sig.tbl_xml) in manual_skip:
+            logger.info(
+                "rendered_whole_table_candidate table_idx=%s skip=valid_manual_continuation",
+                table_sig.table_idx,
+            )
             continue
 
         caption = _find_caption_paragraph_before_table(doc, table_sig.tbl_xml)
         if caption is None:
+            logger.info(
+                "rendered_whole_table_candidate table_idx=%s skip=caption_missing",
+                table_sig.table_idx,
+            )
             continue
         caption_para_xml, caption_num = caption
+        pdf_caption_matches = _pdf_caption_match_count(caption_num, pdf_lines)
         caption_pPr = caption_para_xml.find(qn("w:pPr"))
         if caption_pPr is not None and caption_pPr.find(qn("w:pageBreakBefore")) is not None:
+            logger.info(
+                "rendered_whole_table_candidate table_idx=%s caption=%s pdf_caption_matches=%s strict_caption_found=%s skip=existing_page_break",
+                table_sig.table_idx,
+                caption_num,
+                pdf_caption_matches,
+                pdf_caption_matches == 1,
+            )
             continue
 
         usability = _classify_start_page_usability(table_sig, caption_num, pdf_lines)
+        logger.info(
+            "rendered_whole_table_candidate table_idx=%s caption=%s pdf_caption_matches=%s strict_caption_found=%s start_page_usability=%s",
+            table_sig.table_idx,
+            caption_num,
+            pdf_caption_matches,
+            pdf_caption_matches == 1,
+            usability,
+        )
         if usability == _START_NO_COMPLETE_DATA_ROW:
+            logger.info(
+                "rendered_whole_table_candidate_selected table_idx=%s caption=%s reason=%s",
+                table_sig.table_idx,
+                caption_num,
+                usability,
+            )
             return RenderedWholeTableMoveCandidate(
                 table_idx=table_sig.table_idx,
                 tbl_xml=table_sig.tbl_xml,
                 caption_para_xml=caption_para_xml,
             )
 
+        if usability == _START_AMBIGUOUS and diagnostics is not None:
+            diagnostics["ambiguous"] = True
+        logger.info(
+            "rendered_whole_table_candidate table_idx=%s caption=%s skip=%s",
+            table_sig.table_idx,
+            caption_num,
+            "ambiguous" if usability == _START_AMBIGUOUS else "has_complete_data_row",
+        )
+
+    logger.info("rendered_whole_table_no_candidate inspected=%s", inspected)
     return None
 
 
@@ -983,37 +1030,84 @@ def _ensure_page_break_before(para_elem) -> bool:
 def _find_rendered_split_candidate(
     doc: Document,
     pdf_lines: list[PdfLine],
+    diagnostics: dict[str, bool] | None = None,
 ) -> RenderedSplitCandidate | None:
     manual_skip = _valid_manual_continuation_table_ids(doc)
+    inspected = 0
 
     for table_sig in _collect_table_signatures(doc):
+        inspected += 1
         if id(table_sig.tbl_xml) in manual_skip:
+            logger.info(
+                "rendered_split_candidate table_idx=%s skip=valid_manual_continuation",
+                table_sig.table_idx,
+            )
             continue
 
         rows_xml = table_sig.tbl_xml.findall(qn("w:tr"))
         if len(rows_xml) < 3:
+            logger.info(
+                "rendered_split_candidate table_idx=%s rows=%s skip=too_few_rows",
+                table_sig.table_idx,
+                len(rows_xml),
+            )
             continue
 
         row_pages = _match_row_pages(table_sig, pdf_lines)
         if row_pages is None:
+            if diagnostics is not None:
+                diagnostics["ambiguous"] = True
+            logger.info(
+                "rendered_split_candidate table_idx=%s rows=%s skip=row_mapping_ambiguous",
+                table_sig.table_idx,
+                len(rows_xml),
+            )
             continue
 
+        page_boundary_found = False
         for row_idx in sorted(row_pages):
             next_idx = row_idx + 1
             if next_idx not in row_pages:
                 continue
             if row_pages[row_idx] < row_pages[next_idx]:
+                page_boundary_found = True
                 safe_after = _find_safe_split_after(rows_xml, row_idx)
                 if safe_after is None or safe_after < 1:
+                    if diagnostics is not None:
+                        diagnostics["ambiguous"] = True
+                    logger.info(
+                        "rendered_split_candidate table_idx=%s row_idx=%s skip=merged_boundary_conflict",
+                        table_sig.table_idx,
+                        row_idx,
+                    )
                     return None
                 if len(rows_xml) - (safe_after + 1) < 1:
+                    logger.info(
+                        "rendered_split_candidate table_idx=%s row_idx=%s safe_after=%s skip=no_continuation_data_row",
+                        table_sig.table_idx,
+                        row_idx,
+                        safe_after,
+                    )
                     return None
+                logger.info(
+                    "rendered_split_candidate_selected table_idx=%s row_idx=%s split_after=%s",
+                    table_sig.table_idx,
+                    row_idx,
+                    safe_after,
+                )
                 return RenderedSplitCandidate(
                     table_idx=table_sig.table_idx,
                     tbl_xml=table_sig.tbl_xml,
                     split_after=safe_after,
                 )
+        if not page_boundary_found:
+            logger.info(
+                "rendered_split_candidate table_idx=%s rows=%s skip=no_page_boundary",
+                table_sig.table_idx,
+                len(rows_xml),
+            )
 
+    logger.info("rendered_split_no_candidate inspected=%s", inspected)
     return None
 
 
@@ -1396,7 +1490,15 @@ def apply_rendered_table_continuation(
     docx_path = Path(docx_path)
     doc = Document(str(docx_path))
     if not doc.tables:
+        logger.info("rendered_table_continuation_enter tables=0 pdf_lines=0 max_passes=%s", max_passes)
+        logger.info("rendered_final_decision action=rendered_no_action reason=no_tables")
         return 0
+
+    logger.info(
+        "rendered_table_continuation_start tables=%s max_passes=%s",
+        len(doc.tables),
+        max_passes,
+    )
 
     pdf_path: Path | None = None
     try:
@@ -1404,31 +1506,63 @@ def apply_rendered_table_continuation(
         pdf_lines = analyze_pdf_lines(pdf_path)
     except LibreOfficeNotFoundError as exc:
         _warn_rendered_split_unavailable(report, str(exc))
+        logger.info("rendered_final_decision action=rendered_no_action reason=libreoffice_unavailable")
         return 0
     except Exception as exc:
         _warn_rendered_split_unavailable(report, str(exc))
+        logger.info("rendered_final_decision action=rendered_no_action reason=render_or_pdf_analysis_failed")
         return 0
     finally:
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
-    move_candidate = _find_rendered_whole_table_move_candidate(doc, pdf_lines)
+    logger.info(
+        "rendered_table_continuation_enter tables=%s pdf_lines=%s max_passes=%s",
+        len(doc.tables),
+        len(pdf_lines),
+        max_passes,
+    )
+
+    diagnostics: dict[str, bool] = {"ambiguous": False}
+    move_candidate = _find_rendered_whole_table_move_candidate(doc, pdf_lines, diagnostics)
     if move_candidate is not None:
         if not _ensure_page_break_before(move_candidate.caption_para_xml):
+            logger.info(
+                "rendered_final_decision action=rendered_no_action reason=whole_table_candidate_already_has_page_break table_idx=%s",
+                move_candidate.table_idx,
+            )
             return 0
         doc.save(str(docx_path))
+        logger.info(
+            "rendered_final_decision action=rendered_whole_table_move table_idx=%s",
+            move_candidate.table_idx,
+        )
         return 1
 
-    candidate = _find_rendered_split_candidate(doc, pdf_lines)
+    candidate = _find_rendered_split_candidate(doc, pdf_lines, diagnostics)
     if candidate is None:
+        if diagnostics["ambiguous"]:
+            logger.info("rendered_final_decision action=rendered_skip_ambiguous reason=no_safe_rendered_candidate")
+        else:
+            logger.info("rendered_final_decision action=rendered_no_action reason=no_rendered_candidate")
         return 0
 
     num = _find_caption_number_before_table(doc, candidate.tbl_xml)
     continuation_text = f"Продолжение таблицы {num}" if num else "Продолжение таблицы"
     if not _split_table_at(doc, candidate.tbl_xml, candidate.split_after, continuation_text):
+        logger.info(
+            "rendered_final_decision action=rendered_no_action reason=split_mutation_failed table_idx=%s split_after=%s",
+            candidate.table_idx,
+            candidate.split_after,
+        )
         return 0
 
     doc.save(str(docx_path))
+    logger.info(
+        "rendered_final_decision action=rendered_split table_idx=%s split_after=%s",
+        candidate.table_idx,
+        candidate.split_after,
+    )
     return 1
 
 

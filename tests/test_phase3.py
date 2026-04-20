@@ -24,6 +24,7 @@ Acceptance criteria per task:
 from __future__ import annotations
 
 import io
+import logging
 import os
 import sys
 import shutil
@@ -932,6 +933,70 @@ def test_c_rendered_start_page_skips_ambiguous_usability() -> tuple[bool, str]:
     if len(reread.tables) != 1:
         return _result(False, f"ambiguous start-page evidence changed tables: {len(reread.tables)}")
     return _result(True, "ambiguous start-page usability skipped")
+
+
+def test_c_rendered_decision_logging_for_ambiguous_skip() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.4")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Год"
+    tbl.rows[0].cells[1].text = "Значение"
+    tbl.rows[1].cells[0].text = "2023"
+    tbl.rows[1].cells[1].text = "10"
+    tbl.rows[2].cells[0].text = "2024"
+    tbl.rows[2].cells[1].text = "10"
+
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    old_level = tc.logger.level
+    tc.logger.addHandler(handler)
+    tc.logger.setLevel(logging.INFO)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "ambiguous_logging.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "ambiguous_logging.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.2.4", 1, 690.0, 702.0),
+                PdfLine("Год Значение", 1, 735.0, 748.0),
+                PdfLine("2023", 1, 763.0, 776.0),
+                PdfLine("10", 2, 86.0, 98.0),
+                PdfLine("2024 10", 2, 108.0, 120.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            tc.logger.removeHandler(handler)
+            tc.logger.setLevel(old_level)
+
+    logs = log_stream.getvalue()
+    expected_fragments = [
+        "rendered_table_continuation_enter tables=1 pdf_lines=5",
+        "rendered_whole_table_candidate table_idx=0 caption=2.2.4",
+        "pdf_caption_matches=1 strict_caption_found=True start_page_usability=ambiguous",
+        "rendered_split_candidate table_idx=0 rows=3 skip=row_mapping_ambiguous",
+        "rendered_final_decision action=rendered_skip_ambiguous",
+    ]
+    missing = [fragment for fragment in expected_fragments if fragment not in logs]
+
+    if n != 0:
+        return _result(False, f"ambiguous logging scenario should not mutate, got {n}")
+    if missing:
+        return _result(False, f"missing log fragments: {missing!r}; logs={logs!r}")
+    return _result(True, "ambiguous rendered decision logs are emitted")
 
 
 def test_c_rendered_start_page_keeps_table_with_clear_complete_data_row() -> tuple[bool, str]:
@@ -2168,6 +2233,7 @@ def run_all() -> None:
         ("C  | rendered whole-table move",             test_c_rendered_start_page_moves_whole_table_without_complete_data_row),
         ("C  | rendered skip existing page break",     test_c_rendered_start_page_skips_existing_page_break_candidate),
         ("C  | rendered start-page ambiguity skip",    test_c_rendered_start_page_skips_ambiguous_usability),
+        ("C  | rendered decision logging",             test_c_rendered_decision_logging_for_ambiguous_skip),
         ("C  | rendered start-page complete row",      test_c_rendered_start_page_keeps_table_with_clear_complete_data_row),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
