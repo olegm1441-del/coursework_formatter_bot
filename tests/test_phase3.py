@@ -814,6 +814,73 @@ def test_c_rendered_start_page_moves_whole_table_without_complete_data_row() -> 
     return _result(True, "whole-table move applied to caption")
 
 
+def test_c_rendered_start_page_skips_existing_page_break_candidate() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    first_caption = doc.add_paragraph("Таблица 1.2.2")
+    first_caption.paragraph_format.page_break_before = True
+    first_tbl = doc.add_table(rows=2, cols=2)
+    first_tbl.rows[0].cells[0].text = "Показатель"
+    first_tbl.rows[0].cells[1].text = "Эффект"
+    first_tbl.rows[1].cells[0].text = "Первый показатель"
+    first_tbl.rows[1].cells[1].text = "переход на электронный обмен"
+
+    second_caption = doc.add_paragraph("Таблица 2.3.3")
+    second_tbl = doc.add_table(rows=2, cols=2)
+    second_tbl.rows[0].cells[0].text = "Год"
+    second_tbl.rows[0].cells[1].text = "Комментарий"
+    second_tbl.rows[1].cells[0].text = "Первый год"
+    second_tbl.rows[1].cells[1].text = "обучение сотрудников"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "skip_existing_break.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "skip_existing_break.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 1.2.2", 1, 680.0, 692.0),
+                PdfLine("Показатель Эффект", 1, 705.0, 717.0),
+                PdfLine("Первый показатель", 2, 80.0, 92.0),
+                PdfLine("переход на электронный обмен", 2, 100.0, 112.0),
+                PdfLine("Таблица 2.3.3", 3, 680.0, 692.0),
+                PdfLine("Год Комментарий", 3, 705.0, 717.0),
+                PdfLine("Первый год", 4, 80.0, 92.0),
+                PdfLine("обучение сотрудников", 4, 100.0, 112.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        first = next(p for p in reread.paragraphs if p.text == first_caption.text)
+        second = next(p for p in reread.paragraphs if p.text == second_caption.text)
+
+    first_pPr = first._element.find(qn("w:pPr"))
+    second_pPr = second._element.find(qn("w:pPr"))
+    first_pb = first_pPr.find(qn("w:pageBreakBefore")) if first_pPr is not None else None
+    second_pb = second_pPr.find(qn("w:pageBreakBefore")) if second_pPr is not None else None
+
+    if n != 1:
+        return _result(False, f"expected one later whole-table move, got {n}")
+    if first_pb is None:
+        return _result(False, "existing pageBreakBefore was lost from first caption")
+    if second_pb is None:
+        return _result(False, "later candidate did not receive pageBreakBefore")
+    if len(reread.tables) != 2:
+        return _result(False, f"whole-table move should not split tables, got {len(reread.tables)}")
+    return _result(True, "existing page-break candidate skipped and later candidate moved")
+
+
 def test_c_rendered_start_page_skips_ambiguous_usability() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
     from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
@@ -2099,6 +2166,7 @@ def run_all() -> None:
         ("C  | rendered marker formatting",            test_c_rendered_split_marker_is_right_aligned),
         ("C  | rendered caption number/fallback",      test_c_rendered_split_caption_number_and_fallback),
         ("C  | rendered whole-table move",             test_c_rendered_start_page_moves_whole_table_without_complete_data_row),
+        ("C  | rendered skip existing page break",     test_c_rendered_start_page_skips_existing_page_break_candidate),
         ("C  | rendered start-page ambiguity skip",    test_c_rendered_start_page_skips_ambiguous_usability),
         ("C  | rendered start-page complete row",      test_c_rendered_start_page_keeps_table_with_clear_complete_data_row),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),

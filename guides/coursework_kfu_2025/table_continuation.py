@@ -954,6 +954,9 @@ def _find_rendered_whole_table_move_candidate(
         if caption is None:
             continue
         caption_para_xml, caption_num = caption
+        caption_pPr = caption_para_xml.find(qn("w:pPr"))
+        if caption_pPr is not None and caption_pPr.find(qn("w:pageBreakBefore")) is not None:
+            continue
 
         usability = _classify_start_page_usability(table_sig, caption_num, pdf_lines)
         if usability == _START_NO_COMPLETE_DATA_ROW:
