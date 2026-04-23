@@ -815,6 +815,65 @@ def test_c_rendered_start_page_moves_whole_table_without_complete_data_row() -> 
     return _result(True, "whole-table move applied to caption")
 
 
+def test_c_rendered_start_page_first_row_spill_moves_whole_table() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    caption = doc.add_paragraph("Таблица 2.3.1")
+    doc.add_paragraph("Структура прямой экономии ТТС при переходе на ЭДО")
+    tbl = doc.add_table(rows=3, cols=3)
+    tbl.rows[0].cells[0].text = "Статья"
+    tbl.rows[0].cells[1].text = "Значение"
+    tbl.rows[0].cells[2].text = "Комментарий"
+    tbl.rows[1].cells[0].text = "Почтовые расходы"
+    tbl.rows[1].cells[1].text = "31–33"
+    tbl.rows[1].cells[2].text = "отказ от бумажных отправлений"
+    tbl.rows[2].cells[0].text = "Печать"
+    tbl.rows[2].cells[1].text = "4–5"
+    tbl.rows[2].cells[2].text = "сокращение печати"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "first_row_spill.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "first_row_spill.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.3.1", 1, 683.2, 695.0),
+                PdfLine("Структура прямой экономии ТТС при переходе на ЭДО", 1, 707.4, 719.0),
+                PdfLine("Статья Значение Комментарий", 1, 731.5, 743.0),
+                PdfLine("Почтовые расходы 31–33 отказ от бумажных", 1, 759.6, 771.0),
+                PdfLine("Статья Значение Комментарий", 2, 58.8, 70.0),
+                PdfLine("отправлений", 2, 86.8, 98.0),
+                PdfLine("Печать 4–5 сокращение печати", 2, 108.2, 120.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == caption.text)
+
+    pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+
+    if n != 1:
+        return _result(False, f"first-row spill should trigger whole-table move, got {n}")
+    if page_break is None:
+        return _result(False, "caption did not receive pageBreakBefore after first-row spill")
+    if len(reread.tables) != 1:
+        return _result(False, f"whole-table move should not split tables, got {len(reread.tables)}")
+    return _result(True, "first-row spill triggered whole-table move")
+
+
 def test_c_rendered_start_page_skips_existing_page_break_candidate() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
     from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
@@ -991,6 +1050,121 @@ def test_c_rendered_start_page_skips_ambiguous_usability() -> tuple[bool, str]:
     if len(reread.tables) != 1:
         return _result(False, f"ambiguous start-page evidence changed tables: {len(reread.tables)}")
     return _result(True, "ambiguous start-page usability skipped")
+
+
+def test_c_rendered_start_page_first_row_spill_needs_strong_next_page_evidence() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.3.6")
+    doc.add_paragraph("Промежуточный эффект")
+    tbl = doc.add_table(rows=3, cols=3)
+    tbl.rows[0].cells[0].text = "Статья"
+    tbl.rows[0].cells[1].text = "Значение"
+    tbl.rows[0].cells[2].text = "Комментарий"
+    tbl.rows[1].cells[0].text = "Почтовые расходы"
+    tbl.rows[1].cells[1].text = "31–33"
+    tbl.rows[1].cells[2].text = "отказ от бумажных отправлений"
+    tbl.rows[2].cells[0].text = "Печать"
+    tbl.rows[2].cells[1].text = "4–5"
+    tbl.rows[2].cells[2].text = "сокращение печати"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "weak_spill.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "weak_spill.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.3.6", 1, 683.2, 695.0),
+                PdfLine("Промежуточный эффект", 1, 707.4, 719.0),
+                PdfLine("Статья Значение Комментарий", 1, 731.5, 743.0),
+                PdfLine("Почтовые расходы 31–33 отказ от бумажных", 1, 759.6, 771.0),
+                PdfLine("Печать 4–5", 1, 776.0, 788.0),
+                PdfLine("отправлений", 2, 86.8, 98.0),
+                PdfLine("сокращение печати", 2, 108.2, 120.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == "Таблица 2.3.6")
+
+    pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+
+    if n != 0:
+        return _result(False, f"weak next-page evidence should not trigger move, got {n}")
+    if page_break is not None:
+        return _result(False, "weak next-page evidence still added pageBreakBefore")
+    return _result(True, "weak next-page evidence does not trigger spill detection")
+
+
+def test_c_rendered_start_page_first_row_spill_ignores_later_prose_token_reuse() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.3.7")
+    doc.add_paragraph("Промежуточный эффект")
+    tbl = doc.add_table(rows=3, cols=3)
+    tbl.rows[0].cells[0].text = "Статья"
+    tbl.rows[0].cells[1].text = "Значение"
+    tbl.rows[0].cells[2].text = "Комментарий"
+    tbl.rows[1].cells[0].text = "Почтовые расходы"
+    tbl.rows[1].cells[1].text = "31–33"
+    tbl.rows[1].cells[2].text = "отказ от бумажных отправлений"
+    tbl.rows[2].cells[0].text = "Печать"
+    tbl.rows[2].cells[1].text = "4–5"
+    tbl.rows[2].cells[2].text = "сокращение печати"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "prose_reuse_spill.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "prose_reuse_spill.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("Таблица 2.3.7", 1, 683.2, 695.0),
+                PdfLine("Промежуточный эффект", 1, 707.4, 719.0),
+                PdfLine("Статья Значение Комментарий", 1, 731.5, 743.0),
+                PdfLine("Почтовые расходы 31–33 отказ от бумажных", 1, 759.6, 771.0),
+                PdfLine("Печать 4–5", 1, 776.0, 788.0),
+                PdfLine("Статья Значение Комментарий", 2, 58.8, 70.0),
+                PdfLine("В тексте обсуждаются отправлений документов и риски обмена", 2, 86.8, 98.0),
+                PdfLine("сокращение печати", 2, 108.2, 120.0),
+            ]
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+
+        reread = Document(str(path))
+        reread_caption = next(p for p in reread.paragraphs if p.text == "Таблица 2.3.7")
+
+    pPr = reread_caption._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+
+    if n != 0:
+        return _result(False, f"later prose token reuse should not trigger move, got {n}")
+    if page_break is not None:
+        return _result(False, "later prose token reuse still added pageBreakBefore")
+    return _result(True, "later prose token reuse does not trigger spill detection")
 
 
 def test_c_rendered_decision_logging_for_ambiguous_skip() -> tuple[bool, str]:
@@ -2289,9 +2463,12 @@ def run_all() -> None:
         ("C  | rendered marker formatting",            test_c_rendered_split_marker_is_right_aligned),
         ("C  | rendered caption number/fallback",      test_c_rendered_split_caption_number_and_fallback),
         ("C  | rendered whole-table move",             test_c_rendered_start_page_moves_whole_table_without_complete_data_row),
+        ("C  | rendered first-row spill move",         test_c_rendered_start_page_first_row_spill_moves_whole_table),
         ("C  | rendered skip existing page break",     test_c_rendered_start_page_skips_existing_page_break_candidate),
         ("C  | rendered disabled page break",          test_c_rendered_start_page_upgrades_disabled_page_break),
         ("C  | rendered start-page ambiguity skip",    test_c_rendered_start_page_skips_ambiguous_usability),
+        ("C  | rendered first-row spill weak skip",    test_c_rendered_start_page_first_row_spill_needs_strong_next_page_evidence),
+        ("C  | rendered first-row spill prose skip",   test_c_rendered_start_page_first_row_spill_ignores_later_prose_token_reuse),
         ("C  | rendered decision logging",             test_c_rendered_decision_logging_for_ambiguous_skip),
         ("C  | rendered start-page complete row",      test_c_rendered_start_page_keeps_table_with_clear_complete_data_row),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),

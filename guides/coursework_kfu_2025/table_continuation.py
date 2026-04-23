@@ -876,6 +876,66 @@ def _has_complete_data_row_in_page_window(
     return False
 
 
+def _header_line_indexes(header: RowSignature, page_texts: list[str]) -> list[int]:
+    header_search_limit = min(len(page_texts), 12)
+    return [
+        idx
+        for idx, line_text in enumerate(page_texts[:header_search_limit])
+        if _row_matches_line(header, line_text) or _row_has_any_token_in_text(header, line_text)
+    ]
+
+
+def _first_data_row_spills_to_next_page(
+    first_row: RowSignature,
+    first_row_tokens: set[str],
+    header: RowSignature,
+    caption_idx: int,
+    start_page: int,
+    pdf_lines: list[PdfLine],
+    data_page_texts: list[str],
+) -> bool:
+    if len(first_row_tokens) < 2:
+        return False
+
+    start_page_joined = " ".join(data_page_texts)
+    start_page_distinctive = _distinctive_tokens(start_page_joined)
+    start_tokens = first_row_tokens & start_page_distinctive
+    if len(start_tokens) < 2:
+        return False
+    next_only_tokens = first_row_tokens - start_tokens
+    if not next_only_tokens:
+        return False
+
+    next_page = start_page + 1
+    next_page_lines = [
+        line
+        for idx, line in enumerate(pdf_lines)
+        if idx > caption_idx and line.page_num == next_page
+    ]
+    if not next_page_lines:
+        return False
+
+    next_page_texts = [_norm_match_text(line.text) for line in next_page_lines]
+    next_header_indexes = _header_line_indexes(header, next_page_texts)
+    if not next_header_indexes:
+        return False
+
+    next_page_data_texts = next_page_texts[(max(next_header_indexes) + 1):]
+    if not next_page_data_texts:
+        return False
+
+    # Conservative continuation evidence: the next page should expose a very
+    # short residue of the same first row right after the repeated header, not
+    # a long prose line that happens to reuse one token.
+    for start in range(min(len(next_page_data_texts), 4)):
+        for end in range(start + 1, min(len(next_page_data_texts), start + 2) + 1):
+            window_tokens = _distinctive_tokens(" ".join(next_page_data_texts[start:end]))
+            if len(window_tokens) <= 3 and (window_tokens & next_only_tokens):
+                return True
+
+    return False
+
+
 def _classify_start_page_usability(
     table_sig: TableSignature,
     caption_num: str,
@@ -920,12 +980,7 @@ def _classify_start_page_usability(
 
     same_page_texts = [_norm_match_text(line.text) for line in same_page_lines]
     same_page_joined = " ".join(same_page_texts)
-    header_search_limit = min(len(same_page_texts), 12)
-    header_line_indexes = [
-        idx
-        for idx, line_text in enumerate(same_page_texts[:header_search_limit])
-        if _row_matches_line(header, line_text) or _row_has_any_token_in_text(header, line_text)
-    ]
+    header_line_indexes = _header_line_indexes(header, same_page_texts)
     if not header_line_indexes and not _row_has_any_token_in_text(header, same_page_joined):
         return _START_AMBIGUOUS
 
@@ -937,6 +992,18 @@ def _classify_start_page_usability(
             return _START_HAS_COMPLETE_DATA_ROW
     if _has_complete_data_row_in_page_window(data_rows, unique_tokens, data_page_texts):
         return _START_HAS_COMPLETE_DATA_ROW
+
+    first_row = data_rows[0]
+    if _first_data_row_spills_to_next_page(
+        first_row=first_row,
+        first_row_tokens=unique_tokens[first_row.row_idx],
+        header=header,
+        caption_idx=caption_idx,
+        start_page=start_page,
+        pdf_lines=pdf_lines,
+        data_page_texts=data_page_texts,
+    ):
+        return _START_NO_COMPLETE_DATA_ROW
 
     rows_with_start_page_tokens = [
         sig for sig in data_rows if _tokens_in_text(unique_tokens[sig.row_idx], data_page_joined)
