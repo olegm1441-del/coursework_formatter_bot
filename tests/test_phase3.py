@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 import sys
 import shutil
 import tempfile
@@ -2440,6 +2441,240 @@ def test_blank_before_figure_block() -> tuple[bool, str]:
     return _result(True, "drawing paragraph has one TNR 14 blank before it")
 
 
+def test_marker_instrumentation_keeps_source_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_markers import instrument_table_rows_copy
+
+    doc = Document()
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Header"
+    tbl.rows[1].cells[0].text = "Row one"
+    tbl.rows[2].cells[0].text = "Row two"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.docx"
+        workdir = Path(tmp) / "work"
+        doc.save(src)
+        before = src.read_bytes()
+
+        instrumentation = instrument_table_rows_copy(src, 0, workdir=workdir, marker_font_size_pt=1)
+
+        after = src.read_bytes()
+        if before != after:
+            return _result(False, "source docx changed after instrumentation")
+
+        source_doc = Document(str(src))
+        instrumented_doc = Document(str(instrumentation.instrumented_docx_path))
+        source_text = " ".join(p.text for p in source_doc.paragraphs)
+        if "KPFU_TMARK_" in source_text:
+            return _result(False, "marker leaked into source document")
+
+        marker_hits = sum(
+            text.count("KPFU_TMARK_")
+            for table in instrumented_doc.tables
+            for row in table.rows
+            for cell in row.cells
+            for text in [cell.text]
+        )
+        if marker_hits != 3:
+            return _result(False, f"expected 3 row markers in instrumented copy, got {marker_hits}")
+
+    return _result(True, "instrumentation only changes temp copy")
+
+
+def test_marker_instrumentation_only_targets_selected_table() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_markers import instrument_table_rows_copy
+
+    doc = Document()
+    first = doc.add_table(rows=2, cols=1)
+    first.rows[0].cells[0].text = "First header"
+    first.rows[1].cells[0].text = "First body"
+    second = doc.add_table(rows=3, cols=1)
+    second.rows[0].cells[0].text = "Second header"
+    second.rows[1].cells[0].text = "Second row"
+    second.rows[2].cells[0].text = "Third row"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "multi.docx"
+        doc.save(src)
+        instrumentation = instrument_table_rows_copy(src, 1, workdir=Path(tmp) / "work", marker_font_size_pt=1)
+        instrumented = Document(str(instrumentation.instrumented_docx_path))
+
+    first_text = " ".join(cell.text for row in instrumented.tables[0].rows for cell in row.cells)
+    second_text = " ".join(cell.text for row in instrumented.tables[1].rows for cell in row.cells)
+    if "KPFU_TMARK_" in first_text:
+        return _result(False, "marker inserted into non-target table")
+    if second_text.count("KPFU_TMARK_") != 3:
+        return _result(False, f"expected markers only in target table rows, got text={second_text!r}")
+
+    return _result(True, "only selected table was instrumented")
+
+
+def test_marker_extract_handles_inline_text_and_missing_rows() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_markers import extract_row_pages_from_pdf_lines
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    result = extract_row_pages_from_pdf_lines(
+        [
+            PdfLine("prefixKPFU_TMARK_ABC123_T00_R000suffix", 27, 10.0, 20.0),
+            PdfLine("bodyKPFU_TMARK_ABC123_T00_R001tail", 27, 30.0, 40.0),
+        ],
+        marker_salt="ABC123",
+        table_index=0,
+        total_rows=3,
+    )
+
+    if result.row_pages != {0: 27, 1: 27}:
+        return _result(False, f"unexpected row_pages: {result.row_pages!r}")
+    if result.found_rows != [0, 1]:
+        return _result(False, f"unexpected found_rows: {result.found_rows!r}")
+    if result.missing_rows != [2]:
+        return _result(False, f"unexpected missing_rows: {result.missing_rows!r}")
+    if result.duplicate_rows:
+        return _result(False, f"unexpected duplicate_rows: {result.duplicate_rows!r}")
+
+    return _result(True, "inline marker parsing and missing-row diagnostics work")
+
+
+def test_marker_map_rows_to_pages_keep_temp_debug_paths() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    tbl = doc.add_table(rows=3, cols=1)
+    tbl.rows[0].cells[0].text = "Header"
+    tbl.rows[1].cells[0].text = "Alpha"
+    tbl.rows[2].cells[0].text = "Beta"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.docx"
+        doc.save(src)
+
+        seen_docx: dict[str, Path] = {}
+        old_render = tm.render_docx_to_pdf
+        old_analyze = tm.analyze_pdf_lines
+        try:
+            def fake_render(docx_path):
+                seen_docx["path"] = Path(docx_path)
+                pdf_dir = Path(tmp) / "pdf_keep"
+                pdf_dir.mkdir(exist_ok=True)
+                pdf_path = pdf_dir / "instrumented.pdf"
+                pdf_path.write_bytes(b"%PDF-1.4\n")
+                return pdf_path
+
+            def fake_analyze(_pdf_path):
+                inst_doc = Document(str(seen_docx["path"]))
+                row_markers = []
+                for row in inst_doc.tables[0].rows:
+                    text = " ".join(cell.text for cell in row.cells)
+                    match = re.search(r"KPFU_TMARK_[A-F0-9]{6}_T00_R\d{3}", text)
+                    if not match:
+                        raise AssertionError(f"marker not found in row text: {text!r}")
+                    row_markers.append(match.group(0))
+                return [
+                    tm.PdfLine(f"left{row_markers[0]}right", 27, 10.0, 20.0),
+                    tm.PdfLine(f"left{row_markers[1]}right", 27, 30.0, 40.0),
+                    tm.PdfLine(f"left{row_markers[2]}right", 28, 50.0, 60.0),
+                ]
+
+            tm.render_docx_to_pdf = fake_render
+            tm.analyze_pdf_lines = fake_analyze
+            result = tm.map_table_rows_to_pages(src, 0, keep_temp=True)
+        finally:
+            tm.render_docx_to_pdf = old_render
+            tm.analyze_pdf_lines = old_analyze
+
+        if result.row_pages != {0: 27, 1: 27, 2: 28}:
+            return _result(False, f"unexpected row_pages: {result.row_pages!r}")
+        if result.instrumented_docx_path is None or not result.instrumented_docx_path.exists():
+            return _result(False, "instrumented_docx_path was not preserved in keep_temp mode")
+        if result.pdf_path is None or not result.pdf_path.exists():
+            return _result(False, "pdf_path was not preserved in keep_temp mode")
+        if result.marker_font_size_pt != 1:
+            return _result(False, f"expected 1pt success path, got {result.marker_font_size_pt}")
+
+    return _result(True, "keep_temp preserves instrumented DOCX/PDF and returns exact mapping")
+
+
+def test_marker_map_rows_to_pages_falls_back_to_2pt_and_returns_debug_info() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    tbl = doc.add_table(rows=3, cols=1)
+    tbl.rows[0].cells[0].text = "Header"
+    tbl.rows[1].cells[0].text = "Alpha"
+    tbl.rows[2].cells[0].text = "Beta"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.docx"
+        doc.save(src)
+
+        seen_docx: dict[str, Path] = {}
+        old_render = tm.render_docx_to_pdf
+        old_analyze = tm.analyze_pdf_lines
+        try:
+            def fake_render(docx_path):
+                seen_docx["path"] = Path(docx_path)
+                pdf_dir = Path(tmp) / f"pdf_{Path(docx_path).stem}"
+                pdf_dir.mkdir(exist_ok=True)
+                pdf_path = pdf_dir / "instrumented.pdf"
+                pdf_path.write_bytes(b"%PDF-1.4\n")
+                return pdf_path
+
+            def fake_analyze(_pdf_path):
+                inst_doc = Document(str(seen_docx["path"]))
+                full_text = " ".join(cell.text for row in inst_doc.tables[0].rows for cell in row.cells)
+                markers = re.findall(r"KPFU_TMARK_[A-F0-9]{6}_T00_R\d{3}", full_text)
+                if len(markers) != 3:
+                    raise AssertionError(f"expected 3 markers, got {markers!r}")
+                if "_2pt" not in seen_docx["path"].name:
+                    return [tm.PdfLine(f"x{markers[0]}y", 27, 10.0, 20.0)]
+                return [
+                    tm.PdfLine(f"x{markers[0]}y", 27, 10.0, 20.0),
+                    tm.PdfLine(f"x{markers[1]}y", 28, 30.0, 40.0),
+                    tm.PdfLine(f"x{markers[1]}y", 29, 50.0, 60.0),
+                ]
+
+            tm.render_docx_to_pdf = fake_render
+            tm.analyze_pdf_lines = fake_analyze
+            result = tm.map_table_rows_to_pages(src, 0, keep_temp=False)
+        finally:
+            tm.render_docx_to_pdf = old_render
+            tm.analyze_pdf_lines = old_analyze
+
+        if result.marker_font_size_pt != 2:
+            return _result(False, f"expected 2pt fallback, got {result.marker_font_size_pt}")
+        if result.row_pages != {0: 27}:
+            return _result(False, f"unexpected partial row_pages: {result.row_pages!r}")
+        if result.missing_rows != [2]:
+            return _result(False, f"unexpected missing_rows after fallback: {result.missing_rows!r}")
+        if result.duplicate_rows != {1: [28, 29]}:
+            return _result(False, f"unexpected duplicate_rows after fallback: {result.duplicate_rows!r}")
+        if result.instrumented_docx_path is None or result.pdf_path is None:
+            return _result(False, "debug paths should be preserved for incomplete diagnostics")
+        if not result.instrumented_docx_path.exists() or not result.pdf_path.exists():
+            return _result(False, "preserved debug paths do not exist")
+
+    return _result(True, "1pt fallback to 2pt preserves diagnostics and debug artifacts")
+
+
+def test_marker_instrumentation_rejects_invalid_table_index() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_markers import instrument_table_rows_copy
+
+    doc = Document()
+    doc.add_table(rows=1, cols=1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.docx"
+        doc.save(src)
+        try:
+            instrument_table_rows_copy(src, 3, workdir=Path(tmp) / "work")
+        except ValueError:
+            return _result(True, "invalid table index rejected")
+        except Exception as exc:
+            return _result(False, f"unexpected exception type: {exc}")
+
+    return _result(False, "expected ValueError for invalid table index")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -2498,6 +2733,12 @@ def run_all() -> None:
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
         ("T6 | heading2 late spacing before 1.3", test_heading2_late_spacing_before_13),
         ("T6 | blank before figure block", test_blank_before_figure_block),
+        ("M1 | source unchanged after instrumentation", test_marker_instrumentation_keeps_source_unchanged),
+        ("M1 | only target table instrumented", test_marker_instrumentation_only_targets_selected_table),
+        ("M1 | inline marker parsing", test_marker_extract_handles_inline_text_and_missing_rows),
+        ("M1 | keep_temp mapping result", test_marker_map_rows_to_pages_keep_temp_debug_paths),
+        ("M1 | 1pt fallback to 2pt", test_marker_map_rows_to_pages_falls_back_to_2pt_and_returns_debug_info),
+        ("M1 | invalid table index", test_marker_instrumentation_rejects_invalid_table_index),
     ]
 
     for asset in ASSET_FILES:
