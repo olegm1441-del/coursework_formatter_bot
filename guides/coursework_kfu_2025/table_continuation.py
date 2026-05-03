@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import shutil
 from copy import deepcopy
@@ -64,6 +65,7 @@ from docx.oxml.ns import qn
 from .docx_utils import xml_has_image, is_source_or_note_line, FormattingReport
 from .layout_render import LibreOfficeNotFoundError, render_docx_to_pdf
 from .pdf_layout_analyzer import PdfLine, analyze_pdf_lines
+from .table_split_prototype import apply_numbered_split_to_document
 
 logger = logging.getLogger(__name__)
 
@@ -1561,6 +1563,181 @@ def _warn_rendered_split_unavailable(
         report.warn("Автоперенос таблиц по PDF временно недоступен")
 
 
+@dataclass(frozen=True)
+class _MarkerSplitDecision:
+    eligible: bool
+    split_before_row: int | None
+    skip_reason: str | None
+
+
+def _marker_split_enabled() -> bool:
+    return os.getenv("KPFU_ENABLE_MARKER_SPLIT", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _marker_split_apply_enabled() -> bool:
+    return os.getenv("KPFU_APPLY_MARKER_SPLIT", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _evaluate_marker_split_diagnostic(
+    diagnostic,
+    *,
+    header_rows: int = 1,
+) -> _MarkerSplitDecision:
+    if diagnostic.error_message:
+        return _MarkerSplitDecision(False, None, "mapping_error")
+    if len(diagnostic.pages_detected) != 2:
+        return _MarkerSplitDecision(False, None, "not_2_pages")
+    if diagnostic.duplicate_rows:
+        return _MarkerSplitDecision(False, None, "duplicate_rows")
+    if diagnostic.missing_rows not in ([], [0]):
+        return _MarkerSplitDecision(False, None, "missing_rows_outside_header")
+
+    row_pages = {
+        row_index: page_num
+        for row_index, page_num in sorted(diagnostic.row_pages.items())
+        if row_index >= header_rows
+    }
+    expected_rows = list(range(header_rows, diagnostic.rows_count))
+    if list(row_pages) != expected_rows:
+        return _MarkerSplitDecision(False, None, "no_boundary")
+
+    first_page = None
+    second_page = None
+    split_before_row = None
+
+    for row_index, page_num in row_pages.items():
+        if first_page is None:
+            first_page = page_num
+            continue
+
+        if second_page is None:
+            if page_num == first_page:
+                continue
+            second_page = page_num
+            split_before_row = row_index
+            continue
+
+        if page_num != second_page:
+            return _MarkerSplitDecision(False, None, "non_monotonic_pages")
+
+    if split_before_row is None:
+        return _MarkerSplitDecision(False, None, "no_boundary")
+    return _MarkerSplitDecision(True, split_before_row, None)
+
+
+def _map_marker_split_apply_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "standard table caption" in text:
+        return "ordinary_without_standard_caption"
+    if "tblgrid" in text or "grid" in text:
+        return "unsupported_grid"
+    if "complex merged header" in text:
+        return "complex_merged_header"
+    if "malformed" in text:
+        return "malformed_numbered_row"
+    if "header_rows" in text:
+        return "unsupported_header_rows"
+    return "mutation_error"
+
+
+def _apply_marker_split_candidate(
+    docx_path: Path,
+    diagnostic,
+    decision: _MarkerSplitDecision,
+):
+    doc = Document(str(docx_path))
+    manual_skip = _valid_manual_continuation_table_ids(doc)
+    if diagnostic.table_index in manual_skip:
+        return None, "valid_manual_continuation"
+    if not diagnostic.appendix_table and not diagnostic.has_standard_table_caption:
+        return None, "ordinary_without_standard_caption"
+
+    try:
+        result = apply_numbered_split_to_document(
+            doc,
+            diagnostic.table_index,
+            decision.split_before_row,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=diagnostic.appendix_table,
+            continuation_paragraph_builder=_build_continuation_para,
+        )
+    except Exception as exc:
+        return None, _map_marker_split_apply_error(exc)
+
+    if result.source_note_after_second is False:
+        return None, "source_note_ordering_failed"
+
+    doc.save(str(docx_path))
+    return result, None
+
+
+def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = False) -> int:
+    from . import table_markers
+
+    eligible_count = 0
+    try:
+        diagnostics = table_markers.diagnose_all_tables(docx_path, keep_temp=False)
+    except Exception as exc:
+        logger.info("marker_split_skipped reason=mapping_error error=%s", exc)
+        return 0
+
+    for diagnostic in diagnostics:
+        logger.info(
+            "marker_split_candidate table_index=%s rows=%s pages=%s",
+            diagnostic.table_index,
+            diagnostic.rows_count,
+            diagnostic.pages_detected,
+        )
+        decision = _evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
+        if decision.eligible:
+            logger.info(
+                "marker_split_boundary table_index=%s split_before_row=%s",
+                diagnostic.table_index,
+                decision.split_before_row,
+            )
+            logger.info(
+                "marker_split_decision=ELIGIBLE table_index=%s",
+                diagnostic.table_index,
+            )
+            eligible_count += 1
+            if apply_split:
+                result, skip_reason = _apply_marker_split_candidate(
+                    docx_path,
+                    diagnostic,
+                    decision,
+                )
+                if result is not None:
+                    logger.info(
+                        "marker_split_applied table_index=%s split_before_row=%s first_rows=%s second_rows=%s appendix=%s continuation=%s",
+                        diagnostic.table_index,
+                        decision.split_before_row,
+                        result.first_table_rows_count,
+                        result.second_table_rows_count,
+                        diagnostic.appendix_table,
+                        result.continuation_paragraph_inserted,
+                    )
+                    return 1
+                logger.info(
+                    "marker_split_skipped table_index=%s reason=%s",
+                    diagnostic.table_index,
+                    skip_reason,
+                )
+            continue
+
+        logger.info(
+            "marker_split_skipped table_index=%s reason=%s",
+            diagnostic.table_index,
+            decision.skip_reason,
+        )
+
+    return eligible_count
+
+
 def apply_rendered_table_continuation(
     docx_path: Path,
     report: FormattingReport | None = None,
@@ -1585,6 +1762,16 @@ def apply_rendered_table_continuation(
         len(doc.tables),
         max_passes,
     )
+
+    if _marker_split_enabled():
+        apply_marker_split = _marker_split_apply_enabled()
+        marker_result = _run_marker_split_detection_pass(
+            docx_path,
+            apply_split=apply_marker_split,
+        )
+        if apply_marker_split and marker_result:
+            logger.info("rendered_final_decision action=marker_split_applied")
+            return marker_result
 
     pdf_path: Path | None = None
     try:

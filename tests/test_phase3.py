@@ -2675,6 +2675,1207 @@ def test_marker_instrumentation_rejects_invalid_table_index() -> tuple[bool, str
     return _result(False, "expected ValueError for invalid table index")
 
 
+def test_marker_page_span_summary() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_markers import summarize_row_page_spans
+
+    spans = summarize_row_page_spans({
+        0: 12,
+        1: 12,
+        2: 13,
+        3: 13,
+        5: 14,
+    })
+    triples = [(s.start_row, s.end_row, s.page_num) for s in spans]
+    expected = [(0, 1, 12), (2, 3, 13), (5, 5, 14)]
+    if triples != expected:
+        return _result(False, f"unexpected page spans: {triples!r}")
+    return _result(True, "row page spans are grouped correctly")
+
+
+def test_marker_diagnose_all_tables_summary() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    first = doc.add_table(rows=3, cols=1)
+    first.rows[0].cells[0].text = "H1"
+    first.rows[1].cells[0].text = "A"
+    first.rows[2].cells[0].text = "B"
+    second = doc.add_table(rows=2, cols=1)
+    second.rows[0].cells[0].text = "H2"
+    second.rows[1].cells[0].text = "C"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "diag.docx"
+        doc.save(src)
+
+        old_map = tm.map_table_rows_to_pages
+        try:
+            def fake_map(_docx_path, table_index, keep_temp=False):
+                if table_index == 0:
+                    return tm.TableMarkerResult(
+                        row_pages={0: 12, 1: 12, 2: 13},
+                        found_rows=[0, 1, 2],
+                        missing_rows=[],
+                        duplicate_rows={},
+                        marker_font_size_pt=1,
+                    )
+                return tm.TableMarkerResult(
+                    row_pages={0: 15},
+                    found_rows=[0],
+                    missing_rows=[1],
+                    duplicate_rows={},
+                    instrumented_docx_path=Path(tmp) / "inst.docx" if keep_temp else None,
+                    pdf_path=Path(tmp) / "inst.pdf" if keep_temp else None,
+                    marker_font_size_pt=2,
+                )
+
+            tm.map_table_rows_to_pages = fake_map
+            diagnostics = tm.diagnose_all_tables(src, keep_temp=True)
+        finally:
+            tm.map_table_rows_to_pages = old_map
+
+    if len(diagnostics) != 2:
+        return _result(False, f"expected 2 diagnostics, got {len(diagnostics)}")
+    if diagnostics[0].candidate_for_split is not True:
+        return _result(False, "multi-page fully-mapped table should be candidate_for_split=yes")
+    if [(s.start_row, s.end_row, s.page_num) for s in diagnostics[0].page_spans] != [(0, 1, 12), (2, 2, 13)]:
+        return _result(False, f"unexpected first table spans: {diagnostics[0].page_spans!r}")
+    if diagnostics[0].appendix_table is not False:
+        return _result(False, "first table should not be marked as appendix table")
+    if diagnostics[0].caption_detected is not False:
+        return _result(False, "first table should not report caption without preceding paragraph")
+    if diagnostics[1].candidate_for_split is not False:
+        return _result(False, "table with missing rows should not be candidate_for_split")
+    if diagnostics[1].missing_rows != [1]:
+        return _result(False, f"unexpected missing rows: {diagnostics[1].missing_rows!r}")
+    if diagnostics[1].marker_font_size_pt != 2:
+        return _result(False, f"unexpected fallback font size: {diagnostics[1].marker_font_size_pt}")
+
+    return _result(True, "document-level diagnostics summarize all tables")
+
+
+def test_marker_diagnose_table_handles_mapping_error() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=1)
+    tbl.rows[0].cells[0].text = "H"
+    tbl.rows[1].cells[0].text = "A"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "error.docx"
+        doc.save(src)
+
+        old_map = tm.map_table_rows_to_pages
+        try:
+            def raise_map(_docx_path, _table_index, keep_temp=False):
+                raise RuntimeError("render failed")
+
+            tm.map_table_rows_to_pages = raise_map
+            diagnostic = tm.diagnose_table(src, 0, keep_temp=False)
+        finally:
+            tm.map_table_rows_to_pages = old_map
+
+    if diagnostic.error_message != "render failed":
+        return _result(False, f"unexpected error_message: {diagnostic.error_message!r}")
+    if diagnostic.candidate_for_split:
+        return _result(False, "error diagnostic must not be candidate_for_split")
+    if diagnostic.row_pages != {} or diagnostic.pages_detected != []:
+        return _result(False, "error diagnostic should not report row/page mapping")
+    return _result(True, "diagnose_table degrades to diagnostic error instead of crashing")
+
+
+def test_marker_appendix_and_caption_metadata() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1")
+    first = doc.add_table(rows=2, cols=1)
+    first.rows[0].cells[0].text = "H1"
+    first.rows[1].cells[0].text = "A"
+    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Длинная таблица по приложению")
+    second = doc.add_table(rows=2, cols=1)
+    second.rows[0].cells[0].text = "H2"
+    second.rows[1].cells[0].text = "B"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "appendix.docx"
+        doc.save(src)
+
+        old_map = tm.map_table_rows_to_pages
+        try:
+            def fake_map(_docx_path, table_index, keep_temp=False):
+                return tm.TableMarkerResult(
+                    row_pages={0: 10, 1: 10},
+                    found_rows=[0, 1],
+                    missing_rows=[],
+                    duplicate_rows={},
+                    marker_font_size_pt=1,
+                )
+
+            tm.map_table_rows_to_pages = fake_map
+            diagnostics = tm.diagnose_all_tables(src, keep_temp=False)
+        finally:
+            tm.map_table_rows_to_pages = old_map
+
+    if diagnostics[0].caption_detected is not True or diagnostics[0].has_standard_table_caption is not True:
+        return _result(False, "standard table caption was not detected for first table")
+    if diagnostics[0].appendix_table is not False:
+        return _result(False, "first table should not be appendix table")
+    if diagnostics[1].appendix_table is not True:
+        return _result(False, "second table should be marked as appendix table")
+    if diagnostics[1].caption_detected is not True:
+        return _result(False, "appendix table title/caption should be detected")
+    if diagnostics[1].has_standard_table_caption is not False:
+        return _result(False, "appendix table title should not be treated as standard table caption")
+    if diagnostics[1].preceding_paragraph_text != "Длинная таблица по приложению":
+        return _result(False, f"unexpected preceding paragraph text: {diagnostics[1].preceding_paragraph_text!r}")
+
+    return _result(True, "appendix and caption metadata are detected")
+
+
+def test_marker_runtime_dry_run_clean_two_page_table_is_eligible() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.table_markers import TableMarkerDiagnostic, TablePageSpan
+
+    diagnostic = TableMarkerDiagnostic(
+        table_index=10,
+        rows_count=21,
+        pages_detected=[53, 54],
+        row_pages={**{0: 53}, **{row: 53 for row in range(1, 18)}, 18: 54, 19: 54, 20: 54},
+        found_rows=list(range(21)),
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[TablePageSpan(0, 17, 53), TablePageSpan(18, 20, 54)],
+        appendix_table=True,
+        caption_detected=True,
+        has_standard_table_caption=False,
+        preceding_paragraph_text="Расчет трудозатрат",
+    )
+
+    decision = tc._evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
+    if decision.eligible is not True:
+        return _result(False, f"expected eligible decision, got {decision!r}")
+    if decision.split_before_row != 18:
+        return _result(False, f"expected split_before_row=18, got {decision.split_before_row!r}")
+    return _result(True, "clean two-page marker mapping is marked eligible")
+
+
+def test_marker_runtime_dry_run_skips_duplicate_rows() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.table_markers import TableMarkerDiagnostic
+
+    diagnostic = TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=4,
+        pages_detected=[12, 13],
+        row_pages={0: 12, 1: 12, 3: 13},
+        found_rows=[0, 1, 3],
+        missing_rows=[],
+        duplicate_rows={2: [12, 13]},
+        candidate_for_split=False,
+        page_spans=[],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+    )
+
+    decision = tc._evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
+    if decision.eligible:
+        return _result(False, "duplicate rows should skip dry-run eligibility")
+    if decision.skip_reason != "duplicate_rows":
+        return _result(False, f"unexpected skip_reason: {decision.skip_reason!r}")
+    return _result(True, "duplicate rows are skipped")
+
+
+def test_marker_runtime_dry_run_skips_missing_rows_outside_header() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.table_markers import TableMarkerDiagnostic
+
+    diagnostic = TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[20, 21],
+        row_pages={0: 20, 1: 20, 3: 21, 4: 21},
+        found_rows=[0, 1, 3, 4],
+        missing_rows=[2],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+    )
+
+    decision = tc._evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
+    if decision.eligible:
+        return _result(False, "missing body rows should skip dry-run eligibility")
+    if decision.skip_reason != "missing_rows_outside_header":
+        return _result(False, f"unexpected skip_reason: {decision.skip_reason!r}")
+    return _result(True, "missing rows outside header are skipped")
+
+
+def test_marker_runtime_dry_run_skips_three_page_tables() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.table_markers import TableMarkerDiagnostic
+
+    diagnostic = TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=6,
+        pages_detected=[30, 31, 32],
+        row_pages={0: 30, 1: 30, 2: 31, 3: 31, 4: 32, 5: 32},
+        found_rows=[0, 1, 2, 3, 4, 5],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+    )
+
+    decision = tc._evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
+    if decision.eligible:
+        return _result(False, "3-page table should not be eligible in v1")
+    if decision.skip_reason != "not_2_pages":
+        return _result(False, f"unexpected skip_reason: {decision.skip_reason!r}")
+    return _result(True, "3-page tables are skipped")
+
+
+def test_marker_runtime_dry_run_logs_eligible_candidate() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    old_level = tc.logger.level
+    tc.logger.addHandler(handler)
+    tc.logger.setLevel(logging.INFO)
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=10,
+        rows_count=21,
+        pages_detected=[53, 54],
+        row_pages={**{0: 53}, **{row: 53 for row in range(1, 18)}, 18: 54, 19: 54, 20: 54},
+        found_rows=list(range(21)),
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 17, 53), tm.TablePageSpan(18, 20, 54)],
+        appendix_table=True,
+        caption_detected=True,
+        has_standard_table_caption=False,
+        preceding_paragraph_text="Расчет трудозатрат",
+    )
+
+    old_diagnose_all = tm.diagnose_all_tables
+    try:
+        tm.diagnose_all_tables = lambda _path, keep_temp=False: [diagnostic]
+        count = tc._run_marker_split_detection_pass(Path("/tmp/fake.docx"))
+    finally:
+        tm.diagnose_all_tables = old_diagnose_all
+        tc.logger.removeHandler(handler)
+        tc.logger.setLevel(old_level)
+
+    logs = log_stream.getvalue()
+    expected_fragments = [
+        "marker_split_candidate table_index=10 rows=21 pages=[53, 54]",
+        "marker_split_boundary table_index=10 split_before_row=18",
+        "marker_split_decision=ELIGIBLE table_index=10",
+    ]
+    missing = [fragment for fragment in expected_fragments if fragment not in logs]
+    if count != 1:
+        return _result(False, f"expected one eligible candidate, got {count}")
+    if missing:
+        return _result(False, f"missing log fragments: {missing!r}; logs={logs!r}")
+    return _result(True, "eligible marker candidate logs are emitted")
+
+
+def test_marker_runtime_dry_run_feature_flag_off_skips_detection_hook() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1")
+    tbl = doc.add_table(rows=2, cols=1)
+    tbl.rows[0].cells[0].text = "H"
+    tbl.rows[1].cells[0].text = "A"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "flag_off.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "flag_off.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_flag = os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+        old_hook = tc._run_marker_split_detection_pass
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            def fail_hook(_docx_path):
+                raise AssertionError("marker dry-run hook should not be called when flag is off")
+
+            tc._run_marker_split_detection_pass = fail_hook
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: []
+            tc.apply_rendered_table_continuation(path)
+        finally:
+            tc._run_marker_split_detection_pass = old_hook
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_flag is not None:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_flag
+
+    return _result(True, "feature flag off keeps marker dry-run hook disabled")
+
+
+def test_marker_runtime_dry_run_only_does_not_mutate_document() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    for i in range(1, 5):
+        for j in range(3):
+            tbl.rows[i].cells[j].text = f"r{i}c{j}"
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[12, 13],
+        row_pages={0: 12, 1: 12, 2: 12, 3: 13, 4: 13},
+        found_rows=[0, 1, 2, 3, 4],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 12), tm.TablePageSpan(3, 4, 13)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.1.1",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dry_run_only.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "dry_run_only.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+        before = path.read_bytes()
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tm.diagnose_all_tables = lambda _path, keep_temp=False: [diagnostic]
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: []
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is not None:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        after = path.read_bytes()
+
+    if n != 0:
+        return _result(False, f"dry-run only should not mutate, got {n}")
+    if before != after:
+        return _result(False, "dry-run only changed document bytes")
+    return _result(True, "dry-run only does not mutate document")
+
+
+def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Трудозатраты проекта")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "Исполнитель"
+    tbl.rows[0].cells[1].text = "Работы"
+    tbl.rows[0].cells[2].text = "Стоимость"
+    for i in range(1, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+    doc.add_paragraph("Источник: данные автора")
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[53, 54],
+        row_pages={0: 53, 1: 53, 2: 53, 3: 54, 4: 54},
+        found_rows=[0, 1, 2, 3, 4],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 53), tm.TablePageSpan(3, 4, 54)],
+        appendix_table=True,
+        caption_detected=True,
+        has_standard_table_caption=False,
+        preceding_paragraph_text="Трудозатраты проекта",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "appendix_apply.docx"
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tm.diagnose_all_tables = lambda _path, keep_temp=False: [diagnostic]
+            tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker split apply"))
+            tc.analyze_pdf_lines = lambda _path: (_ for _ in ()).throw(AssertionError("pdf analysis should not run after marker split apply"))
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        out = Document(str(path))
+
+    if n != 1:
+        return _result(False, f"expected one appendix split mutation, got {n}")
+    if len(out.tables) != 2:
+        return _result(False, f"expected 2 tables after appendix split, got {len(out.tables)}")
+    if [c.text for c in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing in first appendix table")
+    if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing in second appendix table")
+    if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
+        return _result(False, "appendix split inserted forbidden continuation paragraph")
+    return _result(True, "eligible appendix table is split with numbered row and no continuation paragraph")
+
+
+def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "Показатель"
+    tbl.rows[0].cells[1].text = "Как влияет"
+    tbl.rows[0].cells[2].text = "Последствия"
+    for i in range(1, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+    doc.add_paragraph("Источник: данные автора")
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[12, 13],
+        row_pages={0: 12, 1: 12, 2: 12, 3: 13, 4: 13},
+        found_rows=[0, 1, 2, 3, 4],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 12), tm.TablePageSpan(3, 4, 13)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.1.1",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "ordinary_apply.docx"
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tm.diagnose_all_tables = lambda _path, keep_temp=False: [diagnostic]
+            tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker split apply"))
+            tc.analyze_pdf_lines = lambda _path: (_ for _ in ()).throw(AssertionError("pdf analysis should not run after marker split apply"))
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        out = Document(str(path))
+
+    if n != 1:
+        return _result(False, f"expected one ordinary split mutation, got {n}")
+    if len(out.tables) != 2:
+        return _result(False, f"expected 2 tables after ordinary split, got {len(out.tables)}")
+    if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
+        return _result(False, "continuation table should start with numbered row only")
+    if "Продолжение таблицы 1.1.1" not in [p.text for p in out.paragraphs]:
+        return _result(False, "ordinary split did not insert continuation paragraph")
+    if any(cell.text == "Показатель" for cell in out.tables[1].rows[0].cells):
+        return _result(False, "text header leaked into continuation row")
+    return _result(True, "eligible ordinary table is split with continuation paragraph")
+
+
+def test_marker_runtime_apply_skips_ineligible_tables() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    cases = [
+        ("duplicate", tm.TableMarkerDiagnostic(
+            table_index=0,
+            rows_count=4,
+            pages_detected=[12, 13],
+            row_pages={0: 12, 1: 12, 3: 13},
+            found_rows=[0, 1, 3],
+            missing_rows=[],
+            duplicate_rows={2: [12, 13]},
+            candidate_for_split=False,
+            page_spans=[],
+            appendix_table=False,
+            caption_detected=True,
+            has_standard_table_caption=True,
+            preceding_paragraph_text="Таблица 2.1",
+        )),
+        ("missing", tm.TableMarkerDiagnostic(
+            table_index=0,
+            rows_count=5,
+            pages_detected=[12, 13],
+            row_pages={0: 12, 1: 12, 3: 13, 4: 13},
+            found_rows=[0, 1, 3, 4],
+            missing_rows=[2],
+            duplicate_rows={},
+            candidate_for_split=False,
+            page_spans=[],
+            appendix_table=False,
+            caption_detected=True,
+            has_standard_table_caption=True,
+            preceding_paragraph_text="Таблица 2.2",
+        )),
+        ("threepage", tm.TableMarkerDiagnostic(
+            table_index=0,
+            rows_count=6,
+            pages_detected=[12, 13, 14],
+            row_pages={0: 12, 1: 12, 2: 13, 3: 13, 4: 14, 5: 14},
+            found_rows=[0, 1, 2, 3, 4, 5],
+            missing_rows=[],
+            duplicate_rows={},
+            candidate_for_split=False,
+            page_spans=[],
+            appendix_table=False,
+            caption_detected=True,
+            has_standard_table_caption=True,
+            preceding_paragraph_text="Таблица 2.3",
+        )),
+    ]
+
+    for label, diagnostic in cases:
+        doc = Document()
+        doc.add_paragraph("Таблица 2.1")
+        tbl = doc.add_table(rows=4, cols=2)
+        for i in range(4):
+            tbl.rows[i].cells[0].text = f"r{i}c0"
+            tbl.rows[i].cells[1].text = f"r{i}c1"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / f"ineligible_{label}.docx"
+            pdf_dir = Path(tmp) / "pdf"
+            pdf_dir.mkdir()
+            pdf_path = pdf_dir / f"ineligible_{label}.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            doc.save(path)
+            before = path.read_bytes()
+
+            old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+            old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+            os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+            os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+            old_diagnose_all = tm.diagnose_all_tables
+            old_render = tc.render_docx_to_pdf
+            old_analyze = tc.analyze_pdf_lines
+            try:
+                tm.diagnose_all_tables = lambda _path, keep_temp=False, diag=diagnostic: [diag]
+                tc.render_docx_to_pdf = lambda _path: pdf_path
+                tc.analyze_pdf_lines = lambda _path: []
+                n = tc.apply_rendered_table_continuation(path)
+            finally:
+                tm.diagnose_all_tables = old_diagnose_all
+                tc.render_docx_to_pdf = old_render
+                tc.analyze_pdf_lines = old_analyze
+                if old_enable is None:
+                    os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+                else:
+                    os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+                if old_apply is None:
+                    os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+                else:
+                    os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+            after = path.read_bytes()
+
+        if n != 0:
+            return _result(False, f"ineligible case {label} should not mutate, got {n}")
+        if before != after:
+            return _result(False, f"ineligible case {label} changed document bytes")
+
+    return _result(True, "ineligible duplicate/missing/3page cases do not mutate")
+
+
+def test_marker_runtime_apply_is_idempotent_on_second_run() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 7.1")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    for i in range(1, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+
+    eligible = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[12, 13],
+        row_pages={0: 12, 1: 12, 2: 12, 3: 13, 4: 13},
+        found_rows=[0, 1, 2, 3, 4],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 12), tm.TablePageSpan(3, 4, 13)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 7.1",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "idempotent.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "idempotent.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            def fake_diagnose_all(docx_path, keep_temp=False):
+                current = Document(str(docx_path))
+                if len(current.tables) == 1:
+                    return [eligible]
+                return [
+                    tm.TableMarkerDiagnostic(
+                        table_index=0,
+                        rows_count=len(current.tables[0].rows),
+                        pages_detected=[12],
+                        row_pages={0: 12, 1: 12, 2: 12, 3: 12},
+                        found_rows=[0, 1, 2, 3],
+                        missing_rows=[],
+                        duplicate_rows={},
+                        candidate_for_split=False,
+                        page_spans=[tm.TablePageSpan(0, 3, 12)],
+                        appendix_table=False,
+                        caption_detected=True,
+                        has_standard_table_caption=True,
+                        preceding_paragraph_text="Таблица 7.1",
+                    ),
+                    tm.TableMarkerDiagnostic(
+                        table_index=1,
+                        rows_count=len(current.tables[1].rows),
+                        pages_detected=[13],
+                        row_pages={0: 13, 1: 13, 2: 13},
+                        found_rows=[0, 1, 2],
+                        missing_rows=[],
+                        duplicate_rows={},
+                        candidate_for_split=False,
+                        page_spans=[tm.TablePageSpan(0, 2, 13)],
+                        appendix_table=False,
+                        caption_detected=True,
+                        has_standard_table_caption=False,
+                        preceding_paragraph_text="Продолжение таблицы 7.1",
+                    ),
+                ]
+
+            tm.diagnose_all_tables = fake_diagnose_all
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: []
+            first = tc.apply_rendered_table_continuation(path)
+            second = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        out = Document(str(path))
+
+    if first != 1 or second != 0:
+        return _result(False, f"expected first run=1 and second run=0, got {first}/{second}")
+    if len(out.tables) != 2:
+        return _result(False, f"expected 2 tables after second run, got {len(out.tables)}")
+    numbered_rows = sum(
+        1 for row in out.tables[0].rows
+        if [cell.text for cell in row.cells] == ["1", "2", "3"]
+    )
+    if numbered_rows != 1:
+        return _result(False, f"first table should contain exactly one numbered row, got {numbered_rows}")
+    continuation_count = sum(1 for p in out.paragraphs if p.text == "Продолжение таблицы 7.1")
+    if continuation_count != 1:
+        return _result(False, f"expected one continuation paragraph after two runs, got {continuation_count}")
+    return _result(True, "active marker split is idempotent on second run")
+
+
+def test_split_prototype_simple_table() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    tbl = doc.add_table(rows=5, cols=2)
+    for i in range(5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "simple.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(src, 0, 3, header_rows=1, keep_temp=True)
+        out = Document(str(result.output_docx_path))
+
+    if result.total_tables_after != 2:
+        return _result(False, f"expected 2 tables after split, got {result.total_tables_after}")
+    if result.first_table_rows_count != 3:
+        return _result(False, f"expected 3 rows in first table, got {result.first_table_rows_count}")
+    if result.second_table_rows_count != 3:
+        return _result(False, f"expected 3 rows in second table, got {result.second_table_rows_count}")
+    if out.tables[1].rows[0].cells[0].text != "r0c0":
+        return _result(False, f"header row not copied into second table: {out.tables[1].rows[0].cells[0].text!r}")
+    if out.tables[1].rows[1].cells[0].text != "r3c0":
+        return _result(False, f"tail rows not moved to second table: {out.tables[1].rows[1].cells[0].text!r}")
+    return _result(True, "simple table split produced two clone-based tables")
+
+
+def test_split_prototype_source_note_stays_after_second_table() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    tbl = doc.add_table(rows=5, cols=1)
+    for i in range(5):
+        tbl.rows[i].cells[0].text = f"row{i}"
+    doc.add_paragraph("Источник: данные автора")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source_note.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(src, 0, 3, header_rows=1, keep_temp=True)
+        out = Document(str(result.output_docx_path))
+
+    if result.source_note_after_second is not True:
+        return _result(False, f"source note did not stay after second table: {result.source_note_after_second!r}")
+
+    body = list(out.element.body)
+    def _local(node):
+        return node.tag.split("}")[-1] if "}" in node.tag else node.tag
+
+    tags = [_local(node) for node in body]
+    try:
+        first_tbl_idx = tags.index("tbl")
+        second_tbl_idx = tags.index("tbl", first_tbl_idx + 1)
+        note_idx = next(
+            i for i, node in enumerate(body)
+            if _local(node) == "p" and "Источник:" in "".join(t.text or "" for t in node.findall('.//' + qn('w:t')))
+        )
+    except Exception as exc:
+        return _result(False, f"failed to inspect body ordering: {exc}")
+    if not (first_tbl_idx < second_tbl_idx < note_idx):
+        return _result(False, f"source note ordering invalid: first={first_tbl_idx}, second={second_tbl_idx}, note={note_idx}")
+    return _result(True, "source note remains after second table")
+
+
+def test_split_prototype_original_document_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    tbl = doc.add_table(rows=4, cols=1)
+    for i in range(4):
+        tbl.rows[i].cells[0].text = f"row{i}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "original.docx"
+        doc.save(src)
+        before = src.read_bytes()
+        prototype_split_table_copy(src, 0, 2, header_rows=1, keep_temp=True)
+        after = src.read_bytes()
+
+    if before != after:
+        return _result(False, "source docx changed after prototype split")
+    return _result(True, "prototype split leaves source document unchanged")
+
+
+def test_split_prototype_invalid_table_index() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_table(rows=2, cols=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "invalid_idx.docx"
+        doc.save(src)
+        try:
+            prototype_split_table_copy(src, 3, 1, header_rows=1, keep_temp=False)
+        except ValueError:
+            return _result(True, "invalid table index rejected")
+        except Exception as exc:
+            return _result(False, f"unexpected exception type: {exc}")
+    return _result(False, "expected ValueError for invalid table index")
+
+
+def test_split_prototype_invalid_split_before_row() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_table(rows=3, cols=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "invalid_split.docx"
+        doc.save(src)
+        try:
+            prototype_split_table_copy(src, 0, 0, header_rows=1, keep_temp=False)
+        except ValueError:
+            return _result(True, "invalid split_before_row rejected")
+        except Exception as exc:
+            return _result(False, f"unexpected exception type: {exc}")
+    return _result(False, "expected ValueError for invalid split_before_row")
+
+
+def test_split_prototype_no_continuation_paragraph_inserted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Длинная таблица приложения")
+    tbl = doc.add_table(rows=4, cols=1)
+    for i in range(4):
+        tbl.rows[i].cells[0].text = f"row{i}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "appendix_split.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(src, 0, 2, header_rows=1, keep_temp=True)
+        out = Document(str(result.output_docx_path))
+
+    paragraph_texts = [p.text for p in out.paragraphs]
+    if any("Продолжение таблицы" in (text or "") for text in paragraph_texts):
+        return _result(False, "unexpected continuation paragraph inserted")
+    if any(text == "Продолжение" for text in paragraph_texts):
+        return _result(False, "unexpected generic continuation paragraph inserted")
+    return _result(True, "appendix split does not insert continuation paragraph")
+
+
+def test_split_prototype_numbered_ordinary_continuation_row_only() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "Показатель"
+    tbl.rows[0].cells[1].text = "Как влияет"
+    tbl.rows[0].cells[2].text = "Последствия"
+    for i in range(1, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "ordinary_numbered.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(
+            src,
+            0,
+            3,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=False,
+            keep_temp=True,
+        )
+        out = Document(str(result.output_docx_path))
+
+    if result.continuation_text != "Продолжение таблицы 1.1.1":
+        return _result(False, f"unexpected continuation text: {result.continuation_text!r}")
+    if result.continuation_paragraph_inserted is not True:
+        return _result(False, "ordinary table should insert continuation paragraph")
+    if result.column_count != 3:
+        return _result(False, f"unexpected column_count: {result.column_count!r}")
+
+    first_row_texts = [cell.text for cell in out.tables[0].rows[1].cells]
+    second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
+    if first_row_texts != ["1", "2", "3"]:
+        return _result(False, f"unexpected numbered row in first table: {first_row_texts!r}")
+    if second_row_texts != ["1", "2", "3"]:
+        return _result(False, f"unexpected continuation numbered row: {second_row_texts!r}")
+    if [cell.text for cell in out.tables[1].rows[1].cells] != ["r3c0", "r3c1", "r3c2"]:
+        return _result(False, "tail rows not moved under numbered continuation row")
+    if any(cell.text == "Показатель" for cell in out.tables[1].rows[0].cells):
+        return _result(False, "text header leaked into continuation numbered row")
+    if "Продолжение таблицы 1.1.1" not in [p.text for p in out.paragraphs]:
+        return _result(False, "continuation paragraph missing from ordinary numbered split")
+    return _result(True, "ordinary numbered split uses continuation text and numbered row only")
+
+
+def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Таблица приложения")
+    tbl = doc.add_table(rows=4, cols=3)
+    tbl.rows[0].cells[0].text = "Колонка А"
+    tbl.rows[0].cells[1].text = "Колонка Б"
+    tbl.rows[0].cells[2].text = "Колонка В"
+    for i in range(1, 4):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "appendix_numbered.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(
+            src,
+            0,
+            2,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=True,
+            keep_temp=True,
+        )
+        out = Document(str(result.output_docx_path))
+
+    if result.continuation_paragraph_inserted:
+        return _result(False, "appendix numbered split must not insert continuation paragraph")
+    if result.continuation_text is not None:
+        return _result(False, f"appendix continuation text must be None, got {result.continuation_text!r}")
+    second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
+    if second_row_texts != ["1", "2", "3"]:
+        return _result(False, f"unexpected appendix continuation row: {second_row_texts!r}")
+    if any("Продолжение таблицы" in (text or "") for text in [p.text for p in out.paragraphs]):
+        return _result(False, "appendix numbered split inserted continuation paragraph")
+    return _result(True, "appendix numbered split keeps numbered row without continuation text")
+
+
+def test_split_prototype_numbered_existing_row_reused_without_duplicate() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.4")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    tbl.rows[1].cells[0].text = "1"
+    tbl.rows[1].cells[1].text = "2"
+    tbl.rows[1].cells[2].text = "3"
+    for i in range(2, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "reuse_numbered.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(
+            src,
+            0,
+            4,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=False,
+            keep_temp=True,
+        )
+        out = Document(str(result.output_docx_path))
+
+    if result.numbered_row_reused is not True:
+        return _result(False, f"expected numbered row reuse, got {result.numbered_row_reused!r}")
+    first_table_numbered_rows = sum(
+        1 for row in out.tables[0].rows
+        if [cell.text for cell in row.cells] == ["1", "2", "3"]
+    )
+    if first_table_numbered_rows != 1:
+        return _result(False, f"expected exactly one numbered row in first table, got {first_table_numbered_rows}")
+    second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
+    if second_row_texts != ["1", "2", "3"]:
+        return _result(False, "reused numbered row not copied to continuation table")
+    return _result(True, "existing numbered row is reused without duplication")
+
+
+def test_split_prototype_numbered_malformed_existing_row_fails_safely() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Таблица 3.1")
+    tbl = doc.add_table(rows=4, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    tbl.rows[1].cells[0].text = "1"
+    tbl.rows[1].cells[1].text = "3"
+    tbl.rows[1].cells[2].text = "4"
+    tbl.rows[2].cells[0].text = "r2c0"
+    tbl.rows[2].cells[1].text = "r2c1"
+    tbl.rows[2].cells[2].text = "r2c2"
+    tbl.rows[3].cells[0].text = "r3c0"
+    tbl.rows[3].cells[1].text = "r3c1"
+    tbl.rows[3].cells[2].text = "r3c2"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "malformed_numbered.docx"
+        doc.save(src)
+        try:
+            prototype_split_table_copy(
+                src,
+                0,
+                3,
+                header_rows=1,
+                numbered_header=True,
+                appendix_table=False,
+                keep_temp=False,
+            )
+        except ValueError as exc:
+            if "malformed" not in str(exc):
+                return _result(False, f"unexpected ValueError text: {exc}")
+            return _result(True, "malformed numbered row fails safely")
+        except Exception as exc:
+            return _result(False, f"unexpected exception type: {exc}")
+    return _result(False, "expected ValueError for malformed numbered row")
+
+
+def test_split_prototype_numbered_source_note_after_second_table() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Таблица 4.2")
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    for i in range(1, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+    doc.add_paragraph("Источник: данные автора")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "numbered_source_note.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(
+            src,
+            0,
+            3,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=False,
+            keep_temp=True,
+        )
+        out = Document(str(result.output_docx_path))
+
+    if result.source_note_after_second is not True:
+        return _result(False, "source note did not remain after continuation table")
+    paragraph_texts = [p.text for p in out.paragraphs]
+    if "Продолжение таблицы 4.2" not in paragraph_texts:
+        return _result(False, "continuation paragraph missing in numbered source-note case")
+    return _result(True, "numbered split keeps source note after second table")
+
+
+def test_split_prototype_numbered_original_document_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Таблица 5.1")
+    tbl = doc.add_table(rows=4, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    for i in range(1, 4):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "numbered_original.docx"
+        doc.save(src)
+        before = src.read_bytes()
+        prototype_split_table_copy(
+            src,
+            0,
+            2,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=False,
+            keep_temp=True,
+        )
+        after = src.read_bytes()
+
+    if before != after:
+        return _result(False, "source docx changed after numbered prototype split")
+    return _result(True, "numbered prototype split leaves source document unchanged")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -2739,6 +3940,33 @@ def run_all() -> None:
         ("M1 | keep_temp mapping result", test_marker_map_rows_to_pages_keep_temp_debug_paths),
         ("M1 | 1pt fallback to 2pt", test_marker_map_rows_to_pages_falls_back_to_2pt_and_returns_debug_info),
         ("M1 | invalid table index", test_marker_instrumentation_rejects_invalid_table_index),
+        ("M1 | row page span summary", test_marker_page_span_summary),
+        ("M1 | diagnose all tables summary", test_marker_diagnose_all_tables_summary),
+        ("M1 | diagnose table error handling", test_marker_diagnose_table_handles_mapping_error),
+        ("M1 | appendix/caption metadata", test_marker_appendix_and_caption_metadata),
+        ("M1 | dry-run eligible boundary", test_marker_runtime_dry_run_clean_two_page_table_is_eligible),
+        ("M1 | dry-run duplicate skip", test_marker_runtime_dry_run_skips_duplicate_rows),
+        ("M1 | dry-run missing skip", test_marker_runtime_dry_run_skips_missing_rows_outside_header),
+        ("M1 | dry-run 3-page skip", test_marker_runtime_dry_run_skips_three_page_tables),
+        ("M1 | dry-run eligible logging", test_marker_runtime_dry_run_logs_eligible_candidate),
+        ("M1 | dry-run flag off", test_marker_runtime_dry_run_feature_flag_off_skips_detection_hook),
+        ("M1 | dry-run no mutation", test_marker_runtime_dry_run_only_does_not_mutate_document),
+        ("M1 | apply appendix split", test_marker_runtime_apply_split_for_appendix_table),
+        ("M1 | apply ordinary split", test_marker_runtime_apply_split_for_ordinary_table),
+        ("M1 | apply ineligible skip", test_marker_runtime_apply_skips_ineligible_tables),
+        ("M1 | apply idempotent", test_marker_runtime_apply_is_idempotent_on_second_run),
+        ("S1 | prototype simple table split", test_split_prototype_simple_table),
+        ("S1 | source note after second table", test_split_prototype_source_note_stays_after_second_table),
+        ("S1 | original doc unchanged", test_split_prototype_original_document_unchanged),
+        ("S1 | invalid table index", test_split_prototype_invalid_table_index),
+        ("S1 | invalid split_before_row", test_split_prototype_invalid_split_before_row),
+        ("S1 | no continuation paragraph", test_split_prototype_no_continuation_paragraph_inserted),
+        ("S1 | numbered ordinary continuation", test_split_prototype_numbered_ordinary_continuation_row_only),
+        ("S1 | numbered appendix continuation", test_split_prototype_numbered_appendix_has_no_continuation_text),
+        ("S1 | numbered row reused", test_split_prototype_numbered_existing_row_reused_without_duplicate),
+        ("S1 | numbered malformed row", test_split_prototype_numbered_malformed_existing_row_fails_safely),
+        ("S1 | numbered source note", test_split_prototype_numbered_source_note_after_second_table),
+        ("S1 | numbered original unchanged", test_split_prototype_numbered_original_document_unchanged),
     ]
 
     for asset in ASSET_FILES:
