@@ -207,6 +207,14 @@ def _row_looks_numbered_but_malformed(tr_elem, column_count: int) -> bool:
     return values != [str(i) for i in range(1, column_count + 1)]
 
 
+def _row_has_numpr(tr_elem) -> bool:
+    for p in tr_elem.findall(".//" + qn("w:p")):
+        p_pr = p.find(qn("w:pPr"))
+        if p_pr is not None and p_pr.find(qn("w:numPr")) is not None:
+            return True
+    return False
+
+
 def _remove_all_children(elem) -> None:
     for child in list(elem):
         elem.remove(child)
@@ -223,7 +231,25 @@ def _build_numbered_row_from_header(header_tr_elem, column_count: int):
         if tc_pr is not None:
             tc.append(tc_pr)
         p = OxmlElement("w:p")
+        p_pr = OxmlElement("w:pPr")
+        jc = OxmlElement("w:jc")
+        jc.set(qn("w:val"), "center")
+        p_pr.append(jc)
+        p.append(p_pr)
         r = OxmlElement("w:r")
+        r_pr = OxmlElement("w:rPr")
+        r_fonts = OxmlElement("w:rFonts")
+        r_fonts.set(qn("w:ascii"), "Times New Roman")
+        r_fonts.set(qn("w:hAnsi"), "Times New Roman")
+        r_fonts.set(qn("w:cs"), "Times New Roman")
+        r_pr.append(r_fonts)
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), "24")
+        r_pr.append(sz)
+        sz_cs = OxmlElement("w:szCs")
+        sz_cs.set(qn("w:val"), "24")
+        r_pr.append(sz_cs)
+        r.append(r_pr)
         t = OxmlElement("w:t")
         t.text = str(idx)
         r.append(t)
@@ -299,6 +325,8 @@ def apply_numbered_split_to_document(
             raise ValueError("complex merged header is not supported for numbered prototype split")
 
         if len(rows_xml) > 1 and _row_is_exact_numbered_row(rows_xml[1], column_count):
+            if _row_has_numpr(rows_xml[1]):
+                raise ValueError("existing numbered row uses paragraph numbering")
             numbered_row_reused = True
             numbered_row_for_second = deepcopy(rows_xml[1])
         elif len(rows_xml) > 1 and _row_looks_numbered_but_malformed(rows_xml[1], column_count):

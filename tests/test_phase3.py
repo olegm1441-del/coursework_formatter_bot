@@ -3876,6 +3876,240 @@ def test_split_prototype_numbered_original_document_unchanged() -> tuple[bool, s
     return _result(True, "numbered prototype split leaves source document unchanged")
 
 
+def test_split_prototype_numbered_row_has_no_numpr_and_no_calibri() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    doc = Document()
+    doc.add_paragraph("Таблица 6.1")
+    tbl = doc.add_table(rows=4, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    for i in range(1, 4):
+        for j in range(3):
+            tbl.rows[i].cells[j].text = f"r{i}c{j}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "numbered_markup.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(
+            src,
+            0,
+            2,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=False,
+            keep_temp=True,
+        )
+        out = Document(str(result.output_docx_path))
+
+    numbered_row = out.tables[1].rows[0]
+    for cell in numbered_row.cells:
+        for paragraph in cell.paragraphs:
+            p_pr = paragraph._element.find(qn("w:pPr"))
+            if p_pr is not None and p_pr.find(qn("w:numPr")) is not None:
+                return _result(False, "generated numbered row has w:numPr")
+            for run in paragraph.runs:
+                r_pr = run._element.find(qn("w:rPr"))
+                fonts = r_pr.find(qn("w:rFonts")) if r_pr is not None else None
+                ascii_font = fonts.get(qn("w:ascii")) if fonts is not None else None
+                if ascii_font != "Times New Roman":
+                    return _result(False, f"generated numbered row font is {ascii_font!r}, expected Times New Roman")
+    return _result(True, "generated numbered row has no numPr and no Calibri fallback")
+
+
+def test_marker_runtime_flags_do_not_change_headings() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    def heading_snapshot(doc: Document):
+        out = []
+        for p in doc.paragraphs:
+            text = (p.text or "").strip()
+            if text in {"ВВЕДЕНИЕ", "1. ГЛАВА", "1.1. Подраздел"}:
+                p_pr = p._element.find(qn("w:pPr"))
+                num_pr = p_pr.find(qn("w:numPr")) if p_pr is not None else None
+                fonts = []
+                for run in p.runs[:2]:
+                    r_pr = run._element.find(qn("w:rPr"))
+                    r_fonts = r_pr.find(qn("w:rFonts")) if r_pr is not None else None
+                    fonts.append(r_fonts.get(qn("w:ascii")) if r_fonts is not None else None)
+                out.append((text, p.style.name if p.style else None, num_pr is not None, tuple(fonts)))
+        return out
+
+    base = Document()
+    p = base.add_paragraph("ВВЕДЕНИЕ")
+    p.style = "Heading 1"
+    p.runs[0].font.name = "Times New Roman"
+    p = base.add_paragraph("1. ГЛАВА")
+    p.style = "Heading 1"
+    p.runs[0].font.name = "Times New Roman"
+    p = base.add_paragraph("1.1. Подраздел")
+    p.style = "Heading 2"
+    p.runs[0].font.name = "Times New Roman"
+    base.add_paragraph("Таблица 1.1.1")
+    tbl = base.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[0].cells[2].text = "C"
+    for i in range(1, 5):
+        for j in range(3):
+            tbl.rows[i].cells[j].text = f"r{i}c{j}"
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[12, 13],
+        row_pages={0: 12, 1: 12, 2: 12, 3: 13, 4: 13},
+        found_rows=[0, 1, 2, 3, 4],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 12), tm.TablePageSpan(3, 4, 13)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.1.1",
+    )
+
+    expected = heading_snapshot(base)
+
+    for mode_name, env in [
+        ("flags_off", {}),
+        ("dry_run", {"KPFU_ENABLE_MARKER_SPLIT": "1"}),
+        ("apply", {"KPFU_ENABLE_MARKER_SPLIT": "1", "KPFU_APPLY_MARKER_SPLIT": "1"}),
+    ]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / f"{mode_name}.docx"
+            base.save(path)
+            old_env = {k: os.environ.get(k) for k in ["KPFU_ENABLE_MARKER_SPLIT", "KPFU_APPLY_MARKER_SPLIT"]}
+            old_diagnose_all = tm.diagnose_all_tables
+            old_render = tc.render_docx_to_pdf
+            old_analyze = tc.analyze_pdf_lines
+            try:
+                for k in old_env:
+                    os.environ.pop(k, None)
+                os.environ.update(env)
+                tm.diagnose_all_tables = lambda _path, keep_temp=False: [diagnostic]
+                tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run in heading regression test"))
+                tc.analyze_pdf_lines = lambda _path: []
+                tc.apply_rendered_table_continuation(path)
+            finally:
+                tm.diagnose_all_tables = old_diagnose_all
+                tc.render_docx_to_pdf = old_render
+                tc.analyze_pdf_lines = old_analyze
+                for k, v in old_env.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+            out = Document(str(path))
+            if heading_snapshot(out) != expected:
+                return _result(False, f"heading snapshot changed in mode {mode_name}: {heading_snapshot(out)!r}")
+
+    return _result(True, "flags off, dry-run, and apply do not change headings outside target table")
+
+
+def test_marker_runtime_real_rybakov_target_applies_split() -> tuple[bool, str]:
+    asset = next(ASSETS.glob("*Рыбаков*.docx"), None)
+    if asset is None:
+        return _result(True, "Рыбаков asset missing, skipped")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "rybakov_apply.docx"
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        try:
+            os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+            os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+            format_docx(str(asset), str(out))
+        finally:
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        doc = Document(str(out))
+
+    if len(doc.tables) != 11:
+        return _result(False, f"expected 11 tables after Рыбаков split, got {len(doc.tables)}")
+    if len(doc.tables[9].rows) != 6 or len(doc.tables[10].rows) != 17:
+        return _result(False, f"unexpected table row counts after split: {len(doc.tables[9].rows)}/{len(doc.tables[10].rows)}")
+    if [c.text for c in doc.tables[9].rows[1].cells] != ["1", "2", "3", "4", "5"]:
+        return _result(False, "first split table missing numbered row")
+    if [c.text for c in doc.tables[10].rows[0].cells] != ["1", "2", "3", "4", "5"]:
+        return _result(False, "second split table missing numbered row")
+    continuations = [p.text for p in doc.paragraphs if "Продолжение таблицы" in (p.text or "")]
+    if any(text == "Продолжение таблицы 10" for text in continuations):
+        return _result(False, f"unexpected appendix continuation paragraph inserted: {continuations!r}")
+    return _result(True, "Рыбаков target is split with numbered rows in active mode")
+
+
+def test_marker_runtime_real_bondarev_keeps_headings_safe() -> tuple[bool, str]:
+    asset = ASSETS / "курсовая_Бондарев_Никита_2_курс.docx"
+    if not asset.exists():
+        return _result(True, "Бондарев asset missing, skipped")
+
+    def snapshot(path: Path):
+        doc = Document(str(path))
+        out = []
+        for p in doc.paragraphs:
+            text = (p.text or "").strip()
+            if text in {
+                "ВВЕДЕНИЕ",
+                "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ ФУНКЦИЙ И ОРГАНОВ САМОУПРАВЛЕНИЯ В ОРГАНИЗАЦИИ",
+                "1.1. Понятие, сущность и классификация органов самоуправления в организациях",
+            }:
+                p_pr = p._element.find(qn("w:pPr"))
+                num_pr = p_pr.find(qn("w:numPr")) if p_pr is not None else None
+                fonts = []
+                for run in p.runs[:2]:
+                    r_pr = run._element.find(qn("w:rPr"))
+                    r_fonts = r_pr.find(qn("w:rFonts")) if r_pr is not None else None
+                    fonts.append(r_fonts.get(qn("w:ascii")) if r_fonts is not None else None)
+                out.append((text, p.style.name if p.style else None, num_pr is not None, tuple(fonts)))
+        return out
+
+    with tempfile.TemporaryDirectory() as tmp:
+        off = Path(tmp) / "bond_off.docx"
+        on = Path(tmp) / "bond_on.docx"
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        try:
+            os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            format_docx(str(asset), str(off))
+            os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+            os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+            format_docx(str(asset), str(on))
+        finally:
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        off_snapshot = snapshot(off)
+        on_snapshot = snapshot(on)
+
+    if off_snapshot != on_snapshot:
+        return _result(False, f"Бондарев heading snapshot changed under active split: off={off_snapshot!r} on={on_snapshot!r}")
+    if any(item[2] for item in on_snapshot):
+        return _result(False, f"Бондарев headings unexpectedly gained w:numPr: {on_snapshot!r}")
+    if any("Calibri" in (font or "") for item in on_snapshot for font in item[3]):
+        return _result(False, f"Бондарев headings unexpectedly use Calibri: {on_snapshot!r}")
+    return _result(True, "Бондарев active mode leaves headings unchanged")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -3955,6 +4189,8 @@ def run_all() -> None:
         ("M1 | apply ordinary split", test_marker_runtime_apply_split_for_ordinary_table),
         ("M1 | apply ineligible skip", test_marker_runtime_apply_skips_ineligible_tables),
         ("M1 | apply idempotent", test_marker_runtime_apply_is_idempotent_on_second_run),
+        ("M1 | real Рыбаков split", test_marker_runtime_real_rybakov_target_applies_split),
+        ("M1 | real Бондарев headings", test_marker_runtime_real_bondarev_keeps_headings_safe),
         ("S1 | prototype simple table split", test_split_prototype_simple_table),
         ("S1 | source note after second table", test_split_prototype_source_note_stays_after_second_table),
         ("S1 | original doc unchanged", test_split_prototype_original_document_unchanged),
@@ -3967,6 +4203,8 @@ def run_all() -> None:
         ("S1 | numbered malformed row", test_split_prototype_numbered_malformed_existing_row_fails_safely),
         ("S1 | numbered source note", test_split_prototype_numbered_source_note_after_second_table),
         ("S1 | numbered original unchanged", test_split_prototype_numbered_original_document_unchanged),
+        ("S1 | numbered row safe markup", test_split_prototype_numbered_row_has_no_numpr_and_no_calibri),
+        ("M1 | headings unchanged across flags", test_marker_runtime_flags_do_not_change_headings),
     ]
 
     for asset in ASSET_FILES:
