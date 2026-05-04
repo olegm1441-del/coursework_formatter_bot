@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 
 from docx import Document
@@ -17,6 +18,10 @@ from .table_continuation import (
 from .docx_utils import FormattingReport
 
 logger = logging.getLogger(__name__)
+
+
+def _flag_value(name: str) -> str:
+    return os.getenv(name, "<unset>")
 
 
 def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
@@ -57,6 +62,13 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # Phase 3: DOCX-only cleanup/normalisation, then rendered table split entry.
     try:
         doc = Document(str(output_path))
+        logger.info(
+            "format_docx: phase3_start output_path=%s tables=%d marker_split_enabled=%s marker_split_apply=%s",
+            output_path,
+            len(doc.tables),
+            _flag_value("KPFU_ENABLE_MARKER_SPLIT"),
+            _flag_value("KPFU_APPLY_MARKER_SPLIT"),
+        )
         n_merged  = apply_table_merging(doc)
         n_tables  = apply_table_continuation(doc, report=report)
         n_rule3   = apply_rule3_table_orphan(doc)

@@ -54,6 +54,39 @@ def setup_logging() -> None:
     )
 
 
+def _get_runtime_build_value(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return "unknown"
+
+
+def log_runtime_diagnostics(*, request_id: int | None = None) -> None:
+    logger.info(
+        "runtime_diagnostics request_id=%s git_commit=%s git_branch=%s deployment_id=%s marker_split_enabled=%s marker_split_apply=%s",
+        request_id if request_id is not None else "-",
+        _get_runtime_build_value(
+            "RAILWAY_GIT_COMMIT_SHA",
+            "GIT_COMMIT",
+            "SOURCE_COMMIT",
+            "COMMIT_SHA",
+        ),
+        _get_runtime_build_value(
+            "RAILWAY_GIT_BRANCH",
+            "GIT_BRANCH",
+            "SOURCE_BRANCH",
+        ),
+        _get_runtime_build_value(
+            "RAILWAY_DEPLOYMENT_ID",
+            "RAILWAY_DEPLOYMENT_TRIGGER_ID",
+            "DEPLOYMENT_ID",
+        ),
+        os.getenv("KPFU_ENABLE_MARKER_SPLIT", "<unset>"),
+        os.getenv("KPFU_APPLY_MARKER_SPLIT", "<unset>"),
+    )
+
+
 def get_bot_token() -> str:
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -514,6 +547,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
         guide_code = services.get_user_selected_guide_code(user)
         output_path = build_worker_output_path(request.id, document.original_filename)
 
+        log_runtime_diagnostics(request_id=request.id)
         logger.info(
             "formatting_start request_id=%s user_id=%s input_path=%s output_path=%s guide=%s",
             request.id,
@@ -680,6 +714,7 @@ def main() -> None:
     Base.metadata.create_all(bind=engine)
     bot_token = get_bot_token()
     log_libreoffice_diagnostics()
+    log_runtime_diagnostics()
 
     logger.info(
         "worker_started timeout=%s stale_timeout=%s poll_interval=%s",
