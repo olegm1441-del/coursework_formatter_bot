@@ -1582,6 +1582,59 @@ def _marker_split_apply_enabled() -> bool:
     }
 
 
+def _classify_marker_duplicate_rows(
+    diagnostic,
+    *,
+    header_rows: int = 1,
+) -> tuple[str, list[int]]:
+    if not diagnostic.duplicate_rows:
+        return "none", []
+
+    data_duplicate_rows = sorted(
+        row_index
+        for row_index in diagnostic.duplicate_rows
+        if row_index >= header_rows
+    )
+    if data_duplicate_rows:
+        return "data_rows", data_duplicate_rows
+
+    return "header_only", sorted(diagnostic.duplicate_rows)
+
+
+def _non_header_rows_are_clean(
+    diagnostic,
+    *,
+    header_rows: int = 1,
+) -> bool:
+    if any(row_index >= header_rows for row_index in diagnostic.missing_rows):
+        return False
+    if any(row_index >= header_rows for row_index in diagnostic.duplicate_rows):
+        return False
+
+    row_pages = {
+        row_index: page_num
+        for row_index, page_num in sorted(diagnostic.row_pages.items())
+        if row_index >= header_rows
+    }
+    expected_rows = list(range(header_rows, diagnostic.rows_count))
+    return list(row_pages) == expected_rows
+
+
+def _is_header_only_duplicate_safe(
+    diagnostic,
+    *,
+    header_rows: int = 1,
+) -> bool:
+    duplicate_classification, _ = _classify_marker_duplicate_rows(
+        diagnostic,
+        header_rows=header_rows,
+    )
+    return (
+        duplicate_classification == "header_only"
+        and _non_header_rows_are_clean(diagnostic, header_rows=header_rows)
+    )
+
+
 def _evaluate_marker_split_diagnostic(
     diagnostic,
     *,
@@ -1591,10 +1644,20 @@ def _evaluate_marker_split_diagnostic(
         return _MarkerSplitDecision(False, None, "mapping_error")
     if len(diagnostic.pages_detected) != 2:
         return _MarkerSplitDecision(False, None, "not_2_pages")
-    if diagnostic.duplicate_rows:
+
+    duplicate_classification, _ = _classify_marker_duplicate_rows(
+        diagnostic,
+        header_rows=header_rows,
+    )
+    if duplicate_classification == "data_rows":
         return _MarkerSplitDecision(False, None, "duplicate_rows")
     if diagnostic.missing_rows not in ([], [0]):
         return _MarkerSplitDecision(False, None, "missing_rows_outside_header")
+    if (
+        duplicate_classification == "header_only"
+        and not _is_header_only_duplicate_safe(diagnostic, header_rows=header_rows)
+    ):
+        return _MarkerSplitDecision(False, None, "duplicate_rows")
 
     row_pages = {
         row_index: page_num
@@ -1608,15 +1671,23 @@ def _evaluate_marker_split_diagnostic(
     first_page = None
     second_page = None
     split_before_row = None
+    expected_first_page, expected_second_page = diagnostic.pages_detected
 
     for row_index, page_num in row_pages.items():
+        if page_num not in diagnostic.pages_detected:
+            return _MarkerSplitDecision(False, None, "non_monotonic_pages")
+
         if first_page is None:
+            if page_num != expected_first_page:
+                return _MarkerSplitDecision(False, None, "non_monotonic_pages")
             first_page = page_num
             continue
 
         if second_page is None:
             if page_num == first_page:
                 continue
+            if page_num != expected_second_page:
+                return _MarkerSplitDecision(False, None, "non_monotonic_pages")
             second_page = page_num
             split_before_row = row_index
             continue
@@ -1679,6 +1750,30 @@ def _apply_marker_split_candidate(
 def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = False) -> int:
     from . import table_markers
 
+    def _format_row_pages(row_pages: dict[int, int]) -> str:
+        if not row_pages:
+            return "-"
+        return ",".join(
+            f"{row_index}:{page_num}"
+            for row_index, page_num in sorted(row_pages.items())
+        )
+
+    def _format_duplicate_rows(duplicate_rows: dict[int, list[int]]) -> str:
+        if not duplicate_rows:
+            return "-"
+        return ",".join(
+            f"{row_index}:{'/'.join(str(page) for page in pages)}"
+            for row_index, pages in sorted(duplicate_rows.items())
+        )
+
+    def _format_page_spans(page_spans) -> str:
+        if not page_spans:
+            return "-"
+        return ",".join(
+            f"{span.start_row}-{span.end_row}:{span.page_num}"
+            for span in page_spans
+        )
+
     eligible_count = 0
     try:
         diagnostics = table_markers.diagnose_all_tables(docx_path, keep_temp=False)
@@ -1688,13 +1783,39 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
 
     for diagnostic in diagnostics:
         logger.info(
-            "marker_split_candidate table_index=%s rows=%s pages=%s",
+            "marker_split_candidate table_index=%s rows=%s pages=%s row_pages=%s page_spans=%s missing_rows=%s duplicate_rows=%s",
             diagnostic.table_index,
             diagnostic.rows_count,
             diagnostic.pages_detected,
+            _format_row_pages(diagnostic.row_pages),
+            _format_page_spans(diagnostic.page_spans),
+            diagnostic.missing_rows,
+            _format_duplicate_rows(diagnostic.duplicate_rows),
         )
+        duplicate_classification, duplicate_rows = _classify_marker_duplicate_rows(
+            diagnostic,
+            header_rows=1,
+        )
+        if duplicate_classification != "none":
+            logger.info(
+                "marker_split_duplicate_rows_classified table_index=%s classification=%s rows=%s missing_rows=%s duplicate_rows=%s page_spans=%s",
+                diagnostic.table_index,
+                duplicate_classification,
+                duplicate_rows,
+                diagnostic.missing_rows,
+                _format_duplicate_rows(diagnostic.duplicate_rows),
+                _format_page_spans(diagnostic.page_spans),
+            )
         decision = _evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
         if decision.eligible:
+            if duplicate_classification == "header_only":
+                logger.info(
+                    "marker_split_header_duplicate_allowed table_index=%s missing_rows=%s duplicate_rows=%s page_spans=%s",
+                    diagnostic.table_index,
+                    diagnostic.missing_rows,
+                    _format_duplicate_rows(diagnostic.duplicate_rows),
+                    _format_page_spans(diagnostic.page_spans),
+                )
             logger.info(
                 "marker_split_boundary table_index=%s split_before_row=%s",
                 diagnostic.table_index,
@@ -1723,16 +1844,22 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
                     )
                     return 1
                 logger.info(
-                    "marker_split_skipped table_index=%s reason=%s",
+                    "marker_split_skipped table_index=%s reason=%s missing_rows=%s duplicate_rows=%s page_spans=%s",
                     diagnostic.table_index,
                     skip_reason,
+                    diagnostic.missing_rows,
+                    _format_duplicate_rows(diagnostic.duplicate_rows),
+                    _format_page_spans(diagnostic.page_spans),
                 )
             continue
 
         logger.info(
-            "marker_split_skipped table_index=%s reason=%s",
+            "marker_split_skipped table_index=%s reason=%s missing_rows=%s duplicate_rows=%s page_spans=%s",
             diagnostic.table_index,
             decision.skip_reason,
+            diagnostic.missing_rows,
+            _format_duplicate_rows(diagnostic.duplicate_rows),
+            _format_page_spans(diagnostic.page_spans),
         )
 
     return eligible_count
