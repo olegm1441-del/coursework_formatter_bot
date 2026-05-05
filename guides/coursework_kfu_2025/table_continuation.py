@@ -1205,11 +1205,15 @@ def _build_continuation_para(text: str):
       - right align
       - Times New Roman 14 pt
       - no first-line indent
+      - pageBreakBefore=True
       - keepWithNext=True
     """
     p = OxmlElement("w:p")
     pPr = OxmlElement("w:pPr")
     p.append(pPr)
+
+    page_break = OxmlElement("w:pageBreakBefore")
+    pPr.append(page_break)
 
     jc = OxmlElement("w:jc")
     jc.set(qn("w:val"), "right")

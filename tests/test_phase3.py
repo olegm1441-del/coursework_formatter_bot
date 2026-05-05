@@ -759,10 +759,13 @@ def test_c_rendered_split_marker_is_right_aligned() -> tuple[bool, str]:
     if n != 1 or len(markers) != 1:
         return _result(False, f"expected one generated marker, n={n}, markers={len(markers)}")
     pPr = markers[0]._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
     jc = pPr.find(qn("w:jc")) if pPr is not None else None
     ind = pPr.find(qn("w:ind")) if pPr is not None else None
     keep = pPr.find(qn("w:keepNext")) if pPr is not None else None
     sz = markers[0]._element.find(".//" + qn("w:sz"))
+    if page_break is None:
+        return _result(False, "marker pageBreakBefore missing")
     if jc is None or jc.get(qn("w:val")) != "right":
         return _result(False, "marker is not right-aligned")
     if ind is None or ind.get(qn("w:firstLine")) != "0":
@@ -3430,8 +3433,19 @@ def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
         return _result(False, f"expected 2 tables after ordinary split, got {len(out.tables)}")
     if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "continuation table should start with numbered row only")
-    if "Продолжение таблицы 1.1.1" not in [p.text for p in out.paragraphs]:
+    continuation_paras = [p for p in out.paragraphs if p.text == "Продолжение таблицы 1.1.1"]
+    if len(continuation_paras) != 1:
         return _result(False, "ordinary split did not insert continuation paragraph")
+    pPr = continuation_paras[0]._element.find(qn("w:pPr"))
+    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
+    jc = pPr.find(qn("w:jc")) if pPr is not None else None
+    keep = pPr.find(qn("w:keepNext")) if pPr is not None else None
+    if page_break is None:
+        return _result(False, "ordinary continuation marker should start on a new page")
+    if jc is None or jc.get(qn("w:val")) != "right":
+        return _result(False, "ordinary continuation marker should be right-aligned")
+    if keep is None:
+        return _result(False, "ordinary continuation marker should keep with following table")
     if any(cell.text == "Показатель" for cell in out.tables[1].rows[0].cells):
         return _result(False, "text header leaked into continuation row")
     return _result(True, "eligible ordinary table is split with continuation paragraph")
