@@ -67,6 +67,14 @@ def _result(ok: bool, msg: str = "") -> tuple[bool, str]:
     return ok, msg
 
 
+def _all_table_rows_have_cant_split(table) -> bool:
+    for row in table.rows:
+        tr_pr = row._tr.find(qn("w:trPr"))
+        if tr_pr is None or tr_pr.find(qn("w:cantSplit")) is None:
+            return False
+    return True
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_minimal_doc_with_image() -> Document:
@@ -3354,6 +3362,10 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
         return _result(False, "numbered row missing in first appendix table")
     if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "numbered row missing in second appendix table")
+    if not _all_table_rows_have_cant_split(out.tables[0]):
+        return _result(False, "first appendix split table rows can split across pages")
+    if not _all_table_rows_have_cant_split(out.tables[1]):
+        return _result(False, "second appendix split table rows can split across pages")
     if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
     return _result(True, "eligible appendix table is split with numbered row and no continuation paragraph")
@@ -3433,6 +3445,10 @@ def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
         return _result(False, f"expected 2 tables after ordinary split, got {len(out.tables)}")
     if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "continuation table should start with numbered row only")
+    if not _all_table_rows_have_cant_split(out.tables[0]):
+        return _result(False, "first ordinary split table rows can split across pages")
+    if not _all_table_rows_have_cant_split(out.tables[1]):
+        return _result(False, "second ordinary split table rows can split across pages")
     continuation_paras = [p for p in out.paragraphs if p.text == "Продолжение таблицы 1.1.1"]
     if len(continuation_paras) != 1:
         return _result(False, "ordinary split did not insert continuation paragraph")
@@ -3867,6 +3883,10 @@ def test_split_prototype_numbered_ordinary_continuation_row_only() -> tuple[bool
         return _result(False, f"unexpected continuation numbered row: {second_row_texts!r}")
     if [cell.text for cell in out.tables[1].rows[1].cells] != ["r3c0", "r3c1", "r3c2"]:
         return _result(False, "tail rows not moved under numbered continuation row")
+    if not _all_table_rows_have_cant_split(out.tables[0]):
+        return _result(False, "first ordinary prototype table rows can split across pages")
+    if not _all_table_rows_have_cant_split(out.tables[1]):
+        return _result(False, "second ordinary prototype table rows can split across pages")
     if any(cell.text == "Показатель" for cell in out.tables[1].rows[0].cells):
         return _result(False, "text header leaked into continuation numbered row")
     if "Продолжение таблицы 1.1.1" not in [p.text for p in out.paragraphs]:
@@ -3916,6 +3936,10 @@ def test_split_prototype_numbered_ordinary_split_caption_before_title() -> tuple
         return _result(False, "ordinary table should insert continuation paragraph")
     if [cell.text for cell in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "continuation table should start with numbered row")
+    if not _all_table_rows_have_cant_split(out.tables[0]):
+        return _result(False, "first split-caption table rows can split across pages")
+    if not _all_table_rows_have_cant_split(out.tables[1]):
+        return _result(False, "second split-caption table rows can split across pages")
     if any(cell.text == "Показатель" for cell in out.tables[1].rows[0].cells):
         return _result(False, "text header leaked into continuation numbered row")
     paragraph_texts = [p.text for p in out.paragraphs]
@@ -3962,6 +3986,10 @@ def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[b
     second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
     if second_row_texts != ["1", "2", "3"]:
         return _result(False, f"unexpected appendix continuation row: {second_row_texts!r}")
+    if not _all_table_rows_have_cant_split(out.tables[0]):
+        return _result(False, "first appendix prototype table rows can split across pages")
+    if not _all_table_rows_have_cant_split(out.tables[1]):
+        return _result(False, "second appendix prototype table rows can split across pages")
     if any("Продолжение таблицы" in (text or "") for text in [p.text for p in out.paragraphs]):
         return _result(False, "appendix numbered split inserted continuation paragraph")
     return _result(True, "appendix numbered split keeps numbered row without continuation text")

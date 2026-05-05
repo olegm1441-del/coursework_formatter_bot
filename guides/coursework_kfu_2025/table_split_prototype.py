@@ -145,6 +145,20 @@ def _ensure_tbl_header(tr_elem) -> None:
         tr_pr.append(OxmlElement("w:tblHeader"))
 
 
+def _ensure_cant_split(tr_elem) -> None:
+    tr_pr = tr_elem.find(qn("w:trPr"))
+    if tr_pr is None:
+        tr_pr = OxmlElement("w:trPr")
+        tr_elem.insert(0, tr_pr)
+    if tr_pr.find(qn("w:cantSplit")) is None:
+        tr_pr.append(OxmlElement("w:cantSplit"))
+
+
+def _ensure_table_rows_cant_split(tbl_elem) -> None:
+    for tr in tbl_elem.findall(qn("w:tr")):
+        _ensure_cant_split(tr)
+
+
 def _extract_standard_table_number(text: str | None) -> str | None:
     if not text:
         return None
@@ -377,6 +391,9 @@ def apply_numbered_split_to_document(
 
     for tr in rows_xml[split_before_row:]:
         tbl_xml.remove(tr)
+
+    _ensure_table_rows_cant_split(tbl_xml)
+    _ensure_table_rows_cant_split(second_tbl)
 
     if continuation_inserted and continuation_text is not None:
         builder = continuation_paragraph_builder or _build_plain_paragraph
