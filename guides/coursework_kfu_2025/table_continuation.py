@@ -2124,6 +2124,11 @@ def _apply_rule4_pass(doc: Document) -> int:
             is_empty = not text and not xml_has_image(xml_elem)
 
             if page_overflow and is_empty:
+                pPr = xml_elem.find(qn("w:pPr"))
+                if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
+                    current_h += h
+                    continue
+
                 # Preserve intentional blank lines that must remain after
                 # headings and table note blocks ("Источник:" / "Примечание:").
                 if prev_nonempty_kind in {"heading", "source_or_note"}:

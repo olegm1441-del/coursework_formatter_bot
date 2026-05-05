@@ -104,6 +104,15 @@ def _count_drawings(doc: Document) -> int:
     return len(doc.element.body.findall(".//" + qn("w:drawing")))
 
 
+def _section_break_positions(doc: Document) -> list[tuple[int, str]]:
+    positions: list[tuple[int, str]] = []
+    for idx, paragraph in enumerate(doc.paragraphs):
+        pPr = paragraph._element.pPr
+        if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
+            positions.append((idx, paragraph.text.strip()))
+    return positions
+
+
 
 
 # ── Task A — figure deletion ──────────────────────────────────────────────────
@@ -138,6 +147,58 @@ def test_a_para_has_image_helper() -> tuple[bool, str]:
     if _para_has_image(normal_p._element):
         return _result(False, "_para_has_image returned True for text paragraph")
     return _result(True)
+
+
+def test_a_rule4_preserves_front_matter_section_breaks() -> tuple[bool, str]:
+    """
+    Product rule: title, contents, and introduction are separated by structural
+    section breaks. Rule 4 may delete visual blank paragraphs, but never a
+    paragraph carrying w:sectPr.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    probe = doc.add_paragraph("Титульная строка")
+    h_per_para = _estimate_para_height(probe)
+    probe._element.getparent().remove(probe._element)
+
+    body_h = _body_height_pt(doc)
+    title_lines = max(1, int(body_h / h_per_para))
+    for i in range(title_lines):
+        doc.add_paragraph(f"Титульная строка {i + 1}")
+    doc.add_paragraph("")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ 3")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ 4")
+    doc.add_paragraph("")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "front_matter_in.docx"
+        out = Path(tmp) / "front_matter_out.docx"
+        doc.save(inp)
+        process_document(inp, out)
+
+        formatted = Document(str(out))
+        before_positions = _section_break_positions(formatted)
+        if len(before_positions) < 2:
+            return _result(False, f"front matter section breaks missing after Phase 1: {before_positions!r}")
+
+        apply_rule4_empty_first_lines(formatted)
+        after_positions = _section_break_positions(formatted)
+
+    if len(after_positions) != len(before_positions):
+        return _result(
+            False,
+            f"Rule 4 removed structural section break(s): before={before_positions!r} after={after_positions!r}",
+        )
+    if after_positions != before_positions:
+        return _result(
+            False,
+            f"Rule 4 moved structural section break(s): before={before_positions!r} after={after_positions!r}",
+        )
+    return _result(True, "Rule 4 preserved front matter section breaks")
 
 
 # ── Task C — student continuation length ─────────────────────────────────────
@@ -4238,6 +4299,7 @@ def run_all() -> None:
         # Figure/paragraph preservation.
         ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
         ("A  | _para_has_image helper",                test_a_para_has_image_helper),
+        ("A  | rule4 preserves section breaks",        test_a_rule4_preserves_front_matter_section_breaks),
         # Table continuation and split behavior.
         ("C  | continuation length guard",             test_c_continuation_length_guard),
         ("C  | strict caption-number extraction",      test_c_caption_number_extraction_strict),
