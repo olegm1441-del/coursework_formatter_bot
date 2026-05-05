@@ -19,6 +19,7 @@ _STANDARD_TABLE_NUMBER_RE = re.compile(
     r"^\s*(?:таблица|table)\s+(?P<num>\d+(?:\.\d+){0,2})\.?\s*(?:[-—–].*)?$",
     re.IGNORECASE,
 )
+_CAPTION_LOOKBACK_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,23 @@ def _find_preceding_nonempty_paragraph_text(children: list, table_body_index: in
         text = _paragraph_text_from_elem(child)
         if text:
             return text
+    return None
+
+
+def _find_preceding_standard_table_number(children: list, table_body_index: int) -> str | None:
+    seen = 0
+    for child in reversed(children[:table_body_index]):
+        if _local_name(child) != "p":
+            break
+        text = _paragraph_text_from_elem(child)
+        if not text:
+            continue
+        seen += 1
+        table_number = _extract_standard_table_number(text)
+        if table_number is not None:
+            return table_number
+        if seen >= _CAPTION_LOOKBACK_LIMIT:
+            break
     return None
 
 
@@ -306,6 +324,7 @@ def apply_numbered_split_to_document(
     table_body_index = _find_table_body_index(doc, table_index)
     source_note_before = _find_following_source_note(children_before, table_body_index)
     preceding_paragraph_text = _find_preceding_nonempty_paragraph_text(children_before, table_body_index)
+    preceding_table_number = _find_preceding_standard_table_number(children_before, table_body_index)
 
     tbl_xml = table._tbl
     second_tbl = deepcopy(tbl_xml)
@@ -337,10 +356,9 @@ def apply_numbered_split_to_document(
             header_row_xml.addnext(deepcopy(numbered_row_for_second))
 
         if not appendix_table:
-            table_number = _extract_standard_table_number(preceding_paragraph_text)
-            if table_number is None:
+            if preceding_table_number is None:
                 raise ValueError("ordinary numbered split requires a standard table caption")
-            continuation_text = f"Продолжение таблицы {table_number}"
+            continuation_text = f"Продолжение таблицы {preceding_table_number}"
             continuation_inserted = True
 
     tail_rows_xml = [deepcopy(r) for r in rows_xml[split_before_row:]]

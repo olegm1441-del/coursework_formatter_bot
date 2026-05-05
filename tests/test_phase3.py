@@ -2961,6 +2961,7 @@ def test_marker_appendix_and_caption_metadata() -> tuple[bool, str]:
 
     doc = Document()
     doc.add_paragraph("Таблица 1.1")
+    doc.add_paragraph("Двухстрочный заголовок обычной таблицы")
     first = doc.add_table(rows=2, cols=1)
     first.rows[0].cells[0].text = "H1"
     first.rows[1].cells[0].text = "A"
@@ -2991,9 +2992,11 @@ def test_marker_appendix_and_caption_metadata() -> tuple[bool, str]:
             tm.map_table_rows_to_pages = old_map
 
     if diagnostics[0].caption_detected is not True or diagnostics[0].has_standard_table_caption is not True:
-        return _result(False, "standard table caption was not detected for first table")
+        return _result(False, "standard split table caption was not detected for first table")
     if diagnostics[0].appendix_table is not False:
         return _result(False, "first table should not be appendix table")
+    if diagnostics[0].preceding_paragraph_text != "Двухстрочный заголовок обычной таблицы":
+        return _result(False, f"immediate title context was not preserved: {diagnostics[0].preceding_paragraph_text!r}")
     if diagnostics[1].appendix_table is not True:
         return _result(False, "second table should be marked as appendix table")
     if diagnostics[1].caption_detected is not True:
@@ -3857,6 +3860,58 @@ def test_split_prototype_numbered_ordinary_continuation_row_only() -> tuple[bool
     return _result(True, "ordinary numbered split uses continuation text and numbered row only")
 
 
+def test_split_prototype_numbered_ordinary_split_caption_before_title() -> tuple[bool, str]:
+    """
+    Product rule: ordinary captions may be split as "Таблица X.Y.Z" plus a
+    separate title paragraph before the table. Continuation uses the table
+    number and does not duplicate the title/header text.
+    """
+    from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
+
+    title = "Комитеты НС Сбера: состав мандата и фокус надзора"
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.1.2")
+    doc.add_paragraph(title)
+    tbl = doc.add_table(rows=5, cols=3)
+    tbl.rows[0].cells[0].text = "Показатель"
+    tbl.rows[0].cells[1].text = "Как влияет"
+    tbl.rows[0].cells[2].text = "Последствия"
+    for i in range(1, 5):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+        tbl.rows[i].cells[2].text = f"r{i}c2"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "ordinary_split_caption_before_title.docx"
+        doc.save(src)
+        result = prototype_split_table_copy(
+            src,
+            0,
+            3,
+            header_rows=1,
+            numbered_header=True,
+            appendix_table=False,
+            keep_temp=True,
+        )
+        out = Document(str(result.output_docx_path))
+
+    if result.continuation_text != "Продолжение таблицы 2.1.2":
+        return _result(False, f"unexpected continuation text: {result.continuation_text!r}")
+    if result.continuation_paragraph_inserted is not True:
+        return _result(False, "ordinary table should insert continuation paragraph")
+    if [cell.text for cell in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
+        return _result(False, "continuation table should start with numbered row")
+    if any(cell.text == "Показатель" for cell in out.tables[1].rows[0].cells):
+        return _result(False, "text header leaked into continuation numbered row")
+    paragraph_texts = [p.text for p in out.paragraphs]
+    if paragraph_texts.count(title) != 1:
+        return _result(False, f"table title duplicated or removed: {paragraph_texts!r}")
+    if paragraph_texts.count("Продолжение таблицы 2.1.2") != 1:
+        return _result(False, f"continuation paragraph missing or duplicated: {paragraph_texts!r}")
+    return _result(True, "ordinary split caption before title uses continuation number")
+
+
 def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
 
@@ -4386,6 +4441,7 @@ def run_all() -> None:
         ("S1 | invalid split_before_row", test_split_prototype_invalid_split_before_row),
         ("S1 | no continuation paragraph", test_split_prototype_no_continuation_paragraph_inserted),
         ("S1 | numbered ordinary continuation", test_split_prototype_numbered_ordinary_continuation_row_only),
+        ("S1 | numbered ordinary split caption", test_split_prototype_numbered_ordinary_split_caption_before_title),
         ("S1 | numbered appendix continuation", test_split_prototype_numbered_appendix_has_no_continuation_text),
         ("S1 | numbered row reused", test_split_prototype_numbered_existing_row_reused_without_duplicate),
         ("S1 | numbered malformed row", test_split_prototype_numbered_malformed_existing_row_fails_safely),

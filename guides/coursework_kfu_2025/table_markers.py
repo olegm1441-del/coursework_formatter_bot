@@ -20,6 +20,7 @@ _MARKER_RE = re.compile(
     r"KPFU_TMARK_(?P<salt>[A-F0-9]{6})_T(?P<table>\d{2})_R(?P<row>\d{3})"
 )
 _APPENDIX_HEADING_RE = re.compile(r"^\s*приложени(?:е|я)\b", re.IGNORECASE)
+_CAPTION_LOOKBACK_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,13 @@ def _should_preserve_artifacts(
     return keep_temp or bool(result.missing_rows or result.duplicate_rows)
 
 
+def _find_standard_caption_in_recent_paragraphs(paragraphs: list[str]) -> str | None:
+    for text in reversed(paragraphs[-_CAPTION_LOOKBACK_LIMIT:]):
+        if TABLE_CAPTION_RE.match(text):
+            return text
+    return None
+
+
 def _iter_body_tables_with_context(doc: Document) -> list[dict]:
     body = doc.element.body
     para_map = {p._element: p for p in doc.paragraphs}
@@ -231,6 +239,7 @@ def _iter_body_tables_with_context(doc: Document) -> list[dict]:
 
     in_appendix = False
     last_nonempty_paragraph_text: str | None = None
+    recent_nonempty_paragraphs: list[str] = []
     out: list[dict] = []
 
     for child in body:
@@ -241,19 +250,21 @@ def _iter_body_tables_with_context(doc: Document) -> list[dict]:
                 if _APPENDIX_HEADING_RE.match(text):
                     in_appendix = True
                 last_nonempty_paragraph_text = text
+                recent_nonempty_paragraphs.append(text)
             continue
 
         if local == "tbl" and child in table_map:
+            standard_caption = _find_standard_caption_in_recent_paragraphs(
+                recent_nonempty_paragraphs
+            )
             out.append({
                 "table_obj": table_map[child],
                 "appendix_table": in_appendix,
                 "preceding_paragraph_text": last_nonempty_paragraph_text,
                 "caption_detected": bool(last_nonempty_paragraph_text),
-                "has_standard_table_caption": bool(
-                    last_nonempty_paragraph_text
-                    and TABLE_CAPTION_RE.match(last_nonempty_paragraph_text)
-                ),
+                "has_standard_table_caption": bool(standard_caption),
             })
+            recent_nonempty_paragraphs = []
 
     return out
 
