@@ -1836,6 +1836,43 @@ def _add_fake_word_numbering(paragraph, ilvl_value: str = "0") -> None:
     pPr.append(numPr)
 
 
+def _add_fake_style_numbering(document: Document, style_name: str, ilvl_value: str = "0") -> None:
+    style = document.styles[style_name]
+    style_element = style.element
+    pPr = style_element.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        style_element.append(pPr)
+
+    existing = pPr.find(qn("w:numPr"))
+    if existing is not None:
+        pPr.remove(existing)
+
+    numPr = OxmlElement("w:numPr")
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), ilvl_value)
+    num_id = OxmlElement("w:numId")
+    num_id.set(qn("w:val"), "42")
+    numPr.append(ilvl)
+    numPr.append(num_id)
+    pPr.append(numPr)
+
+
+def _style_has_numbering(document: Document, style_name: str) -> bool:
+    style = document.styles[style_name]
+    pPr = style.element.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    return pPr.find(qn("w:numPr")) is not None
+
+
+def _paragraph_has_direct_numbering(paragraph) -> bool:
+    pPr = paragraph._element.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    return pPr.find(qn("w:numPr")) is not None
+
+
 def _style_name(paragraph) -> str:
     try:
         return (paragraph.style.name or "").strip().lower()
@@ -1981,6 +2018,64 @@ def test_t2_word_autonumbered_heading1_with_style_still_promoted() -> tuple[bool
         return _result(False, "following autonumbered Heading 2 was not normalized under Heading 1")
 
     return _result(True, "Word-autonumbered Heading 1 remains supported")
+
+
+def test_t2_heading_style_numbering_is_removed() -> tuple[bool, str]:
+    """
+    Heading styles may carry w:numPr, which renders extra numbering even when
+    heading paragraphs have no direct numPr.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    _add_fake_style_numbering(doc, "Heading 1", ilvl_value="0")
+    _add_fake_style_numbering(doc, "Heading 2", ilvl_value="1")
+    _add_fake_style_numbering(doc, "Heading 3", ilvl_value="2")
+
+    h1_exact = doc.add_paragraph("ВВЕДЕНИЕ")
+    h1_exact.style = "Heading 1"
+    _add_fake_word_numbering(h1_exact)
+    h1_chapter = doc.add_paragraph("1. Теоретические основы")
+    h1_chapter.style = "Heading 1"
+    _add_fake_word_numbering(h1_chapter)
+    h2 = doc.add_paragraph("1.1. Понятие конкурентоспособности организации")
+    h2.style = "Heading 2"
+    _add_fake_word_numbering(h2, ilvl_value="1")
+    doc.add_paragraph("Обычный текст подраздела.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(inp)
+        process_document(inp, out)
+        formatted = Document(str(out))
+
+    numbered_styles = [
+        style_name
+        for style_name in ("Heading 1", "Heading 2", "Heading 3")
+        if _style_has_numbering(formatted, style_name)
+    ]
+    if numbered_styles:
+        return _result(False, f"heading style numbering remained: {numbered_styles!r}")
+
+    heading_texts = {
+        "ВВЕДЕНИЕ",
+        "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ",
+        "1.1. Понятие конкурентоспособности организации",
+    }
+    found = []
+    for paragraph in formatted.paragraphs:
+        text = " ".join((paragraph.text or "").split())
+        if text in heading_texts:
+            found.append(text)
+            if _paragraph_has_direct_numbering(paragraph):
+                return _result(False, f"direct heading numbering remained on {text!r}")
+
+    missing = sorted(heading_texts - set(found))
+    if missing:
+        return _result(False, f"manual heading text missing after formatting: {missing!r}")
+
+    return _result(True, "heading style numbering removed while manual heading text stayed")
 
 
 def test_t2_word_numbered_body_items_not_promoted_to_headings() -> tuple[bool, str]:
@@ -4158,6 +4253,7 @@ def run_all() -> None:
         ("T2 | manual heading2 still works", test_t2_manual_heading2_still_promoted),
         ("T2 | Word-autonumbered heading2 still works", test_t2_word_autonumbered_heading2_with_style_still_promoted),
         ("T2 | Word-autonumbered heading1 still works", test_t2_word_autonumbered_heading1_with_style_still_promoted),
+        ("T2 | heading style numbering removed", test_t2_heading_style_numbering_is_removed),
         ("T2 | Word-numbered body items stay body/list", test_t2_word_numbered_body_items_not_promoted_to_headings),
         ("T2 | numbered sentence not promoted to heading1", test_t2_numbered_sentence_not_promoted_to_heading1),
         ("T2 | chapter colon heading repaired", test_t2_chapter_colon_heading_repaired_without_colon_artifact),

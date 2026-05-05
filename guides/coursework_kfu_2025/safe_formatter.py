@@ -1455,6 +1455,60 @@ def remove_paragraph_numbering(paragraph):
     if numPr is not None:
         pPr.remove(numPr)
 
+
+_HEADING_STYLE_NUMBERING_TOKENS = {
+    "heading1",
+    "heading2",
+    "heading3",
+    "заголовок1",
+    "заголовок2",
+    "заголовок3",
+}
+
+
+def _normalise_style_token(value: str | None) -> str:
+    return re.sub(r"[\s_\-]+", "", (value or "").strip().lower())
+
+
+def _is_heading_style_for_numbering_cleanup(style) -> bool:
+    style_id = _normalise_style_token(getattr(style, "style_id", ""))
+    style_name = _normalise_style_token(getattr(style, "name", ""))
+    return (
+        style_id in _HEADING_STYLE_NUMBERING_TOKENS
+        or style_name in _HEADING_STYLE_NUMBERING_TOKENS
+    )
+
+
+def clear_heading_style_numbering(document) -> int:
+    """
+    Some input DOCX files carry numbering in Heading style definitions.
+    Removing only paragraph-level w:numPr is not enough for those documents.
+    """
+    cleared = 0
+    for style in document.styles:
+        if not _is_heading_style_for_numbering_cleanup(style):
+            continue
+
+        style_element = getattr(style, "element", None)
+        if style_element is None:
+            style_element = getattr(style, "_element", None)
+        if style_element is None:
+            continue
+
+        pPr = style_element.find(qn("w:pPr"))
+        if pPr is None:
+            continue
+
+        numPr = pPr.find(qn("w:numPr"))
+        if numPr is None:
+            continue
+
+        pPr.remove(numPr)
+        cleared += 1
+
+    return cleared
+
+
 def remove_page_break_artifacts_from_paragraph(paragraph):
     paragraph.paragraph_format.page_break_before = False
     paragraph.paragraph_format.keep_with_next = False
@@ -4479,5 +4533,7 @@ def process_document(input_path: Path, output_path: Path):
         doc,
         body_start,
     )
+
+    clear_heading_style_numbering(doc)
 
     doc.save(str(output_path))
