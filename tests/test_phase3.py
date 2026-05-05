@@ -1,19 +1,25 @@
 """
-Phase 3 regression tests.
+Fast Phase 3/product-rule regression tests.
 
 Run from repo root:
     python -m pytest tests/test_phase3.py -v
 or directly:
     python tests/test_phase3.py
 
-Acceptance criteria per task:
+The default runner stays cheap: synthetic DOCX/XML checks and isolated unit tests
+only. Real asset formatting smoke checks are opt-in via:
+    KPFU_RUN_LONG_PHASE3_TESTS=1 python tests/test_phase3.py
+
+Product-rule coverage:
   A  — Figure deletion: images survive Rule 4 (paragraphs with w:drawing never removed)
   C  — Student continuation length: _is_student_continuation detects ≤30 char texts
   B1 — tblW fix: _optimize_table_col_widths updates w:tblW after scaling
   B2 — keepTogether, Rule 6 propagation, image height from wp:extent
   B3 — Footnote standardisation
   C2 — Empty para between image and caption removed; numeric column minimums
-  regression — all 5 asset files format without crash and produce a .docx output
+  T2 — Heading paragraphs/styles must not use Word autonumbering; manual
+       heading text numbering remains literal text.
+  M1/S1 — Marker/prototype table split rules for ordinary and appendix tables.
 
   NOTE: Tests for LRPB-based table splitting (B, B1-stale/valid, C2-fits-1-page,
   C-student-merges) were removed when apply_table_merging / apply_table_continuation
@@ -647,6 +653,10 @@ def test_c_rendered_split_skips_merged_boundary_conflict() -> tuple[bool, str]:
 
 
 def test_c_rendered_split_marker_is_right_aligned() -> tuple[bool, str]:
+    """
+    Product rule: generated ordinary-table continuation markers are
+    right-aligned and keep the existing continuation marker formatting.
+    """
     import guides.coursework_kfu_2025.table_continuation as tc
     from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
 
@@ -2022,8 +2032,10 @@ def test_t2_word_autonumbered_heading1_with_style_still_promoted() -> tuple[bool
 
 def test_t2_heading_style_numbering_is_removed() -> tuple[bool, str]:
     """
+    Product rule: headings must not use Word autonumbering.
     Heading styles may carry w:numPr, which renders extra numbering even when
-    heading paragraphs have no direct numPr.
+    heading paragraphs have no direct numPr. Manual numbering in heading text
+    must remain as literal text.
     """
     from guides.coursework_kfu_2025.safe_formatter import process_document
 
@@ -2042,6 +2054,7 @@ def test_t2_heading_style_numbering_is_removed() -> tuple[bool, str]:
     h2.style = "Heading 2"
     _add_fake_word_numbering(h2, ilvl_value="1")
     doc.add_paragraph("Обычный текст подраздела.")
+    doc.add_paragraph("Ненумерованный основной текст не должен получить numPr.")
 
     with tempfile.TemporaryDirectory() as tmp:
         inp = Path(tmp) / "in.docx"
@@ -2070,6 +2083,8 @@ def test_t2_heading_style_numbering_is_removed() -> tuple[bool, str]:
             found.append(text)
             if _paragraph_has_direct_numbering(paragraph):
                 return _result(False, f"direct heading numbering remained on {text!r}")
+        elif text and _paragraph_has_direct_numbering(paragraph):
+            return _result(False, f"numbering was added outside tables/headings: {text!r}")
 
     missing = sorted(heading_texts - set(found))
     if missing:
@@ -3278,6 +3293,10 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
 
 
 def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
+    """
+    Product rule: ordinary table continuation inserts a continuation marker
+    and a numbered row without duplicating the textual table header.
+    """
     import guides.coursework_kfu_2025.table_continuation as tc
     import guides.coursework_kfu_2025.table_markers as tm
 
@@ -3724,6 +3743,10 @@ def test_split_prototype_no_continuation_paragraph_inserted() -> tuple[bool, str
 
 
 def test_split_prototype_numbered_ordinary_continuation_row_only() -> tuple[bool, str]:
+    """
+    Product rule: ordinary table split continuation uses "Продолжение таблицы"
+    plus the numbered row only; the original title/header row is not duplicated.
+    """
     from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
 
     doc = Document()
@@ -4208,9 +4231,14 @@ def test_marker_runtime_real_bondarev_keeps_headings_safe() -> tuple[bool, str]:
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
+    # Default suite: fast synthetic/XML checks for confirmed product rules.
+    # Real asset formatting is useful as a smoke check, but it is slower and
+    # can preserve broken historical output; keep it opt-in below.
     tests = [
+        # Figure/paragraph preservation.
         ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
         ("A  | _para_has_image helper",                test_a_para_has_image_helper),
+        # Table continuation and split behavior.
         ("C  | continuation length guard",             test_c_continuation_length_guard),
         ("C  | strict caption-number extraction",      test_c_caption_number_extraction_strict),
         ("C  | merge invalid manual split",            test_c_apply_table_merging_rebuilds_invalid_split),
@@ -4237,6 +4265,7 @@ def run_all() -> None:
         ("C  | rendered decision logging",             test_c_rendered_decision_logging_for_ambiguous_skip),
         ("C  | rendered start-page complete row",      test_c_rendered_start_page_keeps_table_with_clear_complete_data_row),
         ("C  | vMerge guard",                          test_c_vmerge_guard_rejects_boundary_inside_merge_zone),
+        # General DOCX formatting invariants used by Phase 3 output.
         ("B1 | tblW updated after optimization",       test_b1_tblW_updated_after_col_optimization),
         ("B1 | _MIN_COL_PT ≤ 20",                     test_b1_min_col_pt_is_20),
         ("B2 | keepTogether on table_caption",         test_b2_keep_together_on_table_caption),
@@ -4249,6 +4278,7 @@ def run_all() -> None:
         ("C2 | numeric column minimum protected",      test_c2_number_column_minimum),
         ("T1 | ё→е normalisation (midword uppercase fix)", test_yo_normalisation_midword_uppercase),
         ("T_indent | body paragraph left=0 firstLine=709", test_t_indent_body_paragraph_left_zero),
+        # Heading product rules: no Word autonumbering, manual text numbering remains.
         ("T2 | 'Глава N' without title → heading1", test_t2_chapter_heading_without_title),
         ("T2 | manual heading2 still works", test_t2_manual_heading2_still_promoted),
         ("T2 | Word-autonumbered heading2 still works", test_t2_word_autonumbered_heading2_with_style_still_promoted),
@@ -4264,6 +4294,7 @@ def run_all() -> None:
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
         ("T6 | heading2 late spacing before 1.3", test_heading2_late_spacing_before_13),
         ("T6 | blank before figure block", test_blank_before_figure_block),
+        # Marker split diagnostics and runtime decisions.
         ("M1 | source unchanged after instrumentation", test_marker_instrumentation_keeps_source_unchanged),
         ("M1 | only target table instrumented", test_marker_instrumentation_only_targets_selected_table),
         ("M1 | inline marker parsing", test_marker_extract_handles_inline_text_and_missing_rows),
@@ -4285,8 +4316,7 @@ def run_all() -> None:
         ("M1 | apply ordinary split", test_marker_runtime_apply_split_for_ordinary_table),
         ("M1 | apply ineligible skip", test_marker_runtime_apply_skips_ineligible_tables),
         ("M1 | apply idempotent", test_marker_runtime_apply_is_idempotent_on_second_run),
-        ("M1 | real Рыбаков split", test_marker_runtime_real_rybakov_target_applies_split),
-        ("M1 | real Бондарев headings", test_marker_runtime_real_bondarev_keeps_headings_safe),
+        # Prototype split rules.
         ("S1 | prototype simple table split", test_split_prototype_simple_table),
         ("S1 | source note after second table", test_split_prototype_source_note_stays_after_second_table),
         ("S1 | original doc unchanged", test_split_prototype_original_document_unchanged),
@@ -4303,11 +4333,16 @@ def run_all() -> None:
         ("M1 | headings unchanged across flags", test_marker_runtime_flags_do_not_change_headings),
     ]
 
-    for asset in ASSET_FILES:
-        tests.append((
-            f"REG| {asset.name}",
-            lambda a=asset: test_regression_asset(a),
-        ))
+    if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":
+        tests.extend([
+            ("M1 | real Рыбаков split", test_marker_runtime_real_rybakov_target_applies_split),
+            ("M1 | real Бондарев headings", test_marker_runtime_real_bondarev_keeps_headings_safe),
+        ])
+        for asset in ASSET_FILES:
+            tests.append((
+                f"REG| {asset.name}",
+                lambda a=asset: test_regression_asset(a),
+            ))
 
     passed = failed = 0
     for name, fn in tests:

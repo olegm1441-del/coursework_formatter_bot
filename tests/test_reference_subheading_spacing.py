@@ -25,6 +25,7 @@ def _paragraph_texts(doc: Document) -> list[str]:
 
 
 def test_reference_subheading_spacing() -> tuple[bool, str]:
+    """Product rule: reference block subheadings keep a predictable one-blank layout."""
     doc = Document()
     doc.add_paragraph("Список использованных источников")
     doc.add_paragraph("нормативные правовые акты")
@@ -63,6 +64,7 @@ def test_reference_subheading_spacing() -> tuple[bool, str]:
 
 
 def test_reference_subheading_detection_is_strict() -> tuple[bool, str]:
+    """Product rule: reference entries are not reclassified as subheadings by loose text matches."""
     cases = [
         "1. Статьи",
         "• Статьи",
@@ -92,6 +94,7 @@ def test_reference_subheading_detection_is_strict() -> tuple[bool, str]:
 
 
 def test_numbered_reference_entries_are_not_headings() -> tuple[bool, str]:
+    """Product rule: numbered reference entries remain body/list text, not headings."""
     false_heading = (
         "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ КОММУНИКАЦИОННОЙ ПОЛИТИКИ "
         "В СИСТЕМЕ МАРКЕТИНГА ПРЕДПРИЯТИЯ"
