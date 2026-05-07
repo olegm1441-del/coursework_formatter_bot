@@ -75,6 +75,10 @@ def _all_table_rows_have_cant_split(table) -> bool:
     return True
 
 
+def _table_has_row_texts(table, expected: list[str]) -> bool:
+    return any([cell.text for cell in row.cells] == expected for row in table.rows)
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_minimal_doc_with_image() -> Document:
@@ -3701,6 +3705,252 @@ def test_marker_runtime_apply_is_idempotent_on_second_run() -> tuple[bool, str]:
     return _result(True, "active marker split is idempotent on second run")
 
 
+def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool, str]:
+    """
+    Product rule: one formatter run should process every eligible marker split,
+    not just the first eligible table.
+    """
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    for num, prefix in (("1.1", "a"), ("2.1", "b")):
+        doc.add_paragraph(f"Таблица {num}")
+        tbl = doc.add_table(rows=5, cols=3)
+        tbl.rows[0].cells[0].text = "A"
+        tbl.rows[0].cells[1].text = "B"
+        tbl.rows[0].cells[2].text = "C"
+        for i in range(1, 5):
+            tbl.rows[i].cells[0].text = f"{prefix}{i}c0"
+            tbl.rows[i].cells[1].text = f"{prefix}{i}c1"
+            tbl.rows[i].cells[2].text = f"{prefix}{i}c2"
+
+    def diagnostic_for(table_index: int, caption: str):
+        return tm.TableMarkerDiagnostic(
+            table_index=table_index,
+            rows_count=5,
+            pages_detected=[12, 13],
+            row_pages={0: 12, 1: 12, 2: 12, 3: 13, 4: 13},
+            found_rows=[0, 1, 2, 3, 4],
+            missing_rows=[],
+            duplicate_rows={},
+            candidate_for_split=False,
+            page_spans=[tm.TablePageSpan(0, 2, 12), tm.TablePageSpan(3, 4, 13)],
+            appendix_table=False,
+            caption_detected=True,
+            has_standard_table_caption=True,
+            preceding_paragraph_text=caption,
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "multi_ordinary.docx"
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            def fake_diagnose_all(docx_path, keep_temp=False):
+                current = Document(str(docx_path))
+                if len(current.tables) == 2:
+                    return [diagnostic_for(0, "Таблица 1.1")]
+                if len(current.tables) == 3:
+                    return [diagnostic_for(2, "Таблица 2.1")]
+                return []
+
+            tm.diagnose_all_tables = fake_diagnose_all
+            tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker splits apply"))
+            tc.analyze_pdf_lines = lambda _path: (_ for _ in ()).throw(AssertionError("pdf analysis should not run after marker splits apply"))
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        out = Document(str(path))
+
+    if n != 2:
+        return _result(False, f"expected two marker split mutations, got {n}")
+    if len(out.tables) != 4:
+        return _result(False, f"expected 4 tables after two splits, got {len(out.tables)}")
+    if [p.text for p in out.paragraphs].count("Продолжение таблицы 1.1") != 1:
+        return _result(False, "first ordinary continuation paragraph missing")
+    if [p.text for p in out.paragraphs].count("Продолжение таблицы 2.1") != 1:
+        return _result(False, "second ordinary continuation paragraph missing")
+    for table_index in (0, 2):
+        if _table_has_row_texts(out.tables[table_index], ["1", "2", "3"]):
+            return _result(False, f"generated numbered row leaked into first part table {table_index}")
+    for table_index in (1, 3):
+        if [cell.text for cell in out.tables[table_index].rows[0].cells] != ["1", "2", "3"]:
+            return _result(False, f"continuation table {table_index} does not start with numbered row")
+    return _result(True, "one run applies multiple ordinary marker splits")
+
+
+def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> tuple[bool, str]:
+    """
+    Product rule: ordinary and appendix marker splits can both be applied in
+    one run, while appendix tables do not get ordinary continuation text.
+    """
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 3.1")
+    ordinary = doc.add_table(rows=5, cols=3)
+    ordinary.rows[0].cells[0].text = "A"
+    ordinary.rows[0].cells[1].text = "B"
+    ordinary.rows[0].cells[2].text = "C"
+    for i in range(1, 5):
+        ordinary.rows[i].cells[0].text = f"o{i}c0"
+        ordinary.rows[i].cells[1].text = f"o{i}c1"
+        ordinary.rows[i].cells[2].text = f"o{i}c2"
+    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Расчет трудозатрат")
+    appendix = doc.add_table(rows=5, cols=3)
+    appendix.rows[0].cells[0].text = "Исполнитель"
+    appendix.rows[0].cells[1].text = "Работы"
+    appendix.rows[0].cells[2].text = "Стоимость"
+    for i in range(1, 5):
+        appendix.rows[i].cells[0].text = f"a{i}c0"
+        appendix.rows[i].cells[1].text = f"a{i}c1"
+        appendix.rows[i].cells[2].text = f"a{i}c2"
+
+    def diagnostic_for(table_index: int, *, appendix_table: bool):
+        return tm.TableMarkerDiagnostic(
+            table_index=table_index,
+            rows_count=5,
+            pages_detected=[20, 21],
+            row_pages={0: 20, 1: 20, 2: 20, 3: 21, 4: 21},
+            found_rows=[0, 1, 2, 3, 4],
+            missing_rows=[],
+            duplicate_rows={},
+            candidate_for_split=False,
+            page_spans=[tm.TablePageSpan(0, 2, 20), tm.TablePageSpan(3, 4, 21)],
+            appendix_table=appendix_table,
+            caption_detected=True,
+            has_standard_table_caption=not appendix_table,
+            preceding_paragraph_text="Расчет трудозатрат" if appendix_table else "Таблица 3.1",
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "multi_mixed.docx"
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            def fake_diagnose_all(docx_path, keep_temp=False):
+                current = Document(str(docx_path))
+                if len(current.tables) == 2:
+                    return [diagnostic_for(0, appendix_table=False)]
+                if len(current.tables) == 3:
+                    return [diagnostic_for(2, appendix_table=True)]
+                return []
+
+            tm.diagnose_all_tables = fake_diagnose_all
+            tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker splits apply"))
+            tc.analyze_pdf_lines = lambda _path: (_ for _ in ()).throw(AssertionError("pdf analysis should not run after marker splits apply"))
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        out = Document(str(path))
+
+    if n != 2:
+        return _result(False, f"expected two mixed marker split mutations, got {n}")
+    if [p.text for p in out.paragraphs].count("Продолжение таблицы 3.1") != 1:
+        return _result(False, "ordinary continuation paragraph missing")
+    if any("Продолжение таблицы" in (p.text or "") and p.text != "Продолжение таблицы 3.1" for p in out.paragraphs):
+        return _result(False, "appendix split inserted forbidden continuation paragraph")
+    for table_index in (1, 3):
+        if [cell.text for cell in out.tables[table_index].rows[0].cells] != ["1", "2", "3"]:
+            return _result(False, f"continuation table {table_index} does not start with numbered row")
+    for table_index in (0, 2):
+        if _table_has_row_texts(out.tables[table_index], ["1", "2", "3"]):
+            return _result(False, f"generated numbered row leaked into first part table {table_index}")
+    return _result(True, "one run applies ordinary and appendix marker splits")
+
+
+def test_marker_runtime_apply_loop_is_bounded() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = Document()
+    for label in ("A", "B"):
+        tbl = doc.add_table(rows=2, cols=1)
+        tbl.rows[0].cells[0].text = "H"
+        tbl.rows[1].cells[0].text = label
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "bounded.docx"
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_pass = tc._run_marker_split_detection_pass
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        calls = {"count": 0}
+        try:
+            def fake_pass(_docx_path, *, apply_split=False):
+                calls["count"] += 1
+                return 1
+
+            tc._run_marker_split_detection_pass = fake_pass
+            tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker loop"))
+            tc.analyze_pdf_lines = lambda _path: (_ for _ in ()).throw(AssertionError("pdf analysis should not run after marker loop"))
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc._run_marker_split_detection_pass = old_pass
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+    if n != 2:
+        return _result(False, f"bounded marker loop should return cap-sized total 2, got {n}")
+    if calls["count"] != 2:
+        return _result(False, f"bounded marker loop should stop after 2 calls, got {calls['count']}")
+    return _result(True, "marker apply loop is bounded by original table count")
+
+
 def test_split_prototype_simple_table() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
 
@@ -4486,6 +4736,9 @@ def run_all() -> None:
         ("M1 | apply ordinary split", test_marker_runtime_apply_split_for_ordinary_table),
         ("M1 | apply ineligible skip", test_marker_runtime_apply_skips_ineligible_tables),
         ("M1 | apply idempotent", test_marker_runtime_apply_is_idempotent_on_second_run),
+        ("M1 | apply multiple ordinary splits", test_marker_runtime_apply_processes_multiple_ordinary_tables),
+        ("M1 | apply mixed ordinary appendix splits", test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables),
+        ("M1 | apply loop bounded", test_marker_runtime_apply_loop_is_bounded),
         # Prototype split rules.
         ("S1 | prototype simple table split", test_split_prototype_simple_table),
         ("S1 | source note after second table", test_split_prototype_source_note_stays_after_second_table),

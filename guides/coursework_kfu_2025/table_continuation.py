@@ -1866,7 +1866,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
             _format_page_spans(diagnostic.page_spans),
         )
 
-    return eligible_count
+    return 0 if apply_split else eligible_count
 
 
 def apply_rendered_table_continuation(
@@ -1896,13 +1896,34 @@ def apply_rendered_table_continuation(
 
     if _marker_split_enabled():
         apply_marker_split = _marker_split_apply_enabled()
-        marker_result = _run_marker_split_detection_pass(
-            docx_path,
-            apply_split=apply_marker_split,
-        )
-        if apply_marker_split and marker_result:
-            logger.info("rendered_final_decision action=marker_split_applied")
-            return marker_result
+        if apply_marker_split:
+            marker_total = 0
+            marker_pass_limit = max(1, len(doc.tables))
+            for marker_pass in range(1, marker_pass_limit + 1):
+                marker_result = _run_marker_split_detection_pass(
+                    docx_path,
+                    apply_split=True,
+                )
+                if not marker_result:
+                    break
+                marker_total += marker_result
+            else:
+                logger.info(
+                    "marker_split_loop_stopped reason=max_passes passes=%s applied=%s",
+                    marker_pass_limit,
+                    marker_total,
+                )
+            if marker_total:
+                logger.info(
+                    "rendered_final_decision action=marker_split_applied count=%s",
+                    marker_total,
+                )
+                return marker_total
+        else:
+            _run_marker_split_detection_pass(
+                docx_path,
+                apply_split=False,
+            )
 
     pdf_path: Path | None = None
     try:
