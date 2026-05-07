@@ -367,7 +367,6 @@ def apply_numbered_split_to_document(
         else:
             numbered_row_reused = False
             numbered_row_for_second = _build_numbered_row_from_header(header_row_xml, column_count)
-            header_row_xml.addnext(deepcopy(numbered_row_for_second))
 
         if not appendix_table:
             if preceding_table_number is None:
