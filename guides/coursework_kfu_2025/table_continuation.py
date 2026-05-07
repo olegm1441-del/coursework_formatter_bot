@@ -704,6 +704,59 @@ def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
     return skip
 
 
+def _paragraph_text_from_xml(p_xml) -> str:
+    return _norm_text("".join(t.text or "" for t in p_xml.findall(".//" + qn("w:t"))))
+
+
+def _is_blank_service_paragraph(p_xml) -> bool:
+    if _paragraph_text_from_xml(p_xml):
+        return False
+    if xml_has_image(p_xml):
+        return False
+    pPr = p_xml.find(qn("w:pPr"))
+    return pPr is None or pPr.find(qn("w:sectPr")) is None
+
+
+def _first_row_is_generated_numbered_row(tbl_xml) -> bool:
+    col_count = _table_col_count(tbl_xml)
+    if col_count <= 0:
+        return False
+    first_row = tbl_xml.find(qn("w:tr"))
+    if first_row is None:
+        return False
+    return _row_cell_texts(first_row) == [str(i) for i in range(1, col_count + 1)]
+
+
+def _previous_significant_body_child_is_table(doc: Document, tbl_xml) -> bool:
+    children = list(doc.element.body)
+    table_body_index = None
+    for idx, child in enumerate(children):
+        if child is tbl_xml:
+            table_body_index = idx
+            break
+    if table_body_index is None:
+        return False
+
+    idx = table_body_index - 1
+    while idx >= 0:
+        child = children[idx]
+        if child.tag == qn("w:p") and _is_blank_service_paragraph(child):
+            idx -= 1
+            continue
+        return child.tag == qn("w:tbl")
+    return False
+
+
+def _is_generated_appendix_continuation_table(doc: Document, table_index: int) -> bool:
+    if table_index < 0 or table_index >= len(doc.tables):
+        return False
+    tbl_xml = doc.tables[table_index]._tbl
+    return (
+        _first_row_is_generated_numbered_row(tbl_xml)
+        and _previous_significant_body_child_is_table(doc, tbl_xml)
+    )
+
+
 def _paragraph_has_keep_next(p_xml) -> bool:
     pPr = p_xml.find(qn("w:pPr"))
     if pPr is None:
@@ -1728,6 +1781,11 @@ def _apply_marker_split_candidate(
     manual_skip = _valid_manual_continuation_table_ids(doc)
     if diagnostic.table_index in manual_skip:
         return None, "valid_manual_continuation"
+    if diagnostic.appendix_table and _is_generated_appendix_continuation_table(
+        doc,
+        diagnostic.table_index,
+    ):
+        return None, "generated_appendix_continuation"
     if not diagnostic.appendix_table and not diagnostic.has_standard_table_caption:
         return None, "ordinary_without_standard_caption"
 
