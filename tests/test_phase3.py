@@ -79,6 +79,25 @@ def _table_has_row_texts(table, expected: list[str]) -> bool:
     return any([cell.text for cell in row.cells] == expected for row in table.rows)
 
 
+def _table_has_page_break_service_paragraph_before(doc: Document, table_index: int) -> bool:
+    target = doc.tables[table_index]._tbl
+    children = list(doc.element.body)
+    for idx, child in enumerate(children):
+        if child is not target:
+            continue
+        if idx == 0:
+            return False
+        previous = children[idx - 1]
+        if previous.tag != qn("w:p"):
+            return False
+        text = "".join(t.text or "" for t in previous.findall(".//" + qn("w:t"))).strip()
+        if text:
+            return False
+        p_pr = previous.find(qn("w:pPr"))
+        return p_pr is not None and p_pr.find(qn("w:pageBreakBefore")) is not None
+    return False
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_minimal_doc_with_image() -> Document:
@@ -3300,11 +3319,11 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
     doc = Document()
     doc.add_paragraph("Приложение А")
     doc.add_paragraph("Трудозатраты проекта")
-    tbl = doc.add_table(rows=5, cols=3)
+    tbl = doc.add_table(rows=6, cols=3)
     tbl.rows[0].cells[0].text = "Исполнитель"
     tbl.rows[0].cells[1].text = "Работы"
     tbl.rows[0].cells[2].text = "Стоимость"
-    for i in range(1, 5):
+    for i in range(1, 6):
         tbl.rows[i].cells[0].text = f"r{i}c0"
         tbl.rows[i].cells[1].text = f"r{i}c1"
         tbl.rows[i].cells[2].text = f"r{i}c2"
@@ -3312,14 +3331,14 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
 
     diagnostic = tm.TableMarkerDiagnostic(
         table_index=0,
-        rows_count=5,
+        rows_count=6,
         pages_detected=[53, 54],
-        row_pages={0: 53, 1: 53, 2: 53, 3: 54, 4: 54},
-        found_rows=[0, 1, 2, 3, 4],
+        row_pages={0: 53, 1: 53, 2: 53, 3: 53, 4: 54, 5: 54},
+        found_rows=[0, 1, 2, 3, 4, 5],
         missing_rows=[],
         duplicate_rows={},
         candidate_for_split=False,
-        page_spans=[tm.TablePageSpan(0, 2, 53), tm.TablePageSpan(3, 4, 54)],
+        page_spans=[tm.TablePageSpan(0, 3, 53), tm.TablePageSpan(4, 5, 54)],
         appendix_table=True,
         caption_detected=True,
         has_standard_table_caption=False,
@@ -3362,10 +3381,16 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
         return _result(False, f"expected one appendix split mutation, got {n}")
     if len(out.tables) != 2:
         return _result(False, f"expected 2 tables after appendix split, got {len(out.tables)}")
+    if len(out.tables[0].rows) != 3:
+        return _result(False, f"appendix first part should back off to 3 rows, got {len(out.tables[0].rows)}")
     if any([c.text for c in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
         return _result(False, "generated numbered row leaked into first appendix table")
     if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "numbered row missing in second appendix table")
+    if [c.text for c in out.tables[1].rows[1].cells] != ["r3c0", "r3c1", "r3c2"]:
+        return _result(False, "appendix continuation should move last first-page data row after numbered row")
+    if not _table_has_page_break_service_paragraph_before(out, 1):
+        return _result(False, "appendix continuation table should start on a new page via service page-break paragraph")
     if not _all_table_rows_have_cant_split(out.tables[0]):
         return _result(False, "first appendix split table rows can split across pages")
     if not _all_table_rows_have_cant_split(out.tables[1]):
@@ -4448,6 +4473,8 @@ def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[b
     second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
     if second_row_texts != ["1", "2", "3"]:
         return _result(False, f"unexpected appendix continuation row: {second_row_texts!r}")
+    if not _table_has_page_break_service_paragraph_before(out, 1):
+        return _result(False, "appendix continuation table should start on a new page")
     if any([cell.text for cell in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
         return _result(False, "generated numbered row leaked into first appendix table")
     if not _all_table_rows_have_cant_split(out.tables[0]):

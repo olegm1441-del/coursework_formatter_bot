@@ -300,6 +300,15 @@ def _build_plain_paragraph(text: str):
     return p
 
 
+def _build_page_break_paragraph():
+    p = OxmlElement("w:p")
+    p_pr = OxmlElement("w:pPr")
+    page_break = OxmlElement("w:pageBreakBefore")
+    p_pr.append(page_break)
+    p.append(p_pr)
+    return p
+
+
 def apply_numbered_split_to_document(
     doc: Document,
     table_index: int,
@@ -399,6 +408,10 @@ def apply_numbered_split_to_document(
         continuation_p = builder(continuation_text)
         tbl_xml.addnext(continuation_p)
         continuation_p.addnext(second_tbl)
+    elif appendix_table:
+        page_break_p = _build_page_break_paragraph()
+        tbl_xml.addnext(page_break_p)
+        page_break_p.addnext(second_tbl)
     else:
         tbl_xml.addnext(second_tbl)
 

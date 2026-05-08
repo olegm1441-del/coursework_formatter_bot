@@ -1772,6 +1772,25 @@ def _map_marker_split_apply_error(exc: Exception) -> str:
     return "mutation_error"
 
 
+def _effective_marker_split_before_row(
+    diagnostic,
+    decision: _MarkerSplitDecision,
+    *,
+    header_rows: int = 1,
+) -> int | None:
+    split_before_row = decision.split_before_row
+    if split_before_row is None:
+        return None
+
+    if diagnostic.appendix_table and split_before_row > header_rows + 1:
+        # Appendix continuations have no visible "Продолжение таблицы" marker.
+        # Leave one fewer data row in the first fragment so Word does not push
+        # a repeated textual header above the generated numbered row.
+        return split_before_row - 1
+
+    return split_before_row
+
+
 def _apply_marker_split_candidate(
     docx_path: Path,
     diagnostic,
@@ -1789,11 +1808,15 @@ def _apply_marker_split_candidate(
     if not diagnostic.appendix_table and not diagnostic.has_standard_table_caption:
         return None, "ordinary_without_standard_caption"
 
+    split_before_row = _effective_marker_split_before_row(diagnostic, decision)
+    if split_before_row is None:
+        return None, "no_boundary"
+
     try:
         result = apply_numbered_split_to_document(
             doc,
             diagnostic.table_index,
-            decision.split_before_row,
+            split_before_row,
             header_rows=1,
             numbered_header=True,
             appendix_table=diagnostic.appendix_table,
@@ -1921,7 +1944,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
             logger.info(
                 "marker_split_applied table_index=%s split_before_row=%s first_rows=%s second_rows=%s appendix=%s continuation=%s",
                 diagnostic.table_index,
-                decision.split_before_row,
+                result.split_before_row,
                 result.first_table_rows_count,
                 result.second_table_rows_count,
                 diagnostic.appendix_table,
