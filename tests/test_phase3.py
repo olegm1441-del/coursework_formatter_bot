@@ -3754,14 +3754,14 @@ def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
         old_analyze = tc.analyze_pdf_lines
+        calls = {"diagnose": 0}
         try:
             def fake_diagnose_all(docx_path, keep_temp=False):
-                current = Document(str(docx_path))
-                if len(current.tables) == 2:
-                    return [diagnostic_for(0, "Таблица 1.1")]
-                if len(current.tables) == 3:
-                    return [diagnostic_for(2, "Таблица 2.1")]
-                return []
+                calls["diagnose"] += 1
+                return [
+                    diagnostic_for(0, "Таблица 1.1"),
+                    diagnostic_for(1, "Таблица 2.1"),
+                ]
 
             tm.diagnose_all_tables = fake_diagnose_all
             tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker splits apply"))
@@ -3784,6 +3784,8 @@ def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool
 
     if n != 2:
         return _result(False, f"expected two marker split mutations, got {n}")
+    if calls["diagnose"] != 1:
+        return _result(False, f"expected one marker diagnostic pass, got {calls['diagnose']}")
     if len(out.tables) != 4:
         return _result(False, f"expected 4 tables after two splits, got {len(out.tables)}")
     if [p.text for p in out.paragraphs].count("Продолжение таблицы 1.1") != 1:
@@ -3797,6 +3799,87 @@ def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool
         if [cell.text for cell in out.tables[table_index].rows[0].cells] != ["1", "2", "3"]:
             return _result(False, f"continuation table {table_index} does not start with numbered row")
     return _result(True, "one run applies multiple ordinary marker splits")
+
+
+def test_marker_runtime_apply_skips_stale_candidate_and_continues() -> tuple[bool, str]:
+    """
+    Product rule: batch marker apply uses one diagnostic snapshot; if one
+    candidate is stale or invalid, later safe candidates are still applied.
+    """
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    for num, prefix in (("1.1", "a"), ("2.1", "b")):
+        doc.add_paragraph(f"Таблица {num}")
+        tbl = doc.add_table(rows=5, cols=3)
+        tbl.rows[0].cells[0].text = "A"
+        tbl.rows[0].cells[1].text = "B"
+        tbl.rows[0].cells[2].text = "C"
+        for i in range(1, 5):
+            tbl.rows[i].cells[0].text = f"{prefix}{i}c0"
+            tbl.rows[i].cells[1].text = f"{prefix}{i}c1"
+            tbl.rows[i].cells[2].text = f"{prefix}{i}c2"
+
+    def diagnostic_for(table_index: int, caption: str):
+        return tm.TableMarkerDiagnostic(
+            table_index=table_index,
+            rows_count=5,
+            pages_detected=[12, 13],
+            row_pages={0: 12, 1: 12, 2: 12, 3: 13, 4: 13},
+            found_rows=[0, 1, 2, 3, 4],
+            missing_rows=[],
+            duplicate_rows={},
+            candidate_for_split=False,
+            page_spans=[tm.TablePageSpan(0, 2, 12), tm.TablePageSpan(3, 4, 13)],
+            appendix_table=False,
+            caption_detected=True,
+            has_standard_table_caption=True,
+            preceding_paragraph_text=caption,
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "stale_candidate.docx"
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            tm.diagnose_all_tables = lambda _path, keep_temp=False: [
+                diagnostic_for(99, "Таблица 99.1"),
+                diagnostic_for(1, "Таблица 2.1"),
+            ]
+            tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker split apply"))
+            tc.analyze_pdf_lines = lambda _path: (_ for _ in ()).throw(AssertionError("pdf analysis should not run after marker split apply"))
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        out = Document(str(path))
+
+    if n != 1:
+        return _result(False, f"expected one valid split after stale skip, got {n}")
+    if len(out.tables) != 3:
+        return _result(False, f"expected one table to split, got {len(out.tables)} tables")
+    if [p.text for p in out.paragraphs].count("Продолжение таблицы 2.1") != 1:
+        return _result(False, "valid lower-index candidate was not applied after stale skip")
+    return _result(True, "stale marker candidate is skipped while valid candidate applies")
 
 
 def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> tuple[bool, str]:
@@ -3857,14 +3940,14 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
         old_analyze = tc.analyze_pdf_lines
+        calls = {"diagnose": 0}
         try:
             def fake_diagnose_all(docx_path, keep_temp=False):
-                current = Document(str(docx_path))
-                if len(current.tables) == 2:
-                    return [diagnostic_for(0, appendix_table=False)]
-                if len(current.tables) == 3:
-                    return [diagnostic_for(2, appendix_table=True)]
-                return []
+                calls["diagnose"] += 1
+                return [
+                    diagnostic_for(0, appendix_table=False),
+                    diagnostic_for(1, appendix_table=True),
+                ]
 
             tm.diagnose_all_tables = fake_diagnose_all
             tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker splits apply"))
@@ -3887,6 +3970,8 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
 
     if n != 2:
         return _result(False, f"expected two mixed marker split mutations, got {n}")
+    if calls["diagnose"] != 1:
+        return _result(False, f"expected one marker diagnostic pass, got {calls['diagnose']}")
     if [p.text for p in out.paragraphs].count("Продолжение таблицы 3.1") != 1:
         return _result(False, "ordinary continuation paragraph missing")
     if any("Продолжение таблицы" in (p.text or "") and p.text != "Продолжение таблицы 3.1" for p in out.paragraphs):
@@ -3909,17 +3994,35 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
     import guides.coursework_kfu_2025.table_markers as tm
 
     doc = Document()
-    for appendix_label, prefix in (("Приложение А", "a"), ("Приложение Б", "b")):
-        doc.add_paragraph(appendix_label)
-        doc.add_paragraph("Расчет трудозатрат")
-        tbl = doc.add_table(rows=5, cols=3)
-        tbl.rows[0].cells[0].text = "Исполнитель"
-        tbl.rows[0].cells[1].text = "Работы"
-        tbl.rows[0].cells[2].text = "Стоимость"
-        for i in range(1, 5):
-            tbl.rows[i].cells[0].text = f"{prefix}{i}c0"
-            tbl.rows[i].cells[1].text = f"{prefix}{i}c1"
-            tbl.rows[i].cells[2].text = f"{prefix}{i}c2"
+    doc.add_paragraph("Приложение А")
+    first_part = doc.add_table(rows=3, cols=3)
+    first_part.rows[0].cells[0].text = "Исполнитель"
+    first_part.rows[0].cells[1].text = "Работы"
+    first_part.rows[0].cells[2].text = "Стоимость"
+    for i in range(1, 3):
+        first_part.rows[i].cells[0].text = f"a{i}c0"
+        first_part.rows[i].cells[1].text = f"a{i}c1"
+        first_part.rows[i].cells[2].text = f"a{i}c2"
+
+    generated_continuation = doc.add_table(rows=3, cols=3)
+    generated_continuation.rows[0].cells[0].text = "1"
+    generated_continuation.rows[0].cells[1].text = "2"
+    generated_continuation.rows[0].cells[2].text = "3"
+    for i in range(1, 3):
+        generated_continuation.rows[i].cells[0].text = f"cont{i}c0"
+        generated_continuation.rows[i].cells[1].text = f"cont{i}c1"
+        generated_continuation.rows[i].cells[2].text = f"cont{i}c2"
+
+    doc.add_paragraph("Приложение Б")
+    doc.add_paragraph("Расчет трудозатрат")
+    original_appendix = doc.add_table(rows=5, cols=3)
+    original_appendix.rows[0].cells[0].text = "Исполнитель"
+    original_appendix.rows[0].cells[1].text = "Работы"
+    original_appendix.rows[0].cells[2].text = "Стоимость"
+    for i in range(1, 5):
+        original_appendix.rows[i].cells[0].text = f"b{i}c0"
+        original_appendix.rows[i].cells[1].text = f"b{i}c1"
+        original_appendix.rows[i].cells[2].text = f"b{i}c2"
 
     def diagnostic_for(table_index: int, rows_count: int = 5):
         return tm.TableMarkerDiagnostic(
@@ -3957,19 +4060,10 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
         try:
             def fake_diagnose_all(docx_path, keep_temp=False):
                 current = Document(str(docx_path))
-                if len(current.tables) == 2:
-                    return [diagnostic_for(0)]
-                if len(current.tables) == 3:
-                    return [
-                        diagnostic_for(1, rows_count=len(current.tables[1].rows)),
-                        diagnostic_for(2),
-                    ]
-                if len(current.tables) == 4:
-                    return [
-                        diagnostic_for(1, rows_count=len(current.tables[1].rows)),
-                        diagnostic_for(3, rows_count=len(current.tables[3].rows)),
-                    ]
-                return []
+                return [
+                    diagnostic_for(1, rows_count=len(current.tables[1].rows)),
+                    diagnostic_for(2),
+                ]
 
             tm.diagnose_all_tables = fake_diagnose_all
             tc.render_docx_to_pdf = lambda _path: (_ for _ in ()).throw(AssertionError("render path should not run after marker splits apply"))
@@ -3990,10 +4084,10 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
 
         out = Document(str(path))
 
-    if n != 2:
-        return _result(False, f"expected two original appendix splits, got {n}")
+    if n != 1:
+        return _result(False, f"expected one original appendix split and one generated skip, got {n}")
     if len(out.tables) != 4:
-        return _result(False, f"expected 4 tables after two appendix splits, got {len(out.tables)}")
+        return _result(False, f"expected 4 tables after original appendix split, got {len(out.tables)}")
     if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
     for table_index in (0, 2):
@@ -4006,7 +4100,7 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
         )
         if numbered_rows != 1:
             return _result(False, f"continuation appendix table {table_index} has {numbered_rows} numbered rows")
-    return _result(True, "generated appendix continuation tables are skipped on later marker passes")
+    return _result(True, "generated appendix continuation is skipped while original appendix applies")
 
 
 def test_marker_runtime_apply_loop_is_bounded() -> tuple[bool, str]:
@@ -4053,11 +4147,11 @@ def test_marker_runtime_apply_loop_is_bounded() -> tuple[bool, str]:
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
 
-    if n != 2:
-        return _result(False, f"bounded marker loop should return cap-sized total 2, got {n}")
-    if calls["count"] != 2:
-        return _result(False, f"bounded marker loop should stop after 2 calls, got {calls['count']}")
-    return _result(True, "marker apply loop is bounded by original table count")
+    if n != 1:
+        return _result(False, f"single marker pass should return pass result 1, got {n}")
+    if calls["count"] != 1:
+        return _result(False, f"single marker pass should call diagnostics once, got {calls['count']}")
+    return _result(True, "marker apply uses one full diagnostic pass")
 
 
 def test_split_prototype_simple_table() -> tuple[bool, str]:
@@ -4846,9 +4940,10 @@ def run_all() -> None:
         ("M1 | apply ineligible skip", test_marker_runtime_apply_skips_ineligible_tables),
         ("M1 | apply idempotent", test_marker_runtime_apply_is_idempotent_on_second_run),
         ("M1 | apply multiple ordinary splits", test_marker_runtime_apply_processes_multiple_ordinary_tables),
+        ("M1 | apply skips stale candidate", test_marker_runtime_apply_skips_stale_candidate_and_continues),
         ("M1 | apply mixed ordinary appendix splits", test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables),
         ("M1 | skip generated appendix continuations", test_marker_runtime_apply_skips_generated_appendix_continuation_tables),
-        ("M1 | apply loop bounded", test_marker_runtime_apply_loop_is_bounded),
+        ("M1 | apply single diagnostic pass", test_marker_runtime_apply_loop_is_bounded),
         # Prototype split rules.
         ("S1 | prototype simple table split", test_split_prototype_simple_table),
         ("S1 | source note after second table", test_split_prototype_source_note_stays_after_second_table),

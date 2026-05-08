@@ -1837,6 +1837,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
         )
 
     eligible_count = 0
+    eligible_apply_candidates = []
     try:
         diagnostics = table_markers.diagnose_all_tables(docx_path, keep_temp=False)
     except Exception as exc:
@@ -1889,30 +1890,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
             )
             eligible_count += 1
             if apply_split:
-                result, skip_reason = _apply_marker_split_candidate(
-                    docx_path,
-                    diagnostic,
-                    decision,
-                )
-                if result is not None:
-                    logger.info(
-                        "marker_split_applied table_index=%s split_before_row=%s first_rows=%s second_rows=%s appendix=%s continuation=%s",
-                        diagnostic.table_index,
-                        decision.split_before_row,
-                        result.first_table_rows_count,
-                        result.second_table_rows_count,
-                        diagnostic.appendix_table,
-                        result.continuation_paragraph_inserted,
-                    )
-                    return 1
-                logger.info(
-                    "marker_split_skipped table_index=%s reason=%s missing_rows=%s duplicate_rows=%s page_spans=%s",
-                    diagnostic.table_index,
-                    skip_reason,
-                    diagnostic.missing_rows,
-                    _format_duplicate_rows(diagnostic.duplicate_rows),
-                    _format_page_spans(diagnostic.page_spans),
-                )
+                eligible_apply_candidates.append((diagnostic, decision))
             continue
 
         logger.info(
@@ -1924,7 +1902,42 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
             _format_page_spans(diagnostic.page_spans),
         )
 
-    return 0 if apply_split else eligible_count
+    if not apply_split:
+        return eligible_count
+
+    applied_count = 0
+    for diagnostic, decision in sorted(
+        eligible_apply_candidates,
+        key=lambda item: item[0].table_index,
+        reverse=True,
+    ):
+        result, skip_reason = _apply_marker_split_candidate(
+            docx_path,
+            diagnostic,
+            decision,
+        )
+        if result is not None:
+            applied_count += 1
+            logger.info(
+                "marker_split_applied table_index=%s split_before_row=%s first_rows=%s second_rows=%s appendix=%s continuation=%s",
+                diagnostic.table_index,
+                decision.split_before_row,
+                result.first_table_rows_count,
+                result.second_table_rows_count,
+                diagnostic.appendix_table,
+                result.continuation_paragraph_inserted,
+            )
+            continue
+        logger.info(
+            "marker_split_skipped table_index=%s reason=%s missing_rows=%s duplicate_rows=%s page_spans=%s",
+            diagnostic.table_index,
+            skip_reason,
+            diagnostic.missing_rows,
+            _format_duplicate_rows(diagnostic.duplicate_rows),
+            _format_page_spans(diagnostic.page_spans),
+        )
+
+    return applied_count
 
 
 def apply_rendered_table_continuation(
@@ -1955,22 +1968,10 @@ def apply_rendered_table_continuation(
     if _marker_split_enabled():
         apply_marker_split = _marker_split_apply_enabled()
         if apply_marker_split:
-            marker_total = 0
-            marker_pass_limit = max(1, len(doc.tables))
-            for marker_pass in range(1, marker_pass_limit + 1):
-                marker_result = _run_marker_split_detection_pass(
-                    docx_path,
-                    apply_split=True,
-                )
-                if not marker_result:
-                    break
-                marker_total += marker_result
-            else:
-                logger.info(
-                    "marker_split_loop_stopped reason=max_passes passes=%s applied=%s",
-                    marker_pass_limit,
-                    marker_total,
-                )
+            marker_total = _run_marker_split_detection_pass(
+                docx_path,
+                apply_split=True,
+            )
             if marker_total:
                 logger.info(
                     "rendered_final_decision action=marker_split_applied count=%s",
