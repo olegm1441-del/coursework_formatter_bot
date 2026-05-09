@@ -79,6 +79,10 @@ def _table_has_row_texts(table, expected: list[str]) -> bool:
     return any([cell.text for cell in row.cells] == expected for row in table.rows)
 
 
+def _count_table_rows_with_texts(table, expected: list[str]) -> int:
+    return sum(1 for row in table.rows if [cell.text for cell in row.cells] == expected)
+
+
 def _table_has_page_break_service_paragraph_before(doc: Document, table_index: int) -> bool:
     target = doc.tables[table_index]._tbl
     children = list(doc.element.body)
@@ -3381,12 +3385,16 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
         return _result(False, f"expected one appendix split mutation, got {n}")
     if len(out.tables) != 2:
         return _result(False, f"expected 2 tables after appendix split, got {len(out.tables)}")
-    if len(out.tables[0].rows) != 3:
-        return _result(False, f"appendix first part should back off to 3 rows, got {len(out.tables[0].rows)}")
-    if any([c.text for c in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
-        return _result(False, "generated numbered row leaked into first appendix table")
+    if len(out.tables[0].rows) != 4:
+        return _result(False, f"appendix first part should include generated numbered row, got {len(out.tables[0].rows)} rows")
+    if [c.text for c in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing under first appendix table header")
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
+        return _result(False, "first appendix table should contain exactly one generated numbered row")
     if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "numbered row missing in second appendix table")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2", "3"]) != 1:
+        return _result(False, "second appendix table should contain exactly one generated numbered row")
     if [c.text for c in out.tables[1].rows[1].cells] != ["r3c0", "r3c1", "r3c2"]:
         return _result(False, "appendix continuation should move last first-page data row after numbered row")
     if not _table_has_page_break_service_paragraph_before(out, 1):
@@ -3472,10 +3480,14 @@ def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
         return _result(False, f"expected one ordinary split mutation, got {n}")
     if len(out.tables) != 2:
         return _result(False, f"expected 2 tables after ordinary split, got {len(out.tables)}")
-    if any([c.text for c in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
-        return _result(False, "generated numbered row leaked into first ordinary table")
+    if [c.text for c in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing under first ordinary table header")
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
+        return _result(False, "first ordinary table should contain exactly one generated numbered row")
     if [c.text for c in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "continuation table should start with numbered row only")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2", "3"]) != 1:
+        return _result(False, "second ordinary table should contain exactly one generated numbered row")
     if not _all_table_rows_have_cant_split(out.tables[0]):
         return _result(False, "first ordinary split table rows can split across pages")
     if not _all_table_rows_have_cant_split(out.tables[1]):
@@ -3716,8 +3728,8 @@ def test_marker_runtime_apply_is_idempotent_on_second_run() -> tuple[bool, str]:
         1 for row in out.tables[0].rows
         if [cell.text for cell in row.cells] == ["1", "2", "3"]
     )
-    if first_numbered_rows != 0:
-        return _result(False, f"first table should not contain generated numbered row, got {first_numbered_rows}")
+    if first_numbered_rows != 1:
+        return _result(False, f"first table should contain exactly one generated numbered row, got {first_numbered_rows}")
     second_numbered_rows = sum(
         1 for row in out.tables[1].rows
         if [cell.text for cell in row.cells] == ["1", "2", "3"]
@@ -3818,11 +3830,15 @@ def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool
     if [p.text for p in out.paragraphs].count("Продолжение таблицы 2.1") != 1:
         return _result(False, "second ordinary continuation paragraph missing")
     for table_index in (0, 2):
-        if _table_has_row_texts(out.tables[table_index], ["1", "2", "3"]):
-            return _result(False, f"generated numbered row leaked into first part table {table_index}")
+        if [cell.text for cell in out.tables[table_index].rows[1].cells] != ["1", "2", "3"]:
+            return _result(False, f"first part table {table_index} does not have numbered row under header")
+        if _count_table_rows_with_texts(out.tables[table_index], ["1", "2", "3"]) != 1:
+            return _result(False, f"first part table {table_index} should contain exactly one numbered row")
     for table_index in (1, 3):
         if [cell.text for cell in out.tables[table_index].rows[0].cells] != ["1", "2", "3"]:
             return _result(False, f"continuation table {table_index} does not start with numbered row")
+        if _count_table_rows_with_texts(out.tables[table_index], ["1", "2", "3"]) != 1:
+            return _result(False, f"continuation table {table_index} should contain exactly one numbered row")
     return _result(True, "one run applies multiple ordinary marker splits")
 
 
@@ -4001,12 +4017,16 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
         return _result(False, "ordinary continuation paragraph missing")
     if any("Продолжение таблицы" in (p.text or "") and p.text != "Продолжение таблицы 3.1" for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
+    for table_index in (0, 2):
+        if [cell.text for cell in out.tables[table_index].rows[1].cells] != ["1", "2", "3"]:
+            return _result(False, f"first part table {table_index} does not have numbered row under header")
+        if _count_table_rows_with_texts(out.tables[table_index], ["1", "2", "3"]) != 1:
+            return _result(False, f"first part table {table_index} should contain exactly one numbered row")
     for table_index in (1, 3):
         if [cell.text for cell in out.tables[table_index].rows[0].cells] != ["1", "2", "3"]:
             return _result(False, f"continuation table {table_index} does not start with numbered row")
-    for table_index in (0, 2):
-        if _table_has_row_texts(out.tables[table_index], ["1", "2", "3"]):
-            return _result(False, f"generated numbered row leaked into first part table {table_index}")
+        if _count_table_rows_with_texts(out.tables[table_index], ["1", "2", "3"]) != 1:
+            return _result(False, f"continuation table {table_index} should contain exactly one numbered row")
     return _result(True, "one run applies ordinary and appendix marker splits")
 
 
@@ -4115,14 +4135,14 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
         return _result(False, f"expected 4 tables after original appendix split, got {len(out.tables)}")
     if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
-    for table_index in (0, 2):
-        if _table_has_row_texts(out.tables[table_index], ["1", "2", "3"]):
-            return _result(False, f"generated numbered row leaked into original appendix table {table_index}")
+    if _table_has_row_texts(out.tables[0], ["1", "2", "3"]):
+        return _result(False, "pre-existing first appendix fragment should not be mutated")
+    if [cell.text for cell in out.tables[2].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "original appendix split first part missing numbered row under header")
+    if _count_table_rows_with_texts(out.tables[2], ["1", "2", "3"]) != 1:
+        return _result(False, "original appendix split first part should contain exactly one numbered row")
     for table_index in (1, 3):
-        numbered_rows = sum(
-            1 for row in out.tables[table_index].rows
-            if [cell.text for cell in row.cells] == ["1", "2", "3"]
-        )
+        numbered_rows = _count_table_rows_with_texts(out.tables[table_index], ["1", "2", "3"])
         if numbered_rows != 1:
             return _result(False, f"continuation appendix table {table_index} has {numbered_rows} numbered rows")
     return _result(True, "generated appendix continuation is skipped while original appendix applies")
@@ -4362,10 +4382,14 @@ def test_split_prototype_numbered_ordinary_continuation_row_only() -> tuple[bool
         return _result(False, f"unexpected column_count: {result.column_count!r}")
 
     second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
-    if any([cell.text for cell in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
-        return _result(False, "generated numbered row leaked into first table")
+    if [cell.text for cell in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing under first table header")
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
+        return _result(False, "first table should contain exactly one numbered row")
     if second_row_texts != ["1", "2", "3"]:
         return _result(False, f"unexpected continuation numbered row: {second_row_texts!r}")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2", "3"]) != 1:
+        return _result(False, "continuation table should contain exactly one numbered row")
     if [cell.text for cell in out.tables[1].rows[1].cells] != ["r3c0", "r3c1", "r3c2"]:
         return _result(False, "tail rows not moved under numbered continuation row")
     if not _all_table_rows_have_cant_split(out.tables[0]):
@@ -4419,10 +4443,14 @@ def test_split_prototype_numbered_ordinary_split_caption_before_title() -> tuple
         return _result(False, f"unexpected continuation text: {result.continuation_text!r}")
     if result.continuation_paragraph_inserted is not True:
         return _result(False, "ordinary table should insert continuation paragraph")
-    if any([cell.text for cell in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
-        return _result(False, "generated numbered row leaked into first split-caption table")
+    if [cell.text for cell in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing under first split-caption table header")
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
+        return _result(False, "first split-caption table should contain exactly one numbered row")
     if [cell.text for cell in out.tables[1].rows[0].cells] != ["1", "2", "3"]:
         return _result(False, "continuation table should start with numbered row")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2", "3"]) != 1:
+        return _result(False, "split-caption continuation table should contain exactly one numbered row")
     if not _all_table_rows_have_cant_split(out.tables[0]):
         return _result(False, "first split-caption table rows can split across pages")
     if not _all_table_rows_have_cant_split(out.tables[1]):
@@ -4475,8 +4503,12 @@ def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[b
         return _result(False, f"unexpected appendix continuation row: {second_row_texts!r}")
     if not _table_has_page_break_service_paragraph_before(out, 1):
         return _result(False, "appendix continuation table should start on a new page")
-    if any([cell.text for cell in row.cells] == ["1", "2", "3"] for row in out.tables[0].rows):
-        return _result(False, "generated numbered row leaked into first appendix table")
+    if [cell.text for cell in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numbered row missing under first appendix table header")
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
+        return _result(False, "first appendix table should contain exactly one numbered row")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2", "3"]) != 1:
+        return _result(False, "appendix continuation table should contain exactly one numbered row")
     if not _all_table_rows_have_cant_split(out.tables[0]):
         return _result(False, "first appendix prototype table rows can split across pages")
     if not _all_table_rows_have_cant_split(out.tables[1]):

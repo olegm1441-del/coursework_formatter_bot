@@ -400,6 +400,12 @@ def apply_numbered_split_to_document(
     for tr in rows_xml[split_before_row:]:
         tbl_xml.remove(tr)
 
+    if numbered_header:
+        remaining_rows = tbl_xml.findall(qn("w:tr"))
+        first_body_row = remaining_rows[1] if len(remaining_rows) > 1 else None
+        if first_body_row is None or not _row_is_exact_numbered_row(first_body_row, column_count):
+            remaining_rows[0].addnext(deepcopy(numbered_row_for_second))
+
     _ensure_table_rows_cant_split(tbl_xml)
     _ensure_table_rows_cant_split(second_tbl)
 
