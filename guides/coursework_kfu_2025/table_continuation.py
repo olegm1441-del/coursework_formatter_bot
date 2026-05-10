@@ -53,8 +53,9 @@ import math
 import os
 import re
 import shutil
+import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from docx import Document
@@ -68,6 +69,19 @@ from .pdf_layout_analyzer import PdfLine, analyze_pdf_lines
 from .table_split_prototype import apply_numbered_split_to_document
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _MarkerSplitStats:
+    renders: int = 0
+    candidates: int = 0
+    applied: int = 0
+    skipped_reasons: dict[str, int] = field(default_factory=dict)
+    applied_table_indexes: list[int] = field(default_factory=list)
+    applied_captions: list[str] = field(default_factory=list)
+
+
+_ACTIVE_MARKER_STATS: _MarkerSplitStats | None = None
 
 # ── Unit helpers ─────────────────────────────────────────────────────────────
 
@@ -1794,6 +1808,74 @@ def _map_marker_split_apply_error(exc: Exception) -> str:
     return "mutation_error"
 
 
+def _request_id_from_docx_path(docx_path: Path) -> str:
+    match = re.match(r"^(\d+)_", docx_path.name)
+    return match.group(1) if match else "-"
+
+
+def _count_marker_renders(diagnostics) -> int:
+    # table_markers may retry with 2pt markers; marker_font_size_pt reflects
+    # whether the 1pt attempt was enough or a second render was needed.
+    return sum(2 if diagnostic.marker_font_size_pt == 2 else 1 for diagnostic in diagnostics)
+
+
+def _record_marker_skip(reason: str | None) -> None:
+    stats = _ACTIVE_MARKER_STATS
+    if stats is None:
+        return
+    key = reason or "unknown"
+    stats.skipped_reasons[key] = stats.skipped_reasons.get(key, 0) + 1
+
+
+def _record_marker_applied(docx_path: Path, table_index: int) -> None:
+    stats = _ACTIVE_MARKER_STATS
+    if stats is None:
+        return
+    stats.applied += 1
+    stats.applied_table_indexes.append(table_index)
+
+    caption = "-"
+    try:
+        doc = Document(str(docx_path))
+        if 0 <= table_index < len(doc.tables):
+            caption = _find_caption_number_before_table(doc, doc.tables[table_index]._tbl) or "-"
+    except Exception:
+        caption = "-"
+    stats.applied_captions.append(caption)
+
+
+def _format_marker_skip_reasons(stats: _MarkerSplitStats) -> str:
+    if not stats.skipped_reasons:
+        return "-"
+    return ",".join(
+        f"{reason}:{count}"
+        for reason, count in sorted(stats.skipped_reasons.items())
+    )
+
+
+def _log_phase3_marker_summary(
+    docx_path: Path,
+    stats: _MarkerSplitStats,
+    started_at: float,
+) -> None:
+    logger.info(
+        "phase3_marker_summary request_id=%s renders=%s candidates=%s applied=%s skipped_reasons=%s elapsed_seconds=%.3f",
+        _request_id_from_docx_path(docx_path),
+        stats.renders,
+        stats.candidates,
+        stats.applied,
+        _format_marker_skip_reasons(stats),
+        time.monotonic() - started_at,
+    )
+    if stats.applied:
+        logger.info(
+            "phase3_marker_applied_summary request_id=%s table_indexes=%s captions=%s",
+            _request_id_from_docx_path(docx_path),
+            ",".join(str(index) for index in stats.applied_table_indexes) or "-",
+            ",".join(stats.applied_captions) or "-",
+        )
+
+
 def _effective_marker_split_before_row(
     diagnostic,
     decision: _MarkerSplitDecision,
@@ -1892,7 +1974,13 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
         diagnostics = table_markers.diagnose_all_tables(docx_path, keep_temp=False)
     except Exception as exc:
         logger.info("marker_split_skipped reason=mapping_error error=%s", exc)
+        _record_marker_skip("mapping_error")
         return 0
+
+    stats = _ACTIVE_MARKER_STATS
+    if stats is not None:
+        stats.renders += _count_marker_renders(diagnostics)
+        stats.candidates += len(diagnostics)
 
     for diagnostic in diagnostics:
         logger.info(
@@ -1951,6 +2039,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
             _format_duplicate_rows(diagnostic.duplicate_rows),
             _format_page_spans(diagnostic.page_spans),
         )
+        _record_marker_skip(decision.skip_reason)
 
     if not apply_split:
         return eligible_count
@@ -1968,6 +2057,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
         )
         if result is not None:
             applied_count += 1
+            _record_marker_applied(docx_path, diagnostic.table_index)
             logger.info(
                 "marker_split_applied table_index=%s split_before_row=%s first_rows=%s second_rows=%s appendix=%s continuation=%s",
                 diagnostic.table_index,
@@ -1986,6 +2076,7 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
             _format_duplicate_rows(diagnostic.duplicate_rows),
             _format_page_spans(diagnostic.page_spans),
         )
+        _record_marker_skip(skip_reason)
 
     return applied_count
 
@@ -2003,8 +2094,20 @@ def apply_rendered_table_continuation(
     in a later patch.
     """
     docx_path = Path(docx_path)
+    marker_stats = _MarkerSplitStats()
+    marker_started_at = time.monotonic()
+    marker_summary_logged = False
+
+    def emit_marker_summary() -> None:
+        nonlocal marker_summary_logged
+        if marker_summary_logged:
+            return
+        marker_summary_logged = True
+        _log_phase3_marker_summary(docx_path, marker_stats, marker_started_at)
+
     doc = Document(str(docx_path))
     if not doc.tables:
+        emit_marker_summary()
         logger.info("rendered_table_continuation_enter tables=0 pdf_lines=0 max_passes=%s", max_passes)
         logger.info("rendered_final_decision action=rendered_no_action reason=no_tables")
         return 0
@@ -2017,22 +2120,35 @@ def apply_rendered_table_continuation(
 
     if _marker_split_enabled():
         apply_marker_split = _marker_split_apply_enabled()
-        if apply_marker_split:
-            marker_total = _run_marker_split_detection_pass(
-                docx_path,
-                apply_split=True,
-            )
-            if marker_total:
-                logger.info(
-                    "rendered_final_decision action=marker_split_applied count=%s",
-                    marker_total,
-                )
-                return marker_total
-        else:
-            _run_marker_split_detection_pass(
-                docx_path,
-                apply_split=False,
-            )
+        global _ACTIVE_MARKER_STATS
+        previous_marker_stats = _ACTIVE_MARKER_STATS
+        _ACTIVE_MARKER_STATS = marker_stats
+        try:
+            try:
+                if apply_marker_split:
+                    marker_total = _run_marker_split_detection_pass(
+                        docx_path,
+                        apply_split=True,
+                    )
+                    if marker_total:
+                        emit_marker_summary()
+                        logger.info(
+                            "rendered_final_decision action=marker_split_applied count=%s",
+                            marker_total,
+                        )
+                        return marker_total
+                else:
+                    _run_marker_split_detection_pass(
+                        docx_path,
+                        apply_split=False,
+                    )
+            except Exception:
+                emit_marker_summary()
+                raise
+        finally:
+            _ACTIVE_MARKER_STATS = previous_marker_stats
+
+    emit_marker_summary()
 
     pdf_path: Path | None = None
     try:

@@ -87,6 +87,43 @@ def log_runtime_diagnostics(*, request_id: int | None = None) -> None:
     )
 
 
+def _short_log_message(value: object, *, limit: int = 300) -> str:
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def log_formatting_terminal(
+    *,
+    request_id: int,
+    document_id: int | None,
+    status: str,
+    started_at: float,
+    exc: BaseException | None = None,
+) -> None:
+    elapsed_seconds = time.monotonic() - started_at
+    if exc is None:
+        logger.info(
+            "formatting_terminal request_id=%s document_id=%s status=%s elapsed_seconds=%.3f",
+            request_id,
+            document_id if document_id is not None else "-",
+            status,
+            elapsed_seconds,
+        )
+        return
+
+    logger.info(
+        "formatting_terminal request_id=%s document_id=%s status=%s elapsed_seconds=%.3f exception_type=%s message=%s",
+        request_id,
+        document_id if document_id is not None else "-",
+        status,
+        elapsed_seconds,
+        type(exc).__name__,
+        _short_log_message(exc),
+    )
+
+
 def get_bot_token() -> str:
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -425,6 +462,22 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
     db = SessionLocal()
     output_path: Path | None = None
     input_path: Path | None = None
+    started_at = time.monotonic()
+    terminal_logged = False
+    terminal_document_id: int | None = None
+
+    def emit_terminal(status: str, exc: BaseException | None = None) -> None:
+        nonlocal terminal_logged
+        if terminal_logged:
+            return
+        terminal_logged = True
+        log_formatting_terminal(
+            request_id=request_id,
+            document_id=terminal_document_id,
+            status=status,
+            started_at=started_at,
+            exc=exc,
+        )
 
     try:
         request = (
@@ -434,10 +487,12 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
         )
         if not request:
             logger.warning("request_not_found request_id=%s", request_id)
+            emit_terminal("failure", RuntimeError("Request not found"))
             return False
 
         user = db.query(User).filter(User.id == request.user_id).first()
         document = db.query(Document).filter(Document.id == request.document_id).first()
+        terminal_document_id = request.document_id
 
         if not user:
             fail_request(
@@ -446,6 +501,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 error_text="User not found",
                 silent_fail=bool(request.silent_fail),
             )
+            emit_terminal("failure", RuntimeError("User not found"))
             return False
 
         if not document:
@@ -457,6 +513,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 telegram_id=user.telegram_id,
                 silent_fail=bool(request.silent_fail),
             )
+            emit_terminal("failure", RuntimeError("Document not found"))
             return False
 
         input_path = prepare_worker_input_path(
@@ -474,6 +531,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 telegram_id=user.telegram_id,
                 silent_fail=bool(request.silent_fail),
             )
+            emit_terminal("failure", RuntimeError(f"Input file not found: {input_path}"))
             return False
 
         if request.service_type == "check":
@@ -542,6 +600,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             if input_path and input_path.exists():
                 services.cleanup_temp_files(input_path)
 
+            emit_terminal("success")
             return True
 
         guide_code = services.get_user_selected_guide_code(user)
@@ -625,6 +684,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
         if output_path and output_path.exists():
             services.cleanup_temp_files(output_path)
 
+        emit_terminal("success")
         return True
 
     except TimeoutError as e:
@@ -633,6 +693,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
             request_id,
             FORMAT_TIMEOUT_SECONDS,
         )
+        emit_terminal("timeout", e)
 
         try:
             request = (
@@ -669,6 +730,7 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
 
     except Exception as e:
         logger.exception("process_request_failed request_id=%s", request_id)
+        emit_terminal("failure", e)
 
         try:
             request = (
