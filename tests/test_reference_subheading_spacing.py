@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from guides.coursework_kfu_2025.safe_formatter import (
@@ -22,6 +23,18 @@ from guides.coursework_kfu_2025.safe_formatter import (
 
 def _paragraph_texts(doc: Document) -> list[str]:
     return [p.text for p in doc.paragraphs]
+
+
+def _add_fake_word_numbering(paragraph) -> None:
+    pPr = paragraph._element.get_or_add_pPr()
+    numPr = OxmlElement("w:numPr")
+    ilvl = OxmlElement("w:ilvl")
+    ilvl.set(qn("w:val"), "0")
+    num_id = OxmlElement("w:numId")
+    num_id.set(qn("w:val"), "1")
+    numPr.append(ilvl)
+    numPr.append(num_id)
+    pPr.append(numPr)
 
 
 def test_reference_subheading_spacing() -> tuple[bool, str]:
@@ -179,11 +192,78 @@ def test_numbered_reference_entries_are_not_headings() -> tuple[bool, str]:
     return True, "numbered reference entries stay body text inside references"
 
 
+def test_reference_old_numbering_cleanup() -> tuple[bool, str]:
+    """Product rule: old manual/Word reference numbering is removed before clean numbering."""
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Краткий текст введения.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1) Иванов И. И. Учебное пособие.")
+    doc.add_paragraph("[2] Петров П. П. Научная статья.")
+    doc.add_paragraph("10.Семенов С. С. Источник без пробела после старого номера.")
+    word_numbered = doc.add_paragraph("Сидоров С. С. Монография.")
+    _add_fake_word_numbering(word_numbered)
+    doc.add_paragraph("Ненумерованный источник.")
+    doc.add_paragraph(
+        "Гражданский кодекс Российской Федерации. Часть 1. Статья 10. "
+        "Пределы осуществления гражданских прав."
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "in.docx"
+        output_path = Path(tmp) / "out.docx"
+        doc.save(str(input_path))
+
+        process_document(input_path, output_path)
+        out_doc = Document(str(output_path))
+
+    texts = _paragraph_texts(out_doc)
+    try:
+        refs_idx = texts.index("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    except ValueError:
+        return False, "references heading missing after formatting"
+
+    entries = [text for text in texts[refs_idx + 1:] if text]
+    expected = [
+        "1. Иванов И. И. Учебное пособие.",
+        "2. Петров П. П. Научная статья.",
+        "3. Семенов С. С. Источник без пробела после старого номера.",
+        "4. Сидоров С. С. Монография.",
+        "5. Ненумерованный источник.",
+        (
+            "6. Гражданский кодекс Российской Федерации. Часть 1. Статья 10. "
+            "Пределы осуществления гражданских прав."
+        ),
+    ]
+    actual = entries[:len(expected)]
+    if actual != expected:
+        return False, f"unexpected reference numbering:\nexpected={expected!r}\nactual={actual!r}"
+
+    duplicate_markers = ("1. 1", "1. [", "2. [", "1. 1)", "2. [2]")
+    for entry in actual:
+        if any(marker in entry for marker in duplicate_markers):
+            return False, f"duplicated numbering remained: {entry!r}"
+
+    legal_entry = entries[5]
+    if "Часть 1. Статья 10." not in legal_entry:
+        return False, f"legal/article numbering was corrupted: {legal_entry!r}"
+
+    word_para = next((p for p in out_doc.paragraphs if "Сидоров С. С." in p.text), None)
+    if word_para is None:
+        return False, "Word-numbered reference entry missing"
+    pPr = word_para._element.find(qn("w:pPr"))
+    if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+        return False, "Word automatic numbering remained on reference entry"
+
+    return True, "old reference numbering is stripped before clean sequential numbering"
+
+
 def main() -> int:
     tests = [
         ("reference subheading spacing", test_reference_subheading_spacing),
         ("strict reference subheading detection", test_reference_subheading_detection_is_strict),
         ("numbered reference entries", test_numbered_reference_entries_are_not_headings),
+        ("old reference numbering cleanup", test_reference_old_numbering_cleanup),
     ]
     failed = 0
     for name, fn in tests:

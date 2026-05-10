@@ -2698,6 +2698,15 @@ def split_table_captions_prepass(document, body_start):
             break
 
 
+REFERENCE_LEADING_NUMBER_RE = re.compile(
+    r"^\s*(?:\[\s*\d{1,3}\s*\]\s*|\d{1,3}[\.)](?:\s+|(?=[A-ZА-ЯЁ])))"
+)
+
+
+def strip_leading_reference_number(text: str) -> str:
+    return clean_spaces(REFERENCE_LEADING_NUMBER_RE.sub("", clean_spaces(text), count=1))
+
+
 def convert_reference_numbering_to_plain_text(document, body_start):
     """
     Приводит список источников к плоскому тексту и всегда строит
@@ -2755,9 +2764,8 @@ def convert_reference_numbering_to_plain_text(document, body_start):
         clean = clean_spaces(paragraph.text)
 
         # Снимаем видимый номер в начале строки, если он уже есть:
-        # 1. ...
-        # 12. ...
-        clean = re.sub(r"^\s*\d+\.\s+", "", clean)
+        # 1. ... / 1) ... / [1] ...
+        clean = strip_leading_reference_number(clean)
 
         # Снимаем маркеры/буллеты, если они вдруг приехали из исходника
         clean = re.sub(r"^\s*[•·▪■◆►→\-–—]+\s*", "", clean)
