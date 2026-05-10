@@ -16,6 +16,7 @@ import telegram
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from telegram import Bot
+from telegram.error import TimedOut
 from telegram.request import HTTPXRequest
 
 from db import Base, SessionLocal, engine
@@ -33,7 +34,7 @@ FORMAT_TIMEOUT_SECONDS = 180
 STALE_PROCESSING_SECONDS = 5 * 60
 POLL_INTERVAL_SECONDS = 2
 EMPTY_POLLS_LOG_EVERY = 45
-SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 45
+SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS = 120
 SEND_DOCUMENT_READ_TIMEOUT_SECONDS = 120
 SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS = 30
 SEND_DOCUMENT_POOL_TIMEOUT_SECONDS = 30
@@ -181,6 +182,8 @@ async def send_document(
     filename: str,
     caption: str,
     warnings: list[str] | None = None,
+    request_id: int | None = None,
+    document_id: int | None = None,
 ) -> None:
     """
     Upload the formatted DOCX and, if there are formatter warnings, send them
@@ -205,17 +208,30 @@ async def send_document(
         SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
         SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
     )
-    with open(path, "rb") as f:
-        await bot.send_document(
-            chat_id=chat_id,
-            document=f,
-            filename=filename,
-            caption=caption,
-            write_timeout=SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS,
-            read_timeout=SEND_DOCUMENT_READ_TIMEOUT_SECONDS,
-            connect_timeout=SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
-            pool_timeout=SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
-        )
+    for attempt in (1, 2):
+        try:
+            with open(path, "rb") as f:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    filename=filename,
+                    caption=caption,
+                    write_timeout=SEND_DOCUMENT_WRITE_TIMEOUT_SECONDS,
+                    read_timeout=SEND_DOCUMENT_READ_TIMEOUT_SECONDS,
+                    connect_timeout=SEND_DOCUMENT_CONNECT_TIMEOUT_SECONDS,
+                    pool_timeout=SEND_DOCUMENT_POOL_TIMEOUT_SECONDS,
+                )
+            break
+        except TimedOut:
+            if attempt == 2:
+                raise
+            logger.warning(
+                "send_document_timeout_retry request_id=%s document_id=%s filename=%s attempt=%s max_attempts=2 duplicate_delivery_possible=1",
+                request_id if request_id is not None else "-",
+                document_id if document_id is not None else "-",
+                filename,
+                attempt,
+            )
 
     # Send warnings as a separate message so caption length is never an issue.
     if warnings:
@@ -661,6 +677,8 @@ def process_one_request(request_id: int, bot_token: str) -> bool:
                 output_path.name,
                 caption,
                 warnings=formatting_warnings or None,
+                request_id=request.id,
+                document_id=document.id,
             )
         )
         asyncio.run(
