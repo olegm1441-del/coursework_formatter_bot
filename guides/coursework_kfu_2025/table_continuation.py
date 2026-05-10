@@ -496,6 +496,28 @@ def _row_cell_texts(tr_xml) -> list[str]:
     return vals
 
 
+_NESTED_TABLE_HEADER_PREFIXES = (
+    ("уровень", "формальные органы", "неформальные практики", "основные функции"),
+)
+
+
+def _ordinary_table_has_nested_header_row(doc: Document, table_index: int) -> bool:
+    if table_index < 0 or table_index >= len(doc.tables):
+        return False
+
+    rows = doc.tables[table_index]._tbl.findall(qn("w:tr"))
+    for row_index, row_xml in enumerate(rows):
+        if row_index == 0:
+            continue
+        cells = tuple(text.lower() for text in _row_cell_texts(row_xml) if text)
+        if not cells:
+            continue
+        for prefix in _NESTED_TABLE_HEADER_PREFIXES:
+            if len(cells) >= len(prefix) and cells[: len(prefix)] == prefix:
+                return True
+    return False
+
+
 def _rows_match(row1_xml, row2_xml) -> bool:
     return _row_cell_texts(row1_xml) == _row_cell_texts(row2_xml)
 
@@ -1807,6 +1829,11 @@ def _apply_marker_split_candidate(
         return None, "generated_appendix_continuation"
     if not diagnostic.appendix_table and not diagnostic.has_standard_table_caption:
         return None, "ordinary_without_standard_caption"
+    if (
+        not diagnostic.appendix_table
+        and _ordinary_table_has_nested_header_row(doc, diagnostic.table_index)
+    ):
+        return None, "body_contains_nested_table_header"
 
     split_before_row = _effective_marker_split_before_row(diagnostic, decision)
     if split_before_row is None:

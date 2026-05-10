@@ -3510,6 +3510,112 @@ def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
     return _result(True, "eligible ordinary table is split with continuation paragraph")
 
 
+def test_marker_runtime_apply_skips_nested_ordinary_table_header() -> tuple[bool, str]:
+    """
+    Product rule: ordinary marker split must not split a source XML table that
+    already contains another logical table header inside its body.
+    """
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.1")
+    tbl = doc.add_table(rows=6, cols=4)
+    for cell, text in zip(
+        tbl.rows[0].cells,
+        ["Функция", "KPI", "Метрика (единицы)", "Источник данных"],
+    ):
+        cell.text = text
+    valid_rows = [
+        ["Планирование", "Time-to-Decision", "медиана дней", "протоколы комитетов"],
+        ["Организация", "Уровень делегирования", "доля решений", "матрица RACI"],
+    ]
+    for row, values in zip(tbl.rows[1:3], valid_rows):
+        for cell, text in zip(row.cells, values):
+            cell.text = text
+    for cell, text in zip(
+        tbl.rows[3].cells,
+        ["Уровень", "Формальные органы", "Неформальные практики", "Основные функции"],
+    ):
+        cell.text = text
+    for idx in (4, 5):
+        for col, cell in enumerate(tbl.rows[idx].cells):
+            cell.text = f"nested{idx}c{col}"
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=6,
+        pages_detected=[17, 18],
+        row_pages={0: 17, 1: 17, 2: 17, 3: 18, 4: 18, 5: 18},
+        found_rows=[0, 1, 2, 3, 4, 5],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 17), tm.TablePageSpan(3, 5, 18)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.2.1",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "nested_ordinary_header.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "nested_ordinary_header.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+        before = path.read_bytes()
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        old_logger_info = tc.logger.info
+        log_lines: list[str] = []
+        try:
+            def fake_info(message, *args, **kwargs):
+                log_lines.append(message % args if args else str(message))
+
+            tm.diagnose_all_tables = lambda _path, keep_temp=False: [diagnostic]
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: []
+            tc.logger.info = fake_info
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            tc.logger.info = old_logger_info
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+
+        after = path.read_bytes()
+        out = Document(str(path))
+
+    if n != 0:
+        return _result(False, f"contaminated ordinary table should be skipped, got {n}")
+    if before != after:
+        return _result(False, "contaminated ordinary table skip mutated the document")
+    if len(out.tables) != 1:
+        return _result(False, f"contaminated ordinary table should not be split, got {len(out.tables)} tables")
+    if any(p.text == "Продолжение таблицы 1.2.1" for p in out.paragraphs):
+        return _result(False, "contaminated ordinary table received continuation paragraph")
+    if not any("body_contains_nested_table_header" in line for line in log_lines):
+        return _result(False, "nested header skip reason was not logged")
+    return _result(True, "ordinary table with nested logical header is skipped")
+
+
 def test_marker_runtime_apply_skips_ineligible_tables() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
     import guides.coursework_kfu_2025.table_markers as tm
@@ -4996,6 +5102,7 @@ def run_all() -> None:
         ("M1 | dry-run no mutation", test_marker_runtime_dry_run_only_does_not_mutate_document),
         ("M1 | apply appendix split", test_marker_runtime_apply_split_for_appendix_table),
         ("M1 | apply ordinary split", test_marker_runtime_apply_split_for_ordinary_table),
+        ("M1 | skip nested ordinary header", test_marker_runtime_apply_skips_nested_ordinary_table_header),
         ("M1 | apply ineligible skip", test_marker_runtime_apply_skips_ineligible_tables),
         ("M1 | apply idempotent", test_marker_runtime_apply_is_idempotent_on_second_run),
         ("M1 | apply multiple ordinary splits", test_marker_runtime_apply_processes_multiple_ordinary_tables),
