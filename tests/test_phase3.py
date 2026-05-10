@@ -2494,6 +2494,42 @@ def test_t5_list_formatting() -> tuple[bool, str]:
     return _result(True, "list items converted and indented correctly ✓")
 
 
+def test_table_caption_trailing_period_cleanup() -> tuple[bool, str]:
+    """Table numbers/titles lose one terminal period; body text stays unchanged."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица показывает рост.")
+    doc.add_paragraph("Таблица 1.1.1.")
+    table1 = doc.add_table(rows=1, cols=1)
+    table1.cell(0, 0).text = "Значение"
+    doc.add_paragraph("Таблица 1.1.2. Анализ финансовых результатов.")
+    table2 = doc.add_table(rows=1, cols=1)
+    table2.cell(0, 0).text = "Показатель"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(inp)
+        process_document(inp, out)
+        result = Document(str(out))
+
+    texts = [" ".join(p.text.split()) for p in result.paragraphs if " ".join(p.text.split())]
+    if "Таблица 1.1.1." in texts:
+        return _result(False, "standalone table number kept trailing period")
+    if "Таблица 1.1.1" not in texts:
+        return _result(False, f"standalone table number missing after cleanup: {texts!r}")
+    if "Анализ финансовых результатов." in texts:
+        return _result(False, "table title kept trailing period")
+    if "Анализ финансовых результатов" not in texts:
+        return _result(False, f"table title missing after cleanup: {texts!r}")
+    if "Таблица показывает рост." not in texts:
+        return _result(False, f"ordinary body text changed unexpectedly: {texts!r}")
+
+    return _result(True, "table caption/title terminal period cleanup is scoped")
+
+
 def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
     """
     Figure captions require exactly one blank before the caption, but no blank
@@ -5079,6 +5115,7 @@ def run_all() -> None:
         ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
+        ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
         ("T6 | heading2 late spacing before 1.3", test_heading2_late_spacing_before_13),
         ("T6 | blank before figure block", test_blank_before_figure_block),

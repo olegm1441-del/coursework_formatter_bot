@@ -1853,7 +1853,18 @@ def format_table_caption(paragraph):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
 
 
+def strip_single_terminal_period(text: str) -> str:
+    text = clean_spaces(text)
+    if text.endswith(".") and not text.endswith(".."):
+        return text[:-1]
+    return text
+
+
 def format_table_title(paragraph):
+    text = strip_single_terminal_period(paragraph.text)
+    if text != clean_spaces(paragraph.text):
+        replace_paragraph_text(paragraph, text)
+
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
     remove_paragraph_numbering(paragraph)
