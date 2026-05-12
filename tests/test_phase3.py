@@ -212,6 +212,20 @@ def _section_page_start(section) -> str | None:
     return pg_num_type.get(qn("w:start")) if pg_num_type is not None else None
 
 
+def _toc_tab_stops(paragraph) -> list:
+    p_pr = paragraph._element.pPr
+    if p_pr is None:
+        return []
+    return p_pr.findall(qn("w:tabs"))
+
+
+def _toc_tab_elems(paragraph) -> list:
+    elems = []
+    for tabs in _toc_tab_stops(paragraph):
+        elems.extend(tabs.findall(qn("w:tab")))
+    return elems
+
+
 def _format_synthetic_doc(doc: Document) -> Document:
     from guides.coursework_kfu_2025.safe_formatter import process_document
 
@@ -283,7 +297,7 @@ def test_front_matter_section_breaks_are_bounded() -> tuple[bool, str]:
     position_texts = [text for _, text in positions]
     if len(positions) != 3:
         return _result(False, f"expected 3 paragraph section breaks, got {positions!r}")
-    if position_texts != ["Титульная строка", "ВВЕДЕНИЕ 3", "Текст главы."]:
+    if position_texts != ["Титульная строка", "ВВЕДЕНИЕ\t3", "Текст главы."]:
         return _result(False, f"unexpected section break positions: {positions!r}")
     for idx, paragraph in enumerate(formatted.paragraphs):
         if not (paragraph.text or "").strip():
@@ -333,6 +347,81 @@ def test_front_matter_before_introduction_remains_protected() -> tuple[bool, str
     if "Титульная строка" not in front_matter or "СОДЕРЖАНИЕ" not in front_matter or "ВВЕДЕНИЕ 3" not in front_matter:
         return _result(False, f"front matter changed unexpectedly: {front_matter!r}")
     return _result(True, "front matter before ВВЕДЕНИЕ remains protected")
+
+
+def test_b2_contents_entries_have_stable_tab_leaders() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("Титульная строка.....9")
+    doc.add_paragraph("СОДЕРЖАНИЕ 2")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ")
+    doc.add_paragraph("1.1. Очень длинный пункт содержания с продолжительным названием, которое должно сохранять номер страницы справа\t\t10")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ . . . . . . . . . . 22")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ………25")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ")
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    doc.add_paragraph("Материалы приложения.")
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [p.text for p in formatted.paragraphs]
+
+    if texts[0] != "Титульная строка.....9":
+        return _result(False, f"title page paragraph before contents was mutated: {texts[0]!r}")
+
+    contents_idx = _paragraph_index(formatted, "СОДЕРЖАНИЕ")
+    if contents_idx is None:
+        return _result(False, f"clean СОДЕРЖАНИЕ heading missing: {texts[:10]!r}")
+
+    real_intro_idx = _paragraph_index(formatted, "ВВЕДЕНИЕ")
+    if real_intro_idx is None:
+        return _result(False, "real ВВЕДЕНИЕ paragraph missing")
+
+    expected_entries = [
+        ("ВВЕДЕНИЕ\t3", "ВВЕДЕНИЕ", "3"),
+        ("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ\t10", "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ", "10"),
+        (
+            "1.1. Очень длинный пункт содержания с продолжительным названием, которое должно сохранять номер страницы справа\t10",
+            "1.1. Очень длинный пункт содержания с продолжительным названием, которое должно сохранять номер страницы справа",
+            "10",
+        ),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\t22", "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", "22"),
+        ("ПРИЛОЖЕНИЯ\t25", "ПРИЛОЖЕНИЯ", "25"),
+    ]
+
+    toc_texts = texts[contents_idx + 1:real_intro_idx]
+    if any(text == "" for text in toc_texts):
+        return _result(False, f"blank paragraph remained inside TOC block: {toc_texts!r}")
+    if toc_texts != [entry[0] for entry in expected_entries]:
+        return _result(False, f"unexpected TOC texts:\nexpected={[entry[0] for entry in expected_entries]!r}\nactual={toc_texts!r}")
+
+    for offset, (_, title, page) in enumerate(expected_entries, start=1):
+        paragraph = formatted.paragraphs[contents_idx + offset]
+        text = paragraph.text
+        if text.count("\t") != 1:
+            return _result(False, f"TOC entry has duplicate/missing tab: {text!r}")
+        actual_title, actual_page = text.split("\t")
+        if actual_title != title or actual_page != page:
+            return _result(False, f"TOC entry did not preserve title/page: {text!r}")
+        if re.search(r"\.{2,}|…|·|•", actual_title):
+            return _result(False, f"literal dot leader remained in TOC title: {text!r}")
+
+        tabs_nodes = _toc_tab_stops(paragraph)
+        tab_elems = _toc_tab_elems(paragraph)
+        if len(tabs_nodes) != 1 or len(tab_elems) != 1:
+            return _result(False, f"expected one w:tabs with one w:tab for {text!r}, got {len(tabs_nodes)}/{len(tab_elems)}")
+        tab = tab_elems[0]
+        if tab.get(qn("w:val")) != "right" or tab.get(qn("w:leader")) != "dot":
+            return _result(False, f"TOC tab stop is not right-aligned dot leader: {tab.attrib!r}")
+
+    if any("\t" in text for text in texts[real_intro_idx:]):
+        return _result(False, "TOC normalization touched paragraphs after real ВВЕДЕНИЕ")
+
+    return _result(True, "TOC entries use one tab and one right dot-leader tab stop")
 
 
 
@@ -5522,6 +5611,7 @@ def run_all() -> None:
         ("A1 | appendix numbering stops after first page", test_appendices_first_page_numbered_following_pages_unnumbered),
         ("A1 | appendix continuation unnumbered", test_appendix_continuation_pages_are_unnumbered),
         ("A1 | front matter protected", test_front_matter_before_introduction_remains_protected),
+        ("B2 | contents tab leaders stable", test_b2_contents_entries_have_stable_tab_leaders),
         # Figure/paragraph preservation.
         ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
         ("A  | _para_has_image helper",                test_a_para_has_image_helper),

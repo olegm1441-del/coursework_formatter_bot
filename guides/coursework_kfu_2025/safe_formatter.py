@@ -2890,6 +2890,155 @@ def normalize_toc_line(text: str) -> str:
     return t
 
 
+TOC_ENTRY_PAGE_RE = re.compile(
+    r"^\s*(?P<title>.+?)(?:\t+|[\s\.\u2024\u2025\u2026·•]+)(?P<page>\d{1,4})\s*$"
+)
+
+
+def _contents_heading_text(text: str) -> str | None:
+    t = normalize_toc_line(text).strip().upper().rstrip(".")
+    if "СОДЕРЖАН" in t:
+        return "СОДЕРЖАНИЕ"
+    if "ОГЛАВЛЕН" in t:
+        return "ОГЛАВЛЕНИЕ"
+    return None
+
+
+def _split_toc_entry_text(text: str) -> tuple[str, str] | None:
+    raw = (text or "").replace("\u00A0", " ").replace("\u202F", " ")
+    match = TOC_ENTRY_PAGE_RE.match(raw)
+    if not match:
+        return None
+
+    title = clean_spaces(match.group("title").replace("\t", " "))
+    title = re.sub(r"[\s\.\u2024\u2025\u2026·•]+$", "", title).strip()
+    page = match.group("page")
+    if not title:
+        return None
+    return title, page
+
+
+def _build_toc_chapter_page_map(paragraphs, start_idx: int, end_idx: int) -> dict[str, str]:
+    page_by_chapter: dict[str, str] = {}
+    for paragraph in paragraphs[start_idx:end_idx]:
+        entry = _split_toc_entry_text(paragraph.text)
+        if not entry:
+            continue
+
+        title, page = entry
+        parsed_h1 = parse_heading1(title)
+        if parsed_h1 and parsed_h1["kind"] == "heading1_chapter":
+            page_by_chapter.setdefault(parsed_h1["chapter_num"], page)
+            continue
+
+        parsed_h2 = parse_heading2(title)
+        if parsed_h2:
+            page_by_chapter.setdefault(parsed_h2["chapter_num"], page)
+
+    return page_by_chapter
+
+
+def _infer_toc_chapter_entry_text(text: str, page_by_chapter: dict[str, str]) -> tuple[str, str] | None:
+    title = normalize_toc_line(text)
+    if not title or _split_toc_entry_text(text):
+        return None
+
+    parsed_h1 = parse_heading1(title)
+    if not parsed_h1 or parsed_h1["kind"] != "heading1_chapter":
+        return None
+
+    page = page_by_chapter.get(parsed_h1["chapter_num"])
+    if not page:
+        return None
+
+    return f'{parsed_h1["chapter_num"]}. {parsed_h1["title"]}', page
+
+
+def _clear_paragraph_tab_stops(paragraph) -> None:
+    p_pr = paragraph._element.get_or_add_pPr()
+    for old_tabs in list(p_pr.findall(qn("w:tabs"))):
+        p_pr.remove(old_tabs)
+
+
+def _set_toc_tab_stop(paragraph) -> None:
+    p_pr = paragraph._element.get_or_add_pPr()
+    _clear_paragraph_tab_stops(paragraph)
+
+    tabs = OxmlElement("w:tabs")
+    tab = OxmlElement("w:tab")
+    tab.set(qn("w:val"), "right")
+    tab.set(qn("w:leader"), "dot")
+    tab.set(qn("w:pos"), str(Cm(16).twips))
+    tabs.append(tab)
+    p_pr.append(tabs)
+
+
+def _format_contents_heading(paragraph, text: str) -> None:
+    replace_paragraph_text(paragraph, text)
+    _clear_paragraph_tab_stops(paragraph)
+    paragraph.paragraph_format.page_break_before = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
+
+
+def _format_toc_entry(paragraph, title: str, page: str) -> None:
+    replace_paragraph_text(paragraph, f"{title}\t{page}")
+    _set_toc_tab_stop(paragraph)
+    paragraph.paragraph_format.page_break_before = False
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    paragraph.paragraph_format.left_indent = Cm(0)
+    paragraph.paragraph_format.right_indent = Cm(0.75)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
+
+
+def normalize_contents_layout(document, body_start):
+    if body_start is None or body_start <= 0:
+        return body_start
+
+    paragraphs = document.paragraphs
+    contents_idx = None
+    for idx, paragraph in enumerate(paragraphs[:body_start]):
+        if _contents_heading_text(paragraph.text):
+            contents_idx = idx
+            break
+
+    if contents_idx is None:
+        return body_start
+
+    heading_text = _contents_heading_text(paragraphs[contents_idx].text)
+    if heading_text:
+        _format_contents_heading(paragraphs[contents_idx], heading_text)
+
+    chapter_page_map = _build_toc_chapter_page_map(paragraphs, contents_idx + 1, body_start)
+
+    idx = contents_idx + 1
+    while idx < body_start:
+        paragraphs = document.paragraphs
+        paragraph = paragraphs[idx]
+        text = clean_spaces(paragraph.text)
+
+        if not text:
+            remove_paragraph(paragraph)
+            body_start -= 1
+            continue
+
+        entry = _split_toc_entry_text(paragraph.text)
+        if entry:
+            title, page = entry
+            _format_toc_entry(paragraph, title, page)
+        else:
+            inferred_entry = _infer_toc_chapter_entry_text(paragraph.text, chapter_page_map)
+            if inferred_entry:
+                title, page = inferred_entry
+                _format_toc_entry(paragraph, title, page)
+        idx += 1
+
+    return body_start
+
+
 def build_toc_heading_maps(document, body_start):
     h1_map = {}
     h2_map = {}
@@ -4925,6 +5074,8 @@ def process_document(input_path: Path, output_path: Path):
         doc,
         body_start,
     )
+
+    body_start = normalize_contents_layout(doc, body_start)
 
     normalize_sections(doc)
     ensure_front_matter_layout(doc, body_start)
