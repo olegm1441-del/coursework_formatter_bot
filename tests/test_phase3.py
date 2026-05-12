@@ -102,6 +102,39 @@ def _table_has_page_break_service_paragraph_before(doc: Document, table_index: i
     return False
 
 
+def _paragraph_before_table(doc: Document, table_index: int):
+    target = doc.tables[table_index]._tbl
+    children = list(doc.element.body)
+    for idx, child in enumerate(children):
+        if child is target:
+            if idx == 0 or children[idx - 1].tag != qn("w:p"):
+                return None
+            return children[idx - 1]
+    return None
+
+
+def _paragraph_text(p_xml) -> str:
+    return "".join(t.text or "" for t in p_xml.findall(".//" + qn("w:t"))).strip()
+
+
+def _paragraph_has_page_break_before(p_xml) -> bool:
+    p_pr = p_xml.find(qn("w:pPr"))
+    return p_pr is not None and p_pr.find(qn("w:pageBreakBefore")) is not None
+
+
+def _paragraph_has_keep_next(p_xml) -> bool:
+    p_pr = p_xml.find(qn("w:pPr"))
+    return p_pr is not None and p_pr.find(qn("w:keepNext")) is not None
+
+
+def _paragraph_is_right_aligned(p_xml) -> bool:
+    p_pr = p_xml.find(qn("w:pPr"))
+    if p_pr is None:
+        return False
+    jc = p_pr.find(qn("w:jc"))
+    return jc is not None and jc.get(qn("w:val")) == "right"
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_minimal_doc_with_image() -> Document:
@@ -3039,7 +3072,7 @@ def test_marker_appendix_and_caption_metadata() -> tuple[bool, str]:
     first = doc.add_table(rows=2, cols=1)
     first.rows[0].cells[0].text = "H1"
     first.rows[1].cells[0].text = "A"
-    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Приложение 1")
     doc.add_paragraph("Длинная таблица по приложению")
     second = doc.add_table(rows=2, cols=1)
     second.rows[0].cells[0].text = "H2"
@@ -3081,6 +3114,123 @@ def test_marker_appendix_and_caption_metadata() -> tuple[bool, str]:
         return _result(False, f"unexpected preceding paragraph text: {diagnostics[1].preceding_paragraph_text!r}")
 
     return _result(True, "appendix and caption metadata are detected")
+
+
+def test_appendix_start_labels_are_normalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_appendix_start_labels
+
+    doc = Document()
+    body_text = doc.add_paragraph("Приложение2")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    appendix_2 = doc.add_paragraph("Приложение2")
+    appendix_a_spaced = doc.add_paragraph("Приложение А")
+    appendix_a_glued = doc.add_paragraph("ПриложениеА")
+
+    normalize_appendix_start_labels(doc, body_start=0)
+
+    if body_text.text != "Приложение2":
+        return _result(False, "ordinary body appendix-like text before appendix section was changed")
+    expected = [
+        (appendix_2, "ПРИЛОЖЕНИЕ 2", False),
+        (appendix_a_spaced, "ПРИЛОЖЕНИЕ А", True),
+        (appendix_a_glued, "ПРИЛОЖЕНИЕ А", True),
+    ]
+    for paragraph, text, should_start_new_page in expected:
+        if paragraph.text != text:
+            return _result(False, f"unexpected appendix start label: {paragraph.text!r}")
+        if paragraph.text != paragraph.text.upper():
+            return _result(False, f"appendix start label is not uppercase: {paragraph.text!r}")
+        if not _paragraph_is_right_aligned(paragraph._p):
+            return _result(False, f"appendix start label is not right aligned: {paragraph.text!r}")
+        has_page_break = _paragraph_has_page_break_before(paragraph._p)
+        if should_start_new_page and not has_page_break:
+            return _result(False, f"appendix start label must start a new page: {paragraph.text!r}")
+        if not should_start_new_page and has_page_break:
+            return _result(False, f"first appendix start label must stay with ПРИЛОЖЕНИЯ: {paragraph.text!r}")
+        if not _paragraph_has_keep_next(paragraph._p):
+            return _result(False, f"appendix start label is not kept with content: {paragraph.text!r}")
+    return _result(True, "appendix start labels are normalized and scoped")
+
+
+def test_appendix_local_table_title_before_table_is_centered() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.safe_formatter import normalize_appendix_local_table_titles
+
+    doc = Document()
+    body_title = doc.add_paragraph("Обычный текст перед таблицей")
+    doc.add_table(rows=1, cols=1)
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    appendix_label = doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    appendix_title = doc.add_paragraph("Расчет трудозатрат.")
+    doc.add_table(rows=1, cols=1)
+
+    normalize_appendix_local_table_titles(doc, body_start=0)
+
+    if body_title.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "ordinary body paragraph before table was changed")
+    if appendix_label.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "appendix label was treated as a table title")
+    if appendix_title.text != "Расчет трудозатрат":
+        return _result(False, f"appendix table title period was not stripped: {appendix_title.text!r}")
+    if appendix_title.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "appendix-local table title was not centered")
+    if _paragraph_has_page_break_before(appendix_title._p):
+        return _result(False, "appendix-local table title must not force a page break")
+    if not _paragraph_has_keep_next(appendix_title._p):
+        return _result(False, "appendix-local table title must stay with table")
+    return _result(True, "appendix-local table title before table is centered")
+
+
+def test_empty_paragraph_after_appendix_label_before_table_is_preserved() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_appendix_start_labels,
+        remove_empty_paragraphs_after_appendix_labels,
+    )
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    appendix_label = doc.add_paragraph("Приложение2")
+    doc.add_paragraph("")
+    doc.add_table(rows=1, cols=1)
+
+    normalize_appendix_start_labels(doc, body_start=0)
+    remove_empty_paragraphs_after_appendix_labels(doc, body_start=0)
+
+    children = list(doc.element.body)
+    label_idx = children.index(appendix_label._p)
+    blank_count = 0
+    next_idx = label_idx + 1
+    while next_idx < len(children) and children[next_idx].tag == qn("w:p") and not _paragraph_text(children[next_idx]):
+        blank_count += 1
+        next_idx += 1
+    if blank_count != 1:
+        return _result(False, f"expected exactly one blank paragraph after appendix label, got {blank_count}")
+    if next_idx >= len(children) or children[next_idx].tag != qn("w:tbl"):
+        return _result(False, "appendix table does not follow the single blank paragraph")
+    return _result(True, "exactly one empty paragraph after appendix label is preserved")
+
+
+def test_empty_paragraph_between_appendices_heading_and_first_label_is_removed() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_appendix_start_labels,
+        remove_empty_paragraphs_between_appendices_heading_and_first_label,
+    )
+
+    doc = Document()
+    appendices_heading = doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("")
+    first_label = doc.add_paragraph("ПриложениеА")
+
+    normalize_appendix_start_labels(doc, body_start=0)
+    remove_empty_paragraphs_between_appendices_heading_and_first_label(doc, body_start=0)
+
+    children = list(doc.element.body)
+    heading_idx = children.index(appendices_heading._p)
+    if children[heading_idx + 1] is not first_label._p:
+        return _result(False, "empty paragraph remains between ПРИЛОЖЕНИЯ and first appendix label")
+    if _paragraph_has_page_break_before(first_label._p):
+        return _result(False, "first appendix label after ПРИЛОЖЕНИЯ starts a new page")
+    return _result(True, "empty paragraph before first appendix label is removed")
 
 
 def test_marker_runtime_dry_run_clean_two_page_table_is_eligible() -> tuple[bool, str]:
@@ -3357,7 +3507,7 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_markers as tm
 
     doc = Document()
-    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Приложение 1")
     doc.add_paragraph("Трудозатраты проекта")
     tbl = doc.add_table(rows=6, cols=3)
     tbl.rows[0].cells[0].text = "Исполнитель"
@@ -3433,15 +3583,29 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
         return _result(False, "second appendix table should contain exactly one generated numbered row")
     if [c.text for c in out.tables[1].rows[1].cells] != ["r3c0", "r3c1", "r3c2"]:
         return _result(False, "appendix continuation should move last first-page data row after numbered row")
-    if not _table_has_page_break_service_paragraph_before(out, 1):
-        return _result(False, "appendix continuation table should start on a new page via service page-break paragraph")
+    continuation_label = _paragraph_before_table(out, 1)
+    if continuation_label is None:
+        return _result(False, "appendix continuation label is missing before continuation table")
+    label_text = _paragraph_text(continuation_label)
+    if label_text != "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1":
+        return _result(False, f"unexpected appendix continuation label: {label_text!r}")
+    if label_text != label_text.upper():
+        return _result(False, f"appendix continuation label is not uppercase: {label_text!r}")
+    if not _paragraph_is_right_aligned(continuation_label):
+        return _result(False, "appendix continuation label is not right aligned")
+    if not _paragraph_has_page_break_before(continuation_label):
+        return _result(False, "appendix continuation label should start on a new page")
+    if not _paragraph_has_keep_next(continuation_label):
+        return _result(False, "appendix continuation label should keep with continuation table")
     if not _all_table_rows_have_cant_split(out.tables[0]):
         return _result(False, "first appendix split table rows can split across pages")
     if not _all_table_rows_have_cant_split(out.tables[1]):
         return _result(False, "second appendix split table rows can split across pages")
     if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
-    return _result(True, "eligible appendix table is split with numbered row and no continuation paragraph")
+    if _table_has_page_break_service_paragraph_before(out, 1):
+        return _result(False, "appendix split left a blank service paragraph before continuation table")
+    return _result(True, "eligible appendix table is split with visible appendix continuation label")
 
 
 def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
@@ -4159,6 +4323,8 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
         return _result(False, "ordinary continuation paragraph missing")
     if any("Продолжение таблицы" in (p.text or "") and p.text != "Продолжение таблицы 3.1" for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
+    if "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ А" not in [p.text for p in out.paragraphs]:
+        return _result(False, "appendix continuation label missing for mixed split")
     for table_index in (0, 2):
         if [cell.text for cell in out.tables[table_index].rows[1].cells] != ["1", "2", "3"]:
             return _result(False, f"first part table {table_index} does not have numbered row under header")
@@ -4174,8 +4340,8 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
 
 def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> tuple[bool, str]:
     """
-    Product rule: generated appendix continuation tables do not have a visible
-    continuation paragraph, but must still be excluded from later marker passes.
+    Product rule: generated appendix continuation tables have a visible appendix
+    continuation label, but must still be excluded from later marker passes.
     """
     import guides.coursework_kfu_2025.table_continuation as tc
     import guides.coursework_kfu_2025.table_markers as tm
@@ -4190,6 +4356,10 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
         first_part.rows[i].cells[0].text = f"a{i}c0"
         first_part.rows[i].cells[1].text = f"a{i}c1"
         first_part.rows[i].cells[2].text = f"a{i}c2"
+
+    label = doc.add_paragraph("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ А")
+    label.paragraph_format.page_break_before = True
+    label.paragraph_format.keep_with_next = True
 
     generated_continuation = doc.add_table(rows=3, cols=3)
     generated_continuation.rows[0].cells[0].text = "1"
@@ -4277,6 +4447,10 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
         return _result(False, f"expected 4 tables after original appendix split, got {len(out.tables)}")
     if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
         return _result(False, "appendix split inserted forbidden continuation paragraph")
+    if [p.text for p in out.paragraphs].count("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ А") != 1:
+        return _result(False, "pre-existing appendix continuation label was mutated")
+    if "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ Б" not in [p.text for p in out.paragraphs]:
+        return _result(False, "new appendix continuation label missing")
     if _table_has_row_texts(out.tables[0], ["1", "2", "3"]):
         return _result(False, "pre-existing first appendix fragment should not be mutated")
     if [cell.text for cell in out.tables[2].rows[1].cells] != ["1", "2", "3"]:
@@ -4607,11 +4781,11 @@ def test_split_prototype_numbered_ordinary_split_caption_before_title() -> tuple
     return _result(True, "ordinary split caption before title uses continuation number")
 
 
-def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[bool, str]:
+def test_split_prototype_numbered_appendix_has_continuation_label() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_split_prototype import prototype_split_table_copy
 
     doc = Document()
-    doc.add_paragraph("Приложение А")
+    doc.add_paragraph("Приложение 1")
     doc.add_paragraph("Таблица приложения")
     tbl = doc.add_table(rows=4, cols=3)
     tbl.rows[0].cells[0].text = "Колонка А"
@@ -4636,15 +4810,29 @@ def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[b
         )
         out = Document(str(result.output_docx_path))
 
-    if result.continuation_paragraph_inserted:
-        return _result(False, "appendix numbered split must not insert continuation paragraph")
-    if result.continuation_text is not None:
-        return _result(False, f"appendix continuation text must be None, got {result.continuation_text!r}")
+    if not result.continuation_paragraph_inserted:
+        return _result(False, "appendix numbered split must insert continuation label")
+    if result.continuation_text != "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1":
+        return _result(False, f"unexpected appendix continuation text: {result.continuation_text!r}")
     second_row_texts = [cell.text for cell in out.tables[1].rows[0].cells]
     if second_row_texts != ["1", "2", "3"]:
         return _result(False, f"unexpected appendix continuation row: {second_row_texts!r}")
-    if not _table_has_page_break_service_paragraph_before(out, 1):
-        return _result(False, "appendix continuation table should start on a new page")
+    continuation_label = _paragraph_before_table(out, 1)
+    if continuation_label is None:
+        return _result(False, "appendix continuation label missing before continuation table")
+    label_text = _paragraph_text(continuation_label)
+    if label_text != "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1":
+        return _result(False, f"unexpected appendix continuation label: {label_text!r}")
+    if label_text != label_text.upper():
+        return _result(False, f"appendix continuation label is not uppercase: {label_text!r}")
+    if not _paragraph_is_right_aligned(continuation_label):
+        return _result(False, "appendix continuation label is not right aligned")
+    if not _paragraph_has_page_break_before(continuation_label):
+        return _result(False, "appendix continuation label should start on a new page")
+    if not _paragraph_has_keep_next(continuation_label):
+        return _result(False, "appendix continuation label should keep with continuation table")
+    if _table_has_page_break_service_paragraph_before(out, 1):
+        return _result(False, "appendix split left a blank service paragraph before continuation table")
     if [cell.text for cell in out.tables[0].rows[1].cells] != ["1", "2", "3"]:
         return _result(False, "numbered row missing under first appendix table header")
     if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
@@ -4657,7 +4845,7 @@ def test_split_prototype_numbered_appendix_has_no_continuation_text() -> tuple[b
         return _result(False, "second appendix prototype table rows can split across pages")
     if any("Продолжение таблицы" in (text or "") for text in [p.text for p in out.paragraphs]):
         return _result(False, "appendix numbered split inserted continuation paragraph")
-    return _result(True, "appendix numbered split keeps numbered row without continuation text")
+    return _result(True, "appendix numbered split inserts continuation label and keeps numbered row")
 
 
 def test_split_prototype_numbered_existing_row_reused_without_duplicate() -> tuple[bool, str]:
@@ -5130,6 +5318,10 @@ def run_all() -> None:
         ("M1 | diagnose all tables summary", test_marker_diagnose_all_tables_summary),
         ("M1 | diagnose table error handling", test_marker_diagnose_table_handles_mapping_error),
         ("M1 | appendix/caption metadata", test_marker_appendix_and_caption_metadata),
+        ("M1 | appendix start labels", test_appendix_start_labels_are_normalized),
+        ("M1 | appendix local table titles", test_appendix_local_table_title_before_table_is_centered),
+        ("M1 | appendix label/table spacing", test_empty_paragraph_after_appendix_label_before_table_is_preserved),
+        ("M1 | appendices heading/label spacing", test_empty_paragraph_between_appendices_heading_and_first_label_is_removed),
         ("M1 | dry-run eligible boundary", test_marker_runtime_dry_run_clean_two_page_table_is_eligible),
         ("M1 | dry-run duplicate skip", test_marker_runtime_dry_run_skips_duplicate_rows),
         ("M1 | dry-run missing skip", test_marker_runtime_dry_run_skips_missing_rows_outside_header),
@@ -5156,7 +5348,7 @@ def run_all() -> None:
         ("S1 | no continuation paragraph", test_split_prototype_no_continuation_paragraph_inserted),
         ("S1 | numbered ordinary continuation", test_split_prototype_numbered_ordinary_continuation_row_only),
         ("S1 | numbered ordinary split caption", test_split_prototype_numbered_ordinary_split_caption_before_title),
-        ("S1 | numbered appendix continuation", test_split_prototype_numbered_appendix_has_no_continuation_text),
+        ("S1 | numbered appendix continuation", test_split_prototype_numbered_appendix_has_continuation_label),
         ("S1 | numbered row reused", test_split_prototype_numbered_existing_row_reused_without_duplicate),
         ("S1 | numbered malformed row", test_split_prototype_numbered_malformed_existing_row_fails_safely),
         ("S1 | numbered source note", test_split_prototype_numbered_source_note_after_second_table),

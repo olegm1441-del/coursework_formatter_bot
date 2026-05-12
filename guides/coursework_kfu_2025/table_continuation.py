@@ -454,6 +454,10 @@ def _extract_table_num(text: str) -> str | None:
 
 _CONT_RE = re.compile(r"продолжени", re.IGNORECASE)
 _TBL_WORD_RE = re.compile(r"таблиц", re.IGNORECASE)
+_APPENDIX_CONTINUATION_RE = re.compile(
+    r"^\s*продолжение\s+приложения\s+(?:\d{1,3}|[A-Za-zА-ЯЁ])\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_student_continuation(text: str) -> bool:
@@ -753,6 +757,10 @@ def _is_blank_service_paragraph(p_xml) -> bool:
     return pPr is None or pPr.find(qn("w:sectPr")) is None
 
 
+def _is_appendix_continuation_paragraph(p_xml) -> bool:
+    return bool(_APPENDIX_CONTINUATION_RE.match(_paragraph_text_from_xml(p_xml)))
+
+
 def _first_row_is_generated_numbered_row(tbl_xml) -> bool:
     col_count = _table_col_count(tbl_xml)
     if col_count <= 0:
@@ -776,9 +784,10 @@ def _previous_significant_body_child_is_table(doc: Document, tbl_xml) -> bool:
     idx = table_body_index - 1
     while idx >= 0:
         child = children[idx]
-        if child.tag == qn("w:p") and _is_blank_service_paragraph(child):
-            idx -= 1
-            continue
+        if child.tag == qn("w:p"):
+            if _is_blank_service_paragraph(child) or _is_appendix_continuation_paragraph(child):
+                idx -= 1
+                continue
         return child.tag == qn("w:tbl")
     return False
 

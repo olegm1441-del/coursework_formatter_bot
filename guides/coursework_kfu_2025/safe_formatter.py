@@ -1539,7 +1539,215 @@ def is_references_heading_text(text: str) -> bool:
 def is_appendix_heading_text(text: str) -> bool:
     low = clean_spaces(text).lower()
     return low in {"приложение", "приложения"}
-            
+
+
+APPENDIX_START_LABEL_RE = re.compile(
+    r"^\s*приложение\s*(?P<num>\d{1,3}|[A-Za-zА-ЯЁ])\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_appendix_start_label_text(text: str) -> str | None:
+    match = APPENDIX_START_LABEL_RE.match(clean_spaces(text))
+    if not match:
+        return None
+    return f"ПРИЛОЖЕНИЕ {match.group('num').upper()}"
+
+
+def is_appendix_start_label_like(text: str) -> bool:
+    t = clean_spaces(text)
+    return t.lower() != "приложения" and bool(re.match(r"^\s*приложение\s*\S+\s*$", t, re.IGNORECASE))
+
+
+def _clear_page_break_before(paragraph):
+    paragraph.paragraph_format.page_break_before = False
+    p_pr = paragraph._element.find(qn("w:pPr"))
+    if p_pr is None:
+        return
+    for page_break in list(p_pr.findall(qn("w:pageBreakBefore"))):
+        p_pr.remove(page_break)
+
+
+def format_appendix_start_label(paragraph, *, start_new_page=True):
+    normalized = normalize_appendix_start_label_text(paragraph.text)
+    if normalized and clean_spaces(paragraph.text) != normalized:
+        replace_paragraph_text(paragraph, normalized)
+
+    remove_page_break_artifacts_from_paragraph(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = LINE_SPACING_BODY
+    if start_new_page:
+        paragraph.paragraph_format.page_break_before = True
+    else:
+        _clear_page_break_before(paragraph)
+    paragraph.paragraph_format.keep_with_next = True
+
+    p_pr = paragraph._element.get_or_add_pPr()
+    for old_ind in list(p_pr.findall(qn("w:ind"))):
+        p_pr.remove(old_ind)
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:right"), "0")
+    ind.set(qn("w:firstLine"), "0")
+    p_pr.append(ind)
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _paragraph_text_from_xml(p_xml) -> str:
+    return clean_spaces("".join(t.text or "" for t in p_xml.findall(".//" + qn("w:t"))))
+
+
+def _is_empty_paragraph_xml(p_xml) -> bool:
+    return not _paragraph_text_from_xml(p_xml) and not p_xml.findall(".//" + qn("w:drawing"))
+
+
+def _paragraph_lookup(document):
+    return {paragraph._p: (idx, paragraph) for idx, paragraph in enumerate(document.paragraphs)}
+
+
+def normalize_appendix_start_labels(document, body_start):
+    in_appendices = False
+    first_appendix_label_seen = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx < body_start:
+            continue
+        text = clean_spaces(paragraph.text)
+        if not text:
+            continue
+        if text.lower() == "приложения":
+            in_appendices = True
+            continue
+        if in_appendices and normalize_appendix_start_label_text(text):
+            format_appendix_start_label(
+                paragraph,
+                start_new_page=first_appendix_label_seen,
+            )
+            first_appendix_label_seen = True
+
+
+def normalize_appendix_local_table_titles(document, body_start):
+    paragraph_lookup = _paragraph_lookup(document)
+    children = list(document.element.body)
+    in_appendices = False
+
+    for idx, child in enumerate(children):
+        if child.tag == qn("w:p"):
+            paragraph_info = paragraph_lookup.get(child)
+            if paragraph_info is None:
+                continue
+            paragraph_idx, _paragraph = paragraph_info
+            if paragraph_idx < body_start:
+                continue
+            if _paragraph_text_from_xml(child).lower() == "приложения":
+                in_appendices = True
+            continue
+
+        if child.tag != qn("w:tbl") or not in_appendices:
+            continue
+
+        for prev in reversed(children[:idx]):
+            if prev.tag != qn("w:p"):
+                continue
+            if _is_empty_paragraph_xml(prev):
+                continue
+
+            paragraph_info = paragraph_lookup.get(prev)
+            if paragraph_info is None:
+                break
+            paragraph_idx, paragraph = paragraph_info
+            if paragraph_idx < body_start:
+                break
+
+            text = _paragraph_text_from_xml(prev)
+            if (
+                text.lower() == "приложения"
+                or is_appendix_start_label_like(text)
+                or TABLE_NUM_RE.match(text)
+                or is_table_continuation_text(text)
+                or FIG_RE.match(text)
+                or re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", text, re.IGNORECASE)
+            ):
+                break
+
+            format_table_title(paragraph)
+            _clear_page_break_before(paragraph)
+            paragraph.paragraph_format.keep_with_next = True
+            break
+
+
+def remove_empty_paragraphs_between_appendices_heading_and_first_label(document, body_start):
+    paragraph_lookup = _paragraph_lookup(document)
+    children = list(document.element.body)
+
+    for idx, child in enumerate(children):
+        if child.tag != qn("w:p"):
+            continue
+
+        paragraph_info = paragraph_lookup.get(child)
+        if paragraph_info is None:
+            continue
+        paragraph_idx, _paragraph = paragraph_info
+        if paragraph_idx < body_start:
+            continue
+        if _paragraph_text_from_xml(child).lower() != "приложения":
+            continue
+
+        blanks = []
+        next_idx = idx + 1
+        while next_idx < len(children) and children[next_idx].tag == qn("w:p") and _is_empty_paragraph_xml(children[next_idx]):
+            blanks.append(children[next_idx])
+            next_idx += 1
+
+        if (
+            blanks
+            and next_idx < len(children)
+            and children[next_idx].tag == qn("w:p")
+            and is_appendix_start_label_like(_paragraph_text_from_xml(children[next_idx]))
+        ):
+            body = document.element.body
+            for blank in blanks:
+                body.remove(blank)
+        return
+
+
+def remove_empty_paragraphs_after_appendix_labels(document, body_start):
+    paragraph_lookup = _paragraph_lookup(document)
+    children = list(document.element.body)
+    in_appendices = False
+
+    for idx, child in enumerate(children):
+        if child.tag != qn("w:p"):
+            continue
+
+        paragraph_info = paragraph_lookup.get(child)
+        if paragraph_info is None:
+            continue
+        paragraph_idx, _paragraph = paragraph_info
+        if paragraph_idx < body_start:
+            continue
+
+        text = _paragraph_text_from_xml(child)
+        if text.lower() == "приложения":
+            in_appendices = True
+            continue
+        if not in_appendices or not is_appendix_start_label_like(text):
+            continue
+
+        next_idx = idx + 1
+        if next_idx < len(children) and children[next_idx].tag == qn("w:p") and _is_empty_paragraph_xml(children[next_idx]):
+            continue
+
+        insert_paragraph_after(_paragraph, "")
+
+
 def format_empty_paragraphs_in_body(document, body_start):
     for idx, paragraph in enumerate(document.paragraphs):
         if idx < body_start:
@@ -4552,6 +4760,11 @@ def process_document(input_path: Path, output_path: Path):
         doc,
         body_start,
     )
+
+    normalize_appendix_start_labels(doc, body_start)
+    remove_empty_paragraphs_between_appendices_heading_and_first_label(doc, body_start)
+    normalize_appendix_local_table_titles(doc, body_start)
+    remove_empty_paragraphs_after_appendix_labels(doc, body_start)
 
     clear_heading_style_numbering(doc)
 

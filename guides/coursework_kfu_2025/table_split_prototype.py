@@ -19,7 +19,12 @@ _STANDARD_TABLE_NUMBER_RE = re.compile(
     r"^\s*(?:таблица|table)\s+(?P<num>\d+(?:\.\d+){0,2})\.?\s*(?:[-—–].*)?$",
     re.IGNORECASE,
 )
+_APPENDIX_HEADING_RE = re.compile(
+    r"^\s*приложение\s*(?P<num>\d{1,3}|[A-Za-zА-ЯЁ])\s*$",
+    re.IGNORECASE,
+)
 _CAPTION_LOOKBACK_LIMIT = 3
+_APPENDIX_LOOKBACK_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,23 @@ def _find_preceding_standard_table_number(children: list, table_body_index: int)
         if table_number is not None:
             return table_number
         if seen >= _CAPTION_LOOKBACK_LIMIT:
+            break
+    return None
+
+
+def _find_preceding_appendix_number(children: list, table_body_index: int) -> str | None:
+    seen = 0
+    for child in reversed(children[:table_body_index]):
+        if _local_name(child) != "p":
+            break
+        text = _paragraph_text_from_elem(child)
+        if not text:
+            continue
+        seen += 1
+        match = _APPENDIX_HEADING_RE.match(text)
+        if match:
+            return match.group("num").upper()
+        if seen >= _APPENDIX_LOOKBACK_LIMIT:
             break
     return None
 
@@ -300,12 +322,42 @@ def _build_plain_paragraph(text: str):
     return p
 
 
-def _build_page_break_paragraph():
+def _build_appendix_continuation_paragraph(text: str):
     p = OxmlElement("w:p")
     p_pr = OxmlElement("w:pPr")
+    p.append(p_pr)
+
     page_break = OxmlElement("w:pageBreakBefore")
     p_pr.append(page_break)
-    p.append(p_pr)
+
+    keep_next = OxmlElement("w:keepNext")
+    p_pr.append(keep_next)
+
+    jc = OxmlElement("w:jc")
+    jc.set(qn("w:val"), "right")
+    p_pr.append(jc)
+
+    r = OxmlElement("w:r")
+    p.append(r)
+    r_pr = OxmlElement("w:rPr")
+    r.append(r_pr)
+
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), "Times New Roman")
+    fonts.set(qn("w:hAnsi"), "Times New Roman")
+    fonts.set(qn("w:cs"), "Times New Roman")
+    r_pr.append(fonts)
+
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), "28")
+    r_pr.append(sz)
+    sz_cs = OxmlElement("w:szCs")
+    sz_cs.set(qn("w:val"), "28")
+    r_pr.append(sz_cs)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
     return p
 
 
@@ -348,6 +400,11 @@ def apply_numbered_split_to_document(
     source_note_before = _find_following_source_note(children_before, table_body_index)
     preceding_paragraph_text = _find_preceding_nonempty_paragraph_text(children_before, table_body_index)
     preceding_table_number = _find_preceding_standard_table_number(children_before, table_body_index)
+    preceding_appendix_number = (
+        _find_preceding_appendix_number(children_before, table_body_index)
+        if appendix_table
+        else None
+    )
 
     tbl_xml = table._tbl
     second_tbl = deepcopy(tbl_xml)
@@ -382,6 +439,11 @@ def apply_numbered_split_to_document(
                 raise ValueError("ordinary numbered split requires a standard table caption")
             continuation_text = f"Продолжение таблицы {preceding_table_number}"
             continuation_inserted = True
+        else:
+            if preceding_appendix_number is None:
+                raise ValueError("appendix numbered split requires an appendix heading")
+            continuation_text = f"ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ {preceding_appendix_number}"
+            continuation_inserted = True
 
     tail_rows_xml = [deepcopy(r) for r in rows_xml[split_before_row:]]
     if not tail_rows_xml:
@@ -409,15 +471,17 @@ def apply_numbered_split_to_document(
     _ensure_table_rows_cant_split(tbl_xml)
     _ensure_table_rows_cant_split(second_tbl)
 
-    if continuation_inserted and continuation_text is not None:
+    if appendix_table and continuation_text is not None:
+        continuation_p = _build_appendix_continuation_paragraph(continuation_text)
+        tbl_xml.addnext(continuation_p)
+        continuation_p.addnext(second_tbl)
+    elif continuation_inserted and continuation_text is not None:
         builder = continuation_paragraph_builder or _build_plain_paragraph
         continuation_p = builder(continuation_text)
         tbl_xml.addnext(continuation_p)
         continuation_p.addnext(second_tbl)
     elif appendix_table:
-        page_break_p = _build_page_break_paragraph()
-        tbl_xml.addnext(page_break_p)
-        page_break_p.addnext(second_tbl)
+        raise ValueError("appendix split requires an appendix continuation label")
     else:
         tbl_xml.addnext(second_tbl)
 
