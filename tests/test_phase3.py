@@ -181,6 +181,160 @@ def _section_break_positions(doc: Document) -> list[tuple[int, str]]:
     return positions
 
 
+def _section_index_for_paragraph(doc: Document, paragraph_index: int) -> int:
+    section_index = 0
+    for idx, paragraph in enumerate(doc.paragraphs):
+        if idx >= paragraph_index:
+            break
+        p_pr = paragraph._element.pPr
+        if p_pr is not None and p_pr.find(qn("w:sectPr")) is not None:
+            section_index += 1
+    return section_index
+
+
+def _paragraph_index(doc: Document, text: str) -> int | None:
+    for idx, paragraph in enumerate(doc.paragraphs):
+        if " ".join((paragraph.text or "").split()) == text:
+            return idx
+    return None
+
+
+def _footer_has_page_field(footer) -> bool:
+    return any((instr.text or "").strip() == "PAGE" for instr in footer._element.findall(".//" + qn("w:instrText")))
+
+
+def _footer_has_visible_text(footer) -> bool:
+    return bool("".join(t.text or "" for t in footer._element.findall(".//" + qn("w:t"))).strip())
+
+
+def _section_page_start(section) -> str | None:
+    pg_num_type = section._sectPr.find(qn("w:pgNumType"))
+    return pg_num_type.get(qn("w:start")) if pg_num_type is not None else None
+
+
+def _format_synthetic_doc(doc: Document) -> Document:
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(inp)
+        process_document(inp, out)
+        return Document(str(out))
+
+
+def _make_front_matter_doc(kind: str, *, with_appendices=False) -> Document:
+    doc = Document()
+    if kind == "title_contents_intro":
+        doc.add_paragraph("Титульная строка")
+        doc.add_paragraph("СОДЕРЖАНИЕ")
+        doc.add_paragraph("ВВЕДЕНИЕ 3")
+    elif kind == "title_intro":
+        doc.add_paragraph("Титульная строка")
+    elif kind == "intro_only":
+        pass
+    else:
+        raise ValueError(kind)
+
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ")
+    doc.add_paragraph("Текст главы.")
+    if with_appendices:
+        doc.add_paragraph("ПРИЛОЖЕНИЯ")
+        doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+        doc.add_paragraph("Материалы приложения.")
+        doc.add_paragraph("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1")
+        doc.add_paragraph("Продолжение материалов.")
+    return doc
+
+
+def _assert_intro_numbering_starts_at_three(kind: str) -> tuple[bool, str]:
+    formatted = _format_synthetic_doc(_make_front_matter_doc(kind))
+    intro_idx = _paragraph_index(formatted, "ВВЕДЕНИЕ")
+    if intro_idx is None:
+        return _result(False, "ВВЕДЕНИЕ not found after formatting")
+
+    intro_section = formatted.sections[_section_index_for_paragraph(formatted, intro_idx)]
+    if _section_page_start(intro_section) != "3":
+        return _result(False, f"intro section page start is {_section_page_start(intro_section)!r}, expected '3'")
+    if not _footer_has_page_field(intro_section.footer):
+        return _result(False, "intro section footer has no PAGE field")
+    if intro_section.footer.is_linked_to_previous:
+        return _result(False, "intro section footer is linked to previous")
+    return _result(True, f"{kind} introduction starts at page 3")
+
+
+def test_front_matter_intro_only_starts_numbering_at_three() -> tuple[bool, str]:
+    return _assert_intro_numbering_starts_at_three("intro_only")
+
+
+def test_front_matter_title_intro_starts_numbering_at_three() -> tuple[bool, str]:
+    return _assert_intro_numbering_starts_at_three("title_intro")
+
+
+def test_front_matter_title_contents_intro_starts_numbering_at_three() -> tuple[bool, str]:
+    return _assert_intro_numbering_starts_at_three("title_contents_intro")
+
+
+def test_front_matter_section_breaks_are_bounded() -> tuple[bool, str]:
+    formatted = _format_synthetic_doc(_make_front_matter_doc("title_contents_intro", with_appendices=True))
+    positions = _section_break_positions(formatted)
+    position_texts = [text for _, text in positions]
+    if len(positions) != 3:
+        return _result(False, f"expected 3 paragraph section breaks, got {positions!r}")
+    if position_texts != ["Титульная строка", "ВВЕДЕНИЕ 3", "Текст главы."]:
+        return _result(False, f"unexpected section break positions: {positions!r}")
+    for idx, paragraph in enumerate(formatted.paragraphs):
+        if not (paragraph.text or "").strip():
+            p_pr = paragraph._element.pPr
+            if p_pr is not None and p_pr.find(qn("w:sectPr")) is not None:
+                return _result(False, "front matter numbering generated a blank section-break paragraph")
+            if idx + 1 < len(formatted.paragraphs) and not (formatted.paragraphs[idx + 1].text or "").strip():
+                return _result(False, "front matter numbering generated consecutive blank paragraphs")
+    return _result(True, "front matter section breaks are bounded")
+
+
+def test_appendices_first_page_numbered_following_pages_unnumbered() -> tuple[bool, str]:
+    formatted = _format_synthetic_doc(_make_front_matter_doc("title_contents_intro", with_appendices=True))
+    appendices_idx = _paragraph_index(formatted, "ПРИЛОЖЕНИЯ")
+    if appendices_idx is None:
+        return _result(False, "ПРИЛОЖЕНИЯ not found after formatting")
+
+    appendix_section = formatted.sections[_section_index_for_paragraph(formatted, appendices_idx)]
+    if not appendix_section.different_first_page_header_footer:
+        return _result(False, "appendix section does not use first-page footer")
+    if not _footer_has_page_field(appendix_section.first_page_footer):
+        return _result(False, "ПРИЛОЖЕНИЯ page footer has no PAGE field")
+    if _footer_has_page_field(appendix_section.footer) or _footer_has_visible_text(appendix_section.footer):
+        return _result(False, "following appendix pages have visible page numbering")
+    if appendix_section.first_page_footer.is_linked_to_previous or appendix_section.footer.is_linked_to_previous:
+        return _result(False, "appendix footers are linked to previous")
+    return _result(True, "appendix first page is numbered and following pages are unnumbered")
+
+
+def test_appendix_continuation_pages_are_unnumbered() -> tuple[bool, str]:
+    formatted = _format_synthetic_doc(_make_front_matter_doc("title_contents_intro", with_appendices=True))
+    continuation_idx = _paragraph_index(formatted, "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1")
+    if continuation_idx is None:
+        return _result(False, "appendix continuation label not found after formatting")
+
+    continuation_section = formatted.sections[_section_index_for_paragraph(formatted, continuation_idx)]
+    if _footer_has_page_field(continuation_section.footer) or _footer_has_visible_text(continuation_section.footer):
+        return _result(False, "appendix continuation pages have visible page numbering")
+    return _result(True, "appendix continuation pages are unnumbered")
+
+
+def test_front_matter_before_introduction_remains_protected() -> tuple[bool, str]:
+    formatted = _format_synthetic_doc(_make_front_matter_doc("title_contents_intro"))
+    texts = [" ".join((p.text or "").split()) for p in formatted.paragraphs]
+    intro_idx = texts.index("ВВЕДЕНИЕ")
+    front_matter = texts[:intro_idx]
+    if "Титульная строка" not in front_matter or "СОДЕРЖАНИЕ" not in front_matter or "ВВЕДЕНИЕ 3" not in front_matter:
+        return _result(False, f"front matter changed unexpectedly: {front_matter!r}")
+    return _result(True, "front matter before ВВЕДЕНИЕ remains protected")
+
+
 
 
 # ── Task A — figure deletion ──────────────────────────────────────────────────
@@ -5360,6 +5514,14 @@ def run_all() -> None:
     # Real asset formatting is useful as a smoke check, but it is slower and
     # can preserve broken historical output; keep it opt-in below.
     tests = [
+        # Front matter and page numbering robustness.
+        ("A1 | intro-only starts at page 3", test_front_matter_intro_only_starts_numbering_at_three),
+        ("A1 | title+intro starts at page 3", test_front_matter_title_intro_starts_numbering_at_three),
+        ("A1 | title+contents+intro starts at page 3", test_front_matter_title_contents_intro_starts_numbering_at_three),
+        ("A1 | section breaks bounded", test_front_matter_section_breaks_are_bounded),
+        ("A1 | appendix numbering stops after first page", test_appendices_first_page_numbered_following_pages_unnumbered),
+        ("A1 | appendix continuation unnumbered", test_appendix_continuation_pages_are_unnumbered),
+        ("A1 | front matter protected", test_front_matter_before_introduction_remains_protected),
         # Figure/paragraph preservation.
         ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
         ("A  | _para_has_image helper",                test_a_para_has_image_helper),

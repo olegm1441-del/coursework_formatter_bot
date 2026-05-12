@@ -4131,6 +4131,32 @@ def ensure_front_matter_layout(document, body_start):
         # титул -> введение
         _append_next_page_section_break_after(paragraphs[body_start - 1], body_sectpr)
 
+
+def ensure_appendices_section_layout(document, body_start):
+    if body_start is None:
+        return
+
+    paragraphs = document.paragraphs
+    body = document._body._element
+    body_sectpr = body.sectPr
+    if body_sectpr is None:
+        return
+
+    appendices_idx = None
+    for idx, paragraph in enumerate(paragraphs):
+        if idx < body_start:
+            continue
+        if clean_spaces(paragraph.text).lower() == "приложения":
+            appendices_idx = idx
+            break
+
+    if appendices_idx is None or appendices_idx <= 0:
+        return
+
+    appendices_paragraph = paragraphs[appendices_idx]
+    appendices_paragraph.paragraph_format.page_break_before = False
+    _append_next_page_section_break_after(paragraphs[appendices_idx - 1], body_sectpr)
+
 def remove_all_italic(doc):
     """
     Убирает курсив, highlight, цвет текста и XML-заливку из всего документа.
@@ -4783,6 +4809,7 @@ def process_document(input_path: Path, output_path: Path):
     normalize_sections(doc)
     ensure_front_matter_layout(doc, body_start)
     apply_page_breaks(doc, body_start)
+    ensure_appendices_section_layout(doc, body_start)
     apply_page_numbering_policy(doc)
 
     # И ещё раз дочищаем цвет / highlight в самом конце

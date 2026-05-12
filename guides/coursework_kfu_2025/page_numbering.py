@@ -12,6 +12,14 @@ def _is_contents_heading(text: str) -> bool:
     return ("СОДЕРЖАН" in t) or ("ОГЛАВЛЕН" in t)
 
 
+def _is_intro_heading(text: str) -> bool:
+    return (text or "").strip().upper().rstrip(".") == "ВВЕДЕНИЕ"
+
+
+def _is_appendices_heading(text: str) -> bool:
+    return (text or "").strip().upper().rstrip(".") == "ПРИЛОЖЕНИЯ"
+
+
 def _clear_xml_children(el):
     for child in list(el):
         el.remove(child)
@@ -197,6 +205,42 @@ def _number_section(section, start_value=None):
         pass
 
 
+def _appendix_section(section):
+    _reset_section_footer_state(section)
+
+    p1 = _get_single_footer_paragraph(section.first_page_footer)
+    _add_page_field_to_paragraph(p1)
+
+    p2 = _get_single_footer_paragraph(section.footer)
+    _clear_paragraph(p2)
+
+    try:
+        p3 = _get_single_footer_paragraph(section.even_page_footer)
+        _clear_paragraph(p3)
+    except Exception:
+        pass
+
+    _remove_pg_num_type(section)
+
+
+def _paragraph_section_index(document, paragraph_index):
+    section_index = 0
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx >= paragraph_index:
+            break
+        p_pr = paragraph._element.pPr
+        if p_pr is not None and p_pr.find(qn("w:sectPr")) is not None:
+            section_index += 1
+    return section_index
+
+
+def _find_paragraph_index(document, predicate):
+    for idx, paragraph in enumerate(document.paragraphs):
+        if predicate(paragraph.text):
+            return idx
+    return None
+
+
 def apply_page_numbering_policy(document):
     sections = list(document.sections)
     if not sections:
@@ -204,21 +248,37 @@ def apply_page_numbering_policy(document):
 
     _reset_all_footer_state(document)
 
-    body_texts = [p.text.strip().upper() for p in document.paragraphs]
-    has_contents = any(_is_contents_heading(t) for t in body_texts)
+    intro_idx = _find_paragraph_index(document, _is_intro_heading)
+    appendices_idx = _find_paragraph_index(document, _is_appendices_heading)
 
-    # секция 1 = титул
-    _title_section(sections[0])
+    if intro_idx is None:
+        _title_section(sections[0])
+        for section in sections[1:]:
+            _blank_section(section)
+        return
 
-    if has_contents:
-        if len(sections) >= 2:
-            _blank_section(sections[1])   # секция 2 = содержание / оглавление
-        if len(sections) >= 3:
-            _number_section(sections[2], start_value=3)  # секция 3 = введение
-        for section in sections[3:]:
-            _number_section(section)
-    else:
-        if len(sections) >= 2:
-            _number_section(sections[1], start_value=2)
-        for section in sections[2:]:
+    intro_section_idx = min(_paragraph_section_index(document, intro_idx), len(sections) - 1)
+    appendices_section_idx = None
+    if appendices_idx is not None:
+        appendices_section_idx = min(_paragraph_section_index(document, appendices_idx), len(sections) - 1)
+
+    for idx, section in enumerate(sections):
+        if idx < intro_section_idx:
+            if idx == 0:
+                _title_section(section)
+            else:
+                _blank_section(section)
+            continue
+
+        if appendices_section_idx is not None and idx == appendices_section_idx:
+            _appendix_section(section)
+            continue
+
+        if appendices_section_idx is not None and idx > appendices_section_idx:
+            _blank_section(section)
+            continue
+
+        if idx == intro_section_idx:
+            _number_section(section, start_value=3)
+        else:
             _number_section(section)
