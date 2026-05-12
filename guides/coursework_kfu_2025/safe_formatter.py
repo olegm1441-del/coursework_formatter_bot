@@ -2132,7 +2132,7 @@ def format_reference_subheading(paragraph):
 
 def format_figure_caption(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
@@ -3651,6 +3651,43 @@ def remove_empty_between_figure_caption_and_source(document, body_start):
 
     return changed
 
+
+def reorder_figure_source_before_caption(document, body_start):
+    paragraphs = document.paragraphs
+    in_references = False
+
+    for idx, paragraph in enumerate(paragraphs):
+        if idx < body_start:
+            continue
+
+        text = clean_spaces(paragraph.text)
+
+        if is_references_heading_text(text):
+            in_references = True
+            continue
+
+        if in_references and is_appendix_heading_text(text):
+            in_references = False
+
+        if in_references or not FIG_RE.match(text):
+            continue
+
+        if idx + 1 >= len(paragraphs):
+            continue
+
+        source_paragraph = paragraphs[idx + 1]
+        source_text = clean_spaces(source_paragraph.text)
+        if not FIG_SERVICE_LINE_RE.match(source_text):
+            continue
+
+        paragraph._p.addprevious(source_paragraph._p)
+        format_source_line(source_paragraph)
+        format_figure_caption(paragraph)
+        return True
+
+    return False
+
+
 def ensure_empty_between_heading1_and_heading2(document, body_start):
     changed = True
     while changed:
@@ -4547,6 +4584,13 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "ensure_empty_before_table_caption",
         ensure_empty_before_table_caption,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "reorder_figure_source_before_caption",
+        reorder_figure_source_before_caption,
         doc,
         body_start,
     )

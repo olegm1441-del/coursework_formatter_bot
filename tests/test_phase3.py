@@ -2608,6 +2608,120 @@ def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
     return _result(True, "figure spacing and blank font are correct")
 
 
+def test_figure_source_after_caption_is_moved_before_caption() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
+
+    doc = Document()
+    caption = doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+    source = doc.add_paragraph("Источник: составлено автором.")
+
+    changed = reorder_figure_source_before_caption(doc, 0)
+
+    texts = [p.text for p in doc.paragraphs]
+    if texts != ["Источник: составлено автором.", "Рис. 1.2.1. Схема процесса"]:
+        return _result(False, f"wrong figure source/caption order: {texts!r}")
+    if doc.paragraphs[0]._p is not source._p or doc.paragraphs[1]._p is not caption._p:
+        return _result(False, "source/caption paragraphs were duplicated or replaced")
+    if caption.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "figure caption is not centered after move")
+    if not changed:
+        return _result(False, "reorder function did not report a changed document")
+    return _result(True, "figure source after caption is moved before caption")
+
+
+def test_figure_source_before_caption_is_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
+
+    doc = Document()
+    source = doc.add_paragraph("Источник: составлено автором.")
+    caption = doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+
+    changed = reorder_figure_source_before_caption(doc, 0)
+
+    if [p.text for p in doc.paragraphs] != ["Источник: составлено автором.", "Рис. 1.2.1. Схема процесса"]:
+        return _result(False, "already-correct figure source/caption order changed")
+    if doc.paragraphs[0]._p is not source._p or doc.paragraphs[1]._p is not caption._p:
+        return _result(False, "already-correct paragraphs were duplicated or replaced")
+    if changed:
+        return _result(False, "already-correct figure block reported a change")
+    return _result(True, "already-correct figure source/caption order is unchanged")
+
+
+def test_table_source_after_caption_is_not_moved() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.1")
+    doc.add_paragraph("Источник: составлено автором.")
+
+    changed = reorder_figure_source_before_caption(doc, 0)
+
+    if [p.text for p in doc.paragraphs] != ["Таблица 1.2.1", "Источник: составлено автором."]:
+        return _result(False, "table source/caption order was changed")
+    if changed:
+        return _result(False, "table source/caption block reported a change")
+    return _result(True, "table source/caption order is not moved")
+
+
+def test_appendix_figure_source_after_caption_is_moved() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    doc.add_paragraph("Рис. 3.1.1. Схема приложения")
+    doc.add_paragraph("Источник: составлено автором.")
+
+    changed = reorder_figure_source_before_caption(doc, 0)
+
+    texts = [p.text for p in doc.paragraphs]
+    if texts[-2:] != ["Источник: составлено автором.", "Рис. 3.1.1. Схема приложения"]:
+        return _result(False, f"appendix figure order was not fixed: {texts!r}")
+    if not changed:
+        return _result(False, "appendix figure reorder did not report a change")
+    return _result(True, "appendix figure source/caption order is fixed")
+
+
+def test_figure_source_not_duplicated_after_reorder() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
+
+    doc = Document()
+    doc.add_paragraph("Рис. 2.2.1. Динамика показателя")
+    doc.add_paragraph("Источник: данные автора.")
+
+    reorder_figure_source_before_caption(doc, 0)
+    reorder_figure_source_before_caption(doc, 0)
+
+    texts = [p.text for p in doc.paragraphs]
+    if texts.count("Источник: данные автора.") != 1:
+        return _result(False, f"source line duplicated: {texts!r}")
+    if texts.count("Рис. 2.2.1. Динамика показателя") != 1:
+        return _result(False, f"figure caption duplicated: {texts!r}")
+    return _result(True, "figure source/caption paragraphs are not duplicated")
+
+
+def test_bibliography_source_line_is_not_moved() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
+
+    doc = Document()
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("Рис. 1.2.1. Название источника")
+    doc.add_paragraph("Источник: библиографическое описание.")
+
+    changed = reorder_figure_source_before_caption(doc, 0)
+
+    if [p.text for p in doc.paragraphs] != [
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+        "Рис. 1.2.1. Название источника",
+        "Источник: библиографическое описание.",
+    ]:
+        return _result(False, "bibliography source line was moved")
+    if changed:
+        return _result(False, "bibliography source block reported a change")
+    return _result(True, "bibliography source line is not moved")
+
+
 def test_heading2_late_spacing_before_13() -> tuple[bool, str]:
     """Late/final Heading 2 formatting still leaves one blank before 1.3."""
     from guides.coursework_kfu_2025.safe_formatter import is_empty_paragraph, process_document
@@ -5305,6 +5419,12 @@ def run_all() -> None:
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
         ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
+        ("T6 | figure source moved before caption", test_figure_source_after_caption_is_moved_before_caption),
+        ("T6 | correct figure source order unchanged", test_figure_source_before_caption_is_unchanged),
+        ("T6 | table source order unchanged", test_table_source_after_caption_is_not_moved),
+        ("T6 | appendix figure source moved", test_appendix_figure_source_after_caption_is_moved),
+        ("T6 | figure source not duplicated", test_figure_source_not_duplicated_after_reorder),
+        ("T6 | bibliography source unchanged", test_bibliography_source_line_is_not_moved),
         ("T6 | heading2 late spacing before 1.3", test_heading2_late_spacing_before_13),
         ("T6 | blank before figure block", test_blank_before_figure_block),
         # Marker split diagnostics and runtime decisions.
