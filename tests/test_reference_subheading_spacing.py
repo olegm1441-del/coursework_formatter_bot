@@ -13,6 +13,7 @@ from docx.oxml.ns import qn
 
 from guides.coursework_kfu_2025.safe_formatter import (
     canonical_numbered_reference_subheading_text,
+    canonical_reference_block_heading_text,
     canonical_reference_subheading_text,
     cleanup_reference_subheadings_layout,
     ensure_blank_before_reference_subheadings,
@@ -104,6 +105,95 @@ def test_reference_subheading_detection_is_strict() -> tuple[bool, str]:
         return False, "new numbered reference subheading was not recovered"
 
     return True, "reference subheading detection is exact-match only"
+
+
+def test_reference_block_heading_detection_is_flexible() -> tuple[bool, str]:
+    """Product rule: known reference block headings survive minor wording and typo drift."""
+    cases = {
+        "Официальные материалы": "Официальные материалы",
+        "Нормативные правовые акты": "Нормативные правовые акты",
+        "Книги, монографии и диссертации": "Книги, монографии и диссертации",
+        "Книги, монографии, диссертации": "Книги, монографии, диссертации",
+        "Научные статьи": "Научные статьи",
+        "Электронные ресурсы": "Электронные ресурсы",
+        "Учебники и учебные пособия": "Учебники и учебные пособия",
+        "Интернет-ресурсы": "Интернет-ресурсы",
+        "3. Книги, монографии, диссертации": "Книги, монографии, диссертации",
+        "Научные стати": "Научные статьи",
+        "Электроные ресуры": "Электронные ресурсы",
+    }
+    for text, expected in cases.items():
+        actual = canonical_reference_block_heading_text(text)
+        if actual != expected:
+            return False, f"reference block heading not detected: {text!r} -> {actual!r}, expected {expected!r}"
+
+    false_cases = [
+        (
+            "Иванов И. И. Научные статьи как объект библиографического анализа "
+            "// Вестник экономики. — 2024. — № 2. — С. 11–18."
+        ),
+        (
+            "Федеральный закон от 27.07.2006 № 152-ФЗ «О персональных данных» "
+            "// Собрание законодательства Российской Федерации. — 2006. — № 31."
+        ),
+        "ГОСТ Р 7.0.5-2008. Библиографическая ссылка. Общие требования и правила составления.",
+        "Петров П. П. Электронные ресурсы в деятельности предприятия. URL: https://example.com",
+    ]
+    for text in false_cases:
+        actual = canonical_reference_block_heading_text(text)
+        if actual is not None:
+            return False, f"real source entry was promoted to reference block heading: {text!r} -> {actual!r}"
+
+    return True, "reference block heading detection is flexible and conservative"
+
+
+def test_reference_short_centered_bold_heading_stays_unnumbered() -> tuple[bool, str]:
+    """Product rule: short centered/bold reference-like headings are not numbered as sources."""
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Краткий текст введения.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    heading = doc.add_paragraph("Электронные источники")
+    heading.alignment = 1
+    run = heading.runs[0]
+    run.bold = True
+    doc.add_paragraph("Иванов И. И. Электронная коммерция: учебное пособие.")
+    doc.add_paragraph("Научные стати")
+    doc.add_paragraph("2. Петров П. П. Статья о цифровой экономике.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "in.docx"
+        output_path = Path(tmp) / "out.docx"
+        doc.save(str(input_path))
+
+        process_document(input_path, output_path)
+        out_doc = Document(str(output_path))
+
+    texts = _paragraph_texts(out_doc)
+    try:
+        refs_idx = texts.index("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    except ValueError:
+        return False, "references heading missing after formatting"
+
+    nonempty = [text for text in texts[refs_idx + 1:] if text]
+    expected = [
+        "Электронные источники",
+        "1. Иванов И. И. Электронная коммерция: учебное пособие.",
+        "Научные статьи",
+        "2. Петров П. П. Статья о цифровой экономике.",
+    ]
+    actual = nonempty[:len(expected)]
+    if actual != expected:
+        return False, f"unexpected reference flow:\nexpected={expected!r}\nactual={actual!r}"
+
+    for text in ("Электронные источники", "Научные статьи"):
+        paragraph = next((p for p in out_doc.paragraphs if p.text == text), None)
+        if paragraph is None:
+            return False, f"missing reference block heading: {text!r}"
+        if paragraph.alignment != 1:
+            return False, f"reference block heading is not centered: {text!r}"
+
+    return True, "short centered/bold and fuzzy headings remain unnumbered"
 
 
 def test_numbered_reference_entries_are_not_headings() -> tuple[bool, str]:
@@ -262,6 +352,8 @@ def main() -> int:
     tests = [
         ("reference subheading spacing", test_reference_subheading_spacing),
         ("strict reference subheading detection", test_reference_subheading_detection_is_strict),
+        ("flexible reference block heading detection", test_reference_block_heading_detection_is_flexible),
+        ("short centered bold reference heading", test_reference_short_centered_bold_heading_stays_unnumbered),
         ("numbered reference entries", test_numbered_reference_entries_are_not_headings),
         ("old reference numbering cleanup", test_reference_old_numbering_cleanup),
     ]

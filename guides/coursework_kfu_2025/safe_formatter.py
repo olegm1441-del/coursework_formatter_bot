@@ -575,10 +575,16 @@ REFERENCE_SUBHEADINGS_CANON = {
     "официальные материалы": "Официальные материалы",
     "статистические материалы": "Статистические материалы",
     "справочные и архивные материалы": "Справочные и архивные материалы",
+    "книги, монографии и диссертации": "Книги, монографии и диссертации",
+    "книги, монографии, диссертации": "Книги, монографии, диссертации",
+    "научные статьи": "Научные статьи",
     "монографии и статьи": "Монографии и статьи",
     "монографии и учебники": "Монографии и учебники",
+    "учебники и учебные пособия": "Учебники и учебные пособия",
     "учебники, учебные пособия и материалы": "Учебники, учебные пособия и материалы",
     "электронные ресурсы": "Электронные ресурсы",
+    "электронные источники": "Электронные источники",
+    "интернет-ресурсы": "Интернет-ресурсы",
     "материалы на иностранных языках": "Материалы на иностранных языках",
     "нормативные правовые акты": "Нормативные правовые акты",
     "монографии, учебники": "Монографии, учебники",
@@ -589,6 +595,123 @@ REFERENCE_SUBHEADINGS_CANON = {
     "диссертации, авторефераты диссертаций": "Диссертации, авторефераты диссертаций",
     "материалы интернет-сайтов": "Материалы интернет-сайтов",
 }
+
+
+REFERENCE_BLOCK_HEADING_MAX_CHARS = 64
+REFERENCE_STYLED_HEADING_MAX_CHARS = 48
+REFERENCE_HEADING_NUMBER_RE = re.compile(r"^\s*\d{1,3}[\.)]\s+(.+)$")
+REFERENCE_SOURCE_LIKE_RE = re.compile(
+    r"(https?://|www\.|doi\b|isbn\b|//|\b(?:19|20)\d{2}\b|"
+    r"\b[А-ЯЁA-Z]\.\s*[А-ЯЁA-Z]\.|"
+    r"\b(?:федеральн\w*\s+закон|кодекс|гост|№|статья\s+\d|"
+    r"от\s+\d{2}\.\d{2}\.\d{4}|фз)\b)",
+    re.IGNORECASE,
+)
+REFERENCE_HEADING_KEYWORDS = (
+    "материал",
+    "ресурс",
+    "источник",
+    "стать",
+    "книг",
+    "монограф",
+    "диссертац",
+    "учебник",
+    "пособ",
+    "акт",
+)
+
+
+def _reference_heading_key(text: str) -> str:
+    t = clean_spaces(text).lower().replace("ё", "е").rstrip(".")
+    t = re.sub(r"\s*,\s*", ", ", t)
+    return clean_spaces(t)
+
+
+def _edit_distance_at_most_two(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > 2:
+        return False
+
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            current.append(min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + cost,
+            ))
+            row_min = min(row_min, current[-1])
+        if row_min > 2:
+            return False
+        previous = current
+    return previous[-1] <= 2
+
+
+def _looks_like_reference_source_entry(text: str) -> bool:
+    t = clean_spaces(text)
+    if len(t) > REFERENCE_BLOCK_HEADING_MAX_CHARS:
+        return True
+    if REFERENCE_SOURCE_LIKE_RE.search(t):
+        return True
+    return t.count(".") >= 2
+
+
+def _canonical_reference_heading_candidate(text: str):
+    t = clean_spaces(text).rstrip(".")
+    if not t:
+        return None
+
+    key = _reference_heading_key(t)
+    exact = REFERENCE_SUBHEADINGS_CANON.get(key)
+    if exact:
+        return exact
+
+    if _looks_like_reference_source_entry(t):
+        return None
+
+    for known_key, canonical in REFERENCE_SUBHEADINGS_CANON.items():
+        if _edit_distance_at_most_two(key, _reference_heading_key(known_key)):
+            return canonical
+    return None
+
+
+def _looks_like_short_styled_reference_heading(text: str) -> bool:
+    t = clean_spaces(text).rstrip(".")
+    if not t or len(t) > REFERENCE_STYLED_HEADING_MAX_CHARS:
+        return False
+    if _looks_like_reference_source_entry(t):
+        return False
+
+    low = t.lower()
+    return any(keyword in low for keyword in REFERENCE_HEADING_KEYWORDS)
+
+
+def _canonicalize_styled_reference_heading(text: str) -> str:
+    t = clean_spaces(text).rstrip(".")
+    if not t:
+        return t
+    if t.isupper() or t.islower():
+        low = t.lower()
+        return low[:1].upper() + low[1:]
+    return t
+
+
+def canonical_reference_block_heading_paragraph(paragraph):
+    canonical = canonical_reference_block_heading_text(paragraph.text)
+    if canonical:
+        return canonical
+
+    text = clean_spaces(paragraph.text)
+    if not _looks_like_short_styled_reference_heading(text):
+        return None
+
+    is_centered = paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    is_bold = any(run.bold is True for run in paragraph.runs)
+    if is_centered and is_bold:
+        return _canonicalize_styled_reference_heading(text)
+    return None
 
 
 def insert_paragraph_after(paragraph, text=""):
@@ -1212,18 +1335,15 @@ def canonical_reference_subheading_text(text: str):
 
 def canonical_numbered_reference_subheading_text(text: str):
     t = clean_spaces(text)
-    match = re.match(r"^\s*\d+\.\s+(.+)$", t)
+    match = REFERENCE_HEADING_NUMBER_RE.match(t)
     if not match:
         return None
 
-    return canonical_reference_subheading_text(match.group(1))
+    return _canonical_reference_heading_candidate(match.group(1))
 
 
 def canonical_reference_block_heading_text(text: str):
-    return (
-        canonical_reference_subheading_text(text)
-        or canonical_numbered_reference_subheading_text(text)
-    )
+    return canonical_numbered_reference_subheading_text(text) or _canonical_reference_heading_candidate(text)
 
 
 
@@ -2932,7 +3052,7 @@ def convert_reference_numbering_to_plain_text(document, body_start):
 
         text = clean_spaces(paragraph.text)
         low = text.lower()
-        canonical = canonical_reference_block_heading_text(text)
+        canonical = canonical_reference_block_heading_paragraph(paragraph)
 
         if low in {
             "список использованных источников",
@@ -3003,7 +3123,7 @@ def compact_references_block(document, body_start):
 
             text = clean_spaces(p.text)
             low = text.lower()
-            canonical = canonical_reference_block_heading_text(text)
+            canonical = canonical_reference_block_heading_paragraph(p)
 
             if is_references_heading_text(text):
                 in_references = True
@@ -3024,9 +3144,9 @@ def compact_references_block(document, body_start):
                 for _np in paragraphs[idx + 1:]:
                     _nt = clean_spaces(_np.text)
                     if _nt:
-                        next_nonempty = _nt
+                        next_nonempty = _np
                         break
-                if next_nonempty and canonical_reference_block_heading_text(next_nonempty):
+                if next_nonempty and canonical_reference_block_heading_paragraph(next_nonempty):
                     pass  # keep the blank
                 else:
                     remove_paragraph(p)
@@ -3149,7 +3269,7 @@ def ensure_blank_before_reference_subheadings(document, body_start):
                 in_references = False
                 continue
 
-            if not canonical_reference_block_heading_text(text):
+            if not canonical_reference_block_heading_paragraph(p):
                 continue
 
             if idx == 0:
@@ -3948,7 +4068,7 @@ def cleanup_reference_subheadings_layout(document, body_start):
                 in_references = False
                 continue
 
-            canonical = canonical_reference_block_heading_text(text)
+            canonical = canonical_reference_block_heading_paragraph(p)
             if canonical:
                 replace_paragraph_text(p, canonical)
                 remove_paragraph_numbering(p)
@@ -4379,7 +4499,7 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         if in_references and not is_references_heading_text(text):
-            canonical = canonical_reference_block_heading_text(text)
+            canonical = canonical_reference_block_heading_paragraph(paragraph)
             if canonical:
                 replace_paragraph_text(paragraph, canonical)
                 format_reference_subheading(paragraph)
@@ -4551,7 +4671,7 @@ def process_document(input_path: Path, output_path: Path):
         elif kind == "body_list_item":
             format_body_list_item(paragraph)
         elif kind == "reference_subheading":
-            canonical = canonical_reference_block_heading_text(text)
+            canonical = canonical_reference_block_heading_paragraph(paragraph)
             if canonical:
                 replace_paragraph_text(paragraph, canonical)
             format_reference_subheading(paragraph)
@@ -4710,7 +4830,7 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         if _final_in_references and not is_references_heading_text(text):
-            canonical = canonical_reference_block_heading_text(text)
+            canonical = canonical_reference_block_heading_paragraph(paragraph)
             if canonical:
                 replace_paragraph_text(paragraph, canonical)
                 format_reference_subheading(paragraph)
