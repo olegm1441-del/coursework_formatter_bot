@@ -2927,6 +2927,186 @@ def test_table_caption_trailing_period_cleanup() -> tuple[bool, str]:
     return _result(True, "table caption/title terminal period cleanup is scoped")
 
 
+def test_b25_real_table_caption_directly_before_table_is_formatted() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Значение"
+
+    formatted = _format_synthetic_doc(doc)
+    caption_idx = _paragraph_index(formatted, "Таблица 1.1.1")
+    if caption_idx is None:
+        return _result(False, "real table caption missing after formatting")
+    caption = formatted.paragraphs[caption_idx]
+    if caption.alignment != WD_ALIGN_PARAGRAPH.RIGHT:
+        return _result(False, "real table caption directly before table was not right-aligned")
+    return _result(True, "real table caption directly before table is formatted")
+
+
+def test_b25_real_table_caption_title_table_is_formatted() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1")
+    doc.add_paragraph("Анализ финансовых результатов.")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Показатель"
+
+    formatted = _format_synthetic_doc(doc)
+    caption_idx = _paragraph_index(formatted, "Таблица 1.1.1")
+    title_idx = _paragraph_index(formatted, "Анализ финансовых результатов")
+    if caption_idx is None or title_idx is None:
+        return _result(False, "real table caption/title missing after formatting")
+    if formatted.paragraphs[caption_idx].alignment != WD_ALIGN_PARAGRAPH.RIGHT:
+        return _result(False, "real table caption was not right-aligned")
+    if formatted.paragraphs[title_idx].alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "real table title before table was not centered")
+    return _result(True, "real table caption + title + table is formatted")
+
+
+def test_b25_inline_dash_table_caption_with_adjacent_table_is_accepted() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1 — Отличия индивидуального и организационного поведения")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Показатель"
+
+    formatted = _format_synthetic_doc(doc)
+    caption_idx = _paragraph_index(formatted, "Таблица 1.1.1")
+    title_idx = next(
+        (
+            idx for idx, paragraph in enumerate(formatted.paragraphs)
+            if "Отличия индивидуального и организационного поведения" in paragraph.text
+        ),
+        None,
+    )
+    if caption_idx is None or title_idx is None:
+        return _result(False, "inline dash table caption was not structurally accepted")
+    if formatted.paragraphs[caption_idx].alignment != WD_ALIGN_PARAGRAPH.RIGHT:
+        return _result(False, "inline dash table caption was not right-aligned")
+    if formatted.paragraphs[title_idx].alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "inline dash table title was not centered")
+    return _result(True, "inline dash table caption with adjacent table is accepted")
+
+
+def test_b25_table_number_analytical_prose_without_table_remains_body() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    prose = "Таблица 1.1.1 показывает, что показатели растут."
+    body_after = "Следующий аналитический абзац остается обычным текстом."
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph(prose)
+    doc.add_paragraph(body_after)
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    idx = _paragraph_index(formatted, prose)
+    if idx is None:
+        return _result(False, f"analytical table prose was mutated or split: {texts!r}")
+    if "Таблица 1.1.1" in texts:
+        return _result(False, f"analytical table prose was split into fake caption: {texts!r}")
+    if formatted.paragraphs[idx].alignment in {WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.CENTER}:
+        return _result(False, "analytical table prose received caption/title alignment")
+    return _result(True, "analytical table prose without adjacent table remains body text")
+
+
+def test_b25_v_tablitse_analytical_prose_remains_body() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    prose = "В таблице 1.1.1 представлены основные показатели исследования."
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph(prose)
+
+    formatted = _format_synthetic_doc(doc)
+    idx = _paragraph_index(formatted, prose)
+    if idx is None:
+        return _result(False, "ordinary prose mentioning table was changed")
+    if formatted.paragraphs[idx].alignment in {WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.CENTER}:
+        return _result(False, "ordinary prose mentioning table received caption/title alignment")
+    return _result(True, "ordinary prose mentioning table remains body text")
+
+
+def test_b25_source_then_table_analytical_prose_is_not_promoted() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    prose = "Таблица 1.1.1 отражает динамику изменения показателей."
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph(prose)
+    doc.add_paragraph("Продолжение аналитического текста.")
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    idx = _paragraph_index(formatted, prose)
+    if idx is None:
+        return _result(False, f"table analytical prose after source was mutated: {texts!r}")
+    if "Таблица 1.1.1" in texts:
+        return _result(False, f"table analytical prose after source was split: {texts!r}")
+    if formatted.paragraphs[idx].alignment in {WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.CENTER}:
+        return _result(False, "table analytical prose after source received caption/title alignment")
+    return _result(True, "source + analytical table prose is not promoted")
+
+
+def test_b25_appendix_immediate_table_like_title_is_preserved() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ 3")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ А")
+    doc.add_paragraph("Таблица А.1 Расчет показателей.")
+    doc.add_table(rows=1, cols=1)
+
+    formatted = _format_synthetic_doc(doc)
+    title_idx = _paragraph_index(formatted, "Таблица А.1 Расчет показателей")
+    if title_idx is None:
+        return _result(False, "appendix immediate table-like title was not preserved")
+    if formatted.paragraphs[title_idx].alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "appendix immediate table-like title was not centered")
+    return _result(True, "appendix immediate table-like title is preserved")
+
+
+def test_b25_neuromarketing_style_table_false_positive_is_prevented() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    prose = "Таблица 1.1.1 показывает, что нейромаркетинговые методы применяются в исследованиях."
+
+    doc = Document()
+    doc.add_paragraph("СОДЕРЖАНИЕ\nВВЕДЕНИЕ\n1. Теоретические основы")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. Теоретические основы нейромаркетинга")
+    doc.add_paragraph(prose)
+    doc.add_paragraph("Следующий абзац описывает результаты анализа.")
+
+    formatted = _format_synthetic_doc(doc)
+    idx = _paragraph_index(formatted, prose)
+    if idx is None:
+        return _result(False, "neuromarketing-style table prose was mutated or split")
+    if formatted.paragraphs[idx].alignment in {WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.CENTER}:
+        return _result(False, "neuromarketing-style table prose received caption/title alignment")
+    if _paragraph_index(formatted, "Таблица 1.1.1") is not None:
+        return _result(False, "neuromarketing-style table prose was split into fake caption")
+    return _result(True, "neuromarketing-style table false positive is prevented")
+
+
 def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
     """
     Figure captions require exactly one blank before the caption, but no blank
@@ -5994,6 +6174,14 @@ def run_all() -> None:
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
         ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
+        ("B2.5 | real caption before table", test_b25_real_table_caption_directly_before_table_is_formatted),
+        ("B2.5 | caption title table", test_b25_real_table_caption_title_table_is_formatted),
+        ("B2.5 | inline dash adjacent table", test_b25_inline_dash_table_caption_with_adjacent_table_is_accepted),
+        ("B2.5 | table analytical prose body", test_b25_table_number_analytical_prose_without_table_remains_body),
+        ("B2.5 | prose mentioning table body", test_b25_v_tablitse_analytical_prose_remains_body),
+        ("B2.5 | source analytical prose body", test_b25_source_then_table_analytical_prose_is_not_promoted),
+        ("B2.5 | appendix table-like title", test_b25_appendix_immediate_table_like_title_is_preserved),
+        ("B2.5 | neuromarketing false positive", test_b25_neuromarketing_style_table_false_positive_is_prevented),
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
         ("T6 | figure source moved before caption", test_figure_source_after_caption_is_moved_before_caption),
         ("T6 | correct figure source order unchanged", test_figure_source_before_caption_is_unchanged),

@@ -3318,6 +3318,97 @@ def split_manual_dash_lists(document, body_start):
             break
 
 
+def _nonempty_body_blocks_after(children, start_idx: int, *, max_blocks: int = 2) -> list:
+    blocks = []
+    idx = start_idx + 1
+    while idx < len(children) and len(blocks) < max_blocks:
+        child = children[idx]
+        if child.tag == qn("w:p") and _is_empty_paragraph_xml(child):
+            idx += 1
+            continue
+        blocks.append(child)
+        idx += 1
+    return blocks
+
+
+def _is_table_title_candidate_block(child) -> bool:
+    if child.tag != qn("w:p") or _is_empty_paragraph_xml(child):
+        return False
+    if child.findall(".//" + qn("w:drawing")):
+        return False
+
+    text = _paragraph_text_from_xml(child)
+    if not text or len(text) > 120:
+        return False
+
+    low = text.lower()
+    if (
+        TABLE_NUM_RE.match(text)
+        or is_table_continuation_text(text)
+        or FIG_RE.match(text)
+        or FIG_SERVICE_LINE_RE.match(text)
+        or parse_heading1(text)
+        or parse_heading2(text)
+        or parse_broken_heading2(text)
+        or low == "приложения"
+        or normalize_appendix_start_label_text(text)
+        or is_appendix_continuation_label_text(text)
+    ):
+        return False
+
+    if re.match(r"^\s*в\s+таблиц[еуы]\b", text, re.IGNORECASE):
+        return False
+
+    if len(text.split()) > 14 and re.search(r"[.!?]\s+\S", text):
+        return False
+
+    return True
+
+
+def _is_confirmed_table_caption_paragraph(document, paragraph, body_start) -> bool:
+    text = clean_spaces(paragraph.text)
+    m = TABLE_NUM_RE.match(text)
+    if not m:
+        return False
+
+    paragraph_info = _paragraph_lookup(document).get(paragraph._p)
+    if paragraph_info is None:
+        return False
+    paragraph_idx, _paragraph = paragraph_info
+    if paragraph_idx < body_start:
+        return False
+
+    children = list(document.element.body)
+    try:
+        caption_child_idx = children.index(paragraph._p)
+    except ValueError:
+        return False
+
+    blocks = _nonempty_body_blocks_after(children, caption_child_idx, max_blocks=2)
+    if not blocks:
+        return False
+
+    has_inline_title = bool(clean_spaces(m.group(2)))
+    if blocks[0].tag == qn("w:tbl"):
+        return True
+
+    if has_inline_title:
+        return False
+
+    return (
+        len(blocks) >= 2
+        and _is_table_title_candidate_block(blocks[0])
+        and blocks[1].tag == qn("w:tbl")
+    )
+
+
+def _classify_paragraph_with_table_adjacency(document, paragraph, body_start, prev_kind=None) -> str:
+    kind = classify_paragraph(clean_spaces(paragraph.text), prev_kind=prev_kind)
+    if kind == "table_caption" and not _is_confirmed_table_caption_paragraph(document, paragraph, body_start):
+        return "body_text"
+    return kind
+
+
 def split_table_captions_prepass(document, body_start):
     changed = True
     while changed:
@@ -3334,6 +3425,8 @@ def split_table_captions_prepass(document, body_start):
 
             m = TABLE_NUM_RE.match(text)
             if not m:
+                continue
+            if not _is_confirmed_table_caption_paragraph(document, p, body_start):
                 continue
 
             number = m.group(1)
@@ -4364,7 +4457,12 @@ def ensure_empty_before_table_caption(document, body_start):
             if idx < body_start:
                 continue
 
-            kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
+            kind = _classify_paragraph_with_table_adjacency(
+                document,
+                p,
+                body_start,
+                prev_kind=prev_kind,
+            )
 
             if kind in {"table_caption", "table_continuation"}:
                 if idx - 1 >= body_start:
@@ -4400,7 +4498,12 @@ def remove_extra_empty_after_service_lines(document, body_start):
             if idx < body_start:
                 continue
 
-            kind = classify_paragraph(clean_spaces(p.text), prev_kind=prev_kind)
+            kind = _classify_paragraph_with_table_adjacency(
+                document,
+                p,
+                body_start,
+                prev_kind=prev_kind,
+            )
 
             if kind in target_kinds:
                 if idx + 1 < len(paragraphs) and is_empty_paragraph(paragraphs[idx + 1]):
@@ -4892,6 +4995,8 @@ def process_document(input_path: Path, output_path: Path):
             replace_paragraph_text(paragraph, text)
 
         kind = detect_kind_from_paragraph_object(paragraph, text, prev_kind=prev_kind)
+        if kind == "table_caption" and not _is_confirmed_table_caption_paragraph(doc, paragraph, body_start):
+            kind = "body_text"
         prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
         is_body_list_item = is_probable_body_list_item(
             paragraph,
@@ -5260,7 +5365,7 @@ def process_document(input_path: Path, output_path: Path):
             prev_nonempty_kind = "heading2"
             continue
 
-        if TABLE_NUM_RE.match(text):
+        if TABLE_NUM_RE.match(text) and _is_confirmed_table_caption_paragraph(doc, paragraph, body_start):
             format_table_caption(paragraph)
             prev_nonempty_kind = "table_caption"
             continue
