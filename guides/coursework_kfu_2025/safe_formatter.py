@@ -1721,6 +1721,219 @@ def format_appendix_start_label(paragraph, *, start_new_page=True):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
 
 
+def is_appendix_continuation_label_text(text: str) -> bool:
+    return bool(re.match(r"^\s*продолжение\s+приложения?\s+\S+\s*$", clean_spaces(text), re.IGNORECASE))
+
+
+def is_table_like_appendix_title_text(text: str) -> bool:
+    return bool(re.match(r"^\s*таблица\s+\S+", clean_spaces(text), re.IGNORECASE))
+
+
+def is_obvious_appendix_body_paragraph(text: str) -> bool:
+    t = clean_spaces(text)
+    if len(t) > 100:
+        return True
+    if re.search(r"https?://|www\.|\[[^\]]*\d", t, re.IGNORECASE):
+        return True
+    if len(t.split()) > 14 and re.search(r"[.!?]\s+\S", t):
+        return True
+    return False
+
+
+def is_appendix_title_candidate_text(text: str, *, has_later_content: bool) -> bool:
+    t = clean_spaces(text)
+    if not t or not has_later_content:
+        return False
+    if len(t) > 100:
+        return False
+    if normalize_appendix_start_label_text(t) or is_appendix_continuation_label_text(t):
+        return False
+    if is_table_like_appendix_title_text(t):
+        return True
+    return not is_obvious_appendix_body_paragraph(t)
+
+
+def format_appendix_title(paragraph):
+    text = strip_single_terminal_period(paragraph.text)
+    if text != clean_spaces(paragraph.text):
+        replace_paragraph_text(paragraph, text)
+
+    remove_page_break_artifacts_from_paragraph(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+    remove_paragraph_numbering(paragraph)
+    hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.keep_with_next = True
+    _clear_page_break_before(paragraph)
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _has_later_appendix_content(children, start_idx: int) -> bool:
+    idx = start_idx
+    while idx < len(children):
+        child = children[idx]
+        if child.tag == qn("w:tbl"):
+            return True
+        if child.tag == qn("w:p"):
+            if not _is_empty_paragraph_xml(child):
+                return True
+            idx += 1
+            continue
+        return False
+    return False
+
+
+def _appendix_label_followed_by_title_candidate(children, label_idx: int, paragraph_lookup, body_start) -> bool:
+    next_idx = label_idx + 1
+    while next_idx < len(children) and children[next_idx].tag == qn("w:p") and _is_empty_paragraph_xml(children[next_idx]):
+        next_idx += 1
+    if next_idx >= len(children) or children[next_idx].tag != qn("w:p"):
+        return False
+
+    paragraph_info = paragraph_lookup.get(children[next_idx])
+    if paragraph_info is None:
+        return False
+    paragraph_idx, paragraph = paragraph_info
+    if paragraph_idx < body_start:
+        return False
+    return is_appendix_title_candidate_text(
+        paragraph.text,
+        has_later_content=_has_later_appendix_content(children, next_idx + 1),
+    )
+
+
+def _merge_split_table_like_appendix_title(document, paragraph):
+    if not is_table_like_appendix_title_text(paragraph.text):
+        return
+
+    body = document.element.body
+    children = list(body)
+    try:
+        idx = children.index(paragraph._p)
+    except ValueError:
+        return
+
+    blanks = []
+    next_idx = idx + 1
+    while next_idx < len(children) and children[next_idx].tag == qn("w:p") and _is_empty_paragraph_xml(children[next_idx]):
+        blanks.append(children[next_idx])
+        next_idx += 1
+
+    if next_idx >= len(children) or children[next_idx].tag != qn("w:p"):
+        return
+
+    next_text = _paragraph_text_from_xml(children[next_idx])
+    if (
+        not next_text
+        or normalize_appendix_start_label_text(next_text)
+        or is_appendix_continuation_label_text(next_text)
+        or is_table_like_appendix_title_text(next_text)
+    ):
+        return
+
+    merged = clean_spaces(f"{clean_spaces(paragraph.text)} {strip_single_terminal_period(next_text)}")
+    if len(merged) > 100:
+        return
+
+    replace_paragraph_text(paragraph, merged)
+    for blank in blanks:
+        body.remove(blank)
+    body.remove(children[next_idx])
+
+
+def _ensure_single_blank_after_paragraph(document, paragraph):
+    body = document.element.body
+    children = list(body)
+    try:
+        idx = children.index(paragraph._p)
+    except ValueError:
+        return
+
+    blanks = []
+    next_idx = idx + 1
+    while next_idx < len(children) and children[next_idx].tag == qn("w:p") and _is_empty_paragraph_xml(children[next_idx]):
+        blanks.append(children[next_idx])
+        next_idx += 1
+
+    if not blanks:
+        blank = insert_paragraph_after(paragraph, "")
+        format_empty_paragraph(blank)
+        return
+
+    paragraph_lookup = _paragraph_lookup(document)
+    first_blank = paragraph_lookup.get(blanks[0])
+    if first_blank is not None:
+        _idx, blank_paragraph = first_blank
+        format_empty_paragraph(blank_paragraph)
+
+    for blank in blanks[1:]:
+        body.remove(blank)
+
+
+def normalize_appendix_titles(document, body_start):
+    in_appendices = False
+    children = list(document.element.body)
+    paragraph_lookup = _paragraph_lookup(document)
+    idx = 0
+
+    while idx < len(children):
+        child = children[idx]
+        if child.tag != qn("w:p"):
+            idx += 1
+            continue
+
+        paragraph_info = paragraph_lookup.get(child)
+        if paragraph_info is None:
+            idx += 1
+            continue
+        paragraph_idx, paragraph = paragraph_info
+        if paragraph_idx < body_start:
+            idx += 1
+            continue
+
+        text = _paragraph_text_from_xml(child)
+        if text.lower() == "приложения":
+            in_appendices = True
+            idx += 1
+            continue
+        if not in_appendices or not normalize_appendix_start_label_text(text):
+            idx += 1
+            continue
+
+        next_idx = idx + 1
+        blanks_before_title = []
+        while next_idx < len(children) and children[next_idx].tag == qn("w:p") and _is_empty_paragraph_xml(children[next_idx]):
+            blanks_before_title.append(children[next_idx])
+            next_idx += 1
+
+        if (
+            next_idx < len(children)
+            and children[next_idx].tag == qn("w:p")
+            and not _is_empty_paragraph_xml(children[next_idx])
+        ):
+            title_info = paragraph_lookup.get(children[next_idx])
+            if title_info is not None:
+                title_idx, title_paragraph = title_info
+                if title_idx >= body_start and is_appendix_title_candidate_text(
+                    title_paragraph.text,
+                    has_later_content=_has_later_appendix_content(children, next_idx + 1),
+                ):
+                    for blank in blanks_before_title:
+                        document.element.body.remove(blank)
+                    _merge_split_table_like_appendix_title(document, title_paragraph)
+                    format_appendix_title(title_paragraph)
+                    _ensure_single_blank_after_paragraph(document, title_paragraph)
+                    children = list(document.element.body)
+                    paragraph_lookup = _paragraph_lookup(document)
+                    idx = next_idx + 1
+                    continue
+
+        idx += 1
+
+
 def _paragraph_text_from_xml(p_xml) -> str:
     return clean_spaces("".join(t.text or "" for t in p_xml.findall(".//" + qn("w:t"))))
 
@@ -1859,6 +2072,8 @@ def remove_empty_paragraphs_after_appendix_labels(document, body_start):
             in_appendices = True
             continue
         if not in_appendices or not is_appendix_start_label_like(text):
+            continue
+        if _appendix_label_followed_by_title_candidate(children, idx, paragraph_lookup, body_start):
             continue
 
         next_idx = idx + 1
@@ -5105,6 +5320,7 @@ def process_document(input_path: Path, output_path: Path):
 
     normalize_appendix_start_labels(doc, body_start)
     remove_empty_paragraphs_between_appendices_heading_and_first_label(doc, body_start)
+    normalize_appendix_titles(doc, body_start)
     normalize_appendix_local_table_titles(doc, body_start)
     remove_empty_paragraphs_after_appendix_labels(doc, body_start)
 

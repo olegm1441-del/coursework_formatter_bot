@@ -3538,6 +3538,203 @@ def test_appendix_local_table_title_before_table_is_centered() -> tuple[bool, st
     return _result(True, "appendix-local table title before table is centered")
 
 
+def _run_uses_tnr_14_not_bold(paragraph) -> bool:
+    runs = [run for run in paragraph.runs if run.text.strip()]
+    if not runs:
+        return False
+    for run in runs:
+        r_pr = run._element.rPr
+        if r_pr is None:
+            return False
+        r_fonts = r_pr.rFonts
+        if r_fonts is None or r_fonts.get(qn("w:ascii")) != "Times New Roman":
+            return False
+        sz = r_pr.find(qn("w:sz"))
+        if sz is None or sz.get(qn("w:val")) != "28":
+            return False
+        bold = r_pr.find(qn("w:b"))
+        if run.bold is True or (bold is not None and bold.get(qn("w:val")) not in (None, "0", "false")):
+            return False
+    return True
+
+
+def _blank_count_after_paragraph(doc: Document, paragraph) -> int:
+    children = list(doc.element.body)
+    idx = children.index(paragraph._p)
+    count = 0
+    idx += 1
+    while idx < len(children) and children[idx].tag == qn("w:p") and not _paragraph_text(children[idx]):
+        count += 1
+        idx += 1
+    return count
+
+
+def test_appendix_title_after_label_is_normalized() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_appendix_start_labels,
+        normalize_appendix_titles,
+    )
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    label = doc.add_paragraph("Приложение А")
+    title = doc.add_paragraph("Расчет трудозатрат.")
+    title.runs[0].bold = True
+    doc.add_paragraph("Текст приложения.")
+
+    normalize_appendix_start_labels(doc, body_start=0)
+    normalize_appendix_titles(doc, body_start=0)
+
+    if label.text != "ПРИЛОЖЕНИЕ А" or not _paragraph_is_right_aligned(label._p):
+        return _result(False, "appendix label formatting changed")
+    if title.text != "Расчет трудозатрат":
+        return _result(False, f"appendix title text was not normalized: {title.text!r}")
+    if title.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "appendix title is not centered")
+    if not _run_uses_tnr_14_not_bold(title):
+        return _result(False, "appendix title font must be TNR 14 and not bold")
+    if _paragraph_has_page_break_before(title._p):
+        return _result(False, "appendix title must not start a new page")
+    if _paragraph_has_direct_numbering(title):
+        return _result(False, "appendix title must not have numbering")
+    if _blank_count_after_paragraph(doc, title) != 1:
+        return _result(False, "appendix title must have exactly one blank after it")
+    return _result(True, "appendix title after label is normalized")
+
+
+def test_table_caption_like_appendix_title_after_label_is_normalized() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_appendix_start_labels,
+        normalize_appendix_titles,
+    )
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    title = doc.add_paragraph("Таблица А.1 Расчет показателей.")
+    doc.add_table(rows=1, cols=1)
+
+    normalize_appendix_start_labels(doc, body_start=0)
+    normalize_appendix_titles(doc, body_start=0)
+
+    if title.text != "Таблица А.1 Расчет показателей":
+        return _result(False, f"table-like appendix title text changed unexpectedly: {title.text!r}")
+    if title.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "table-like appendix title was not centered")
+    if _blank_count_after_paragraph(doc, title) != 1:
+        return _result(False, "table-like appendix title must have exactly one blank after it")
+    return _result(True, "table-like appendix title after label is normalized")
+
+
+def test_table_caption_like_appendix_title_survives_full_process() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ.......................................................8")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ Б")
+    doc.add_paragraph("Таблица 2.1 Расчет показателей.")
+    doc.add_table(rows=1, cols=1)
+
+    formatted = _format_synthetic_doc(doc)
+    label_idx = _paragraph_index(formatted, "ПРИЛОЖЕНИЕ Б")
+    if label_idx is None:
+        return _result(False, "appendix label missing after full process")
+
+    title = None
+    for paragraph in formatted.paragraphs[label_idx + 1:]:
+        if paragraph.text.strip():
+            title = paragraph
+            break
+    if title is None:
+        return _result(False, "appendix title missing after full process")
+
+    if title.text != "Таблица 2.1 Расчет показателей":
+        return _result(False, f"table-like appendix title was not preserved: {title.text!r}")
+    if title.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "table-like appendix title is not centered after full process")
+    if _blank_count_after_paragraph(formatted, title) != 1:
+        return _result(False, "table-like appendix title does not have exactly one blank after full process")
+    return _result(True, "table-like appendix title survives full process")
+
+
+def test_long_body_paragraph_after_appendix_label_is_not_title() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_appendix_start_labels,
+        normalize_appendix_titles,
+    )
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    body = doc.add_paragraph(
+        "Это обычный развернутый текст приложения, который содержит несколько предложений "
+        "и явно не должен становиться названием приложения после форматирования документа."
+    )
+    doc.add_paragraph("Следующий абзац.")
+
+    normalize_appendix_start_labels(doc, body_start=0)
+    normalize_appendix_titles(doc, body_start=0)
+
+    if body.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "long body paragraph was promoted to appendix title")
+    if _blank_count_after_paragraph(doc, body) != 0:
+        return _result(False, "long body paragraph received title spacing")
+    return _result(True, "long body paragraph after appendix label is not title")
+
+
+def test_appendix_continuation_label_does_not_trigger_title_formatting() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from guides.coursework_kfu_2025.safe_formatter import normalize_appendix_titles
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    doc.add_paragraph("Расчет трудозатрат")
+    continuation = doc.add_paragraph("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1")
+    after_continuation = doc.add_paragraph("Таблица А.1 Продолжение данных")
+    doc.add_table(rows=1, cols=1)
+
+    normalize_appendix_titles(doc, body_start=0)
+
+    if continuation.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "appendix continuation label was formatted as title")
+    if after_continuation.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "paragraph after appendix continuation was formatted as title")
+    return _result(True, "appendix continuation label does not trigger title formatting")
+
+
+def test_appendix_title_spacing_is_exactly_one_blank() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_appendix_titles
+
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    zero_blank_title = doc.add_paragraph("Первое приложение")
+    doc.add_paragraph("Текст первого приложения.")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 2")
+    multi_blank_title = doc.add_paragraph("Второе приложение")
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+    doc.add_paragraph("Текст второго приложения.")
+
+    normalize_appendix_titles(doc, body_start=0)
+
+    if _blank_count_after_paragraph(doc, zero_blank_title) != 1:
+        return _result(False, "zero-blank title was not normalized to one blank")
+    if _blank_count_after_paragraph(doc, multi_blank_title) != 1:
+        return _result(False, "multi-blank title was not normalized to one blank")
+    return _result(True, "appendix title spacing is exactly one blank")
+
+
 def test_empty_paragraph_after_appendix_label_before_table_is_preserved() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import (
         normalize_appendix_start_labels,
@@ -5692,6 +5889,12 @@ def run_all() -> None:
         ("M1 | appendix/caption metadata", test_marker_appendix_and_caption_metadata),
         ("M1 | appendix start labels", test_appendix_start_labels_are_normalized),
         ("M1 | appendix local table titles", test_appendix_local_table_title_before_table_is_centered),
+        ("B2.1 | appendix title after label", test_appendix_title_after_label_is_normalized),
+        ("B2.1 | table-like appendix title", test_table_caption_like_appendix_title_after_label_is_normalized),
+        ("B2.1 | table-like appendix title full process", test_table_caption_like_appendix_title_survives_full_process),
+        ("B2.1 | long appendix body not title", test_long_body_paragraph_after_appendix_label_is_not_title),
+        ("B2.1 | continuation label not title", test_appendix_continuation_label_does_not_trigger_title_formatting),
+        ("B2.1 | appendix title spacing", test_appendix_title_spacing_is_exactly_one_blank),
         ("M1 | appendix label/table spacing", test_empty_paragraph_after_appendix_label_before_table_is_preserved),
         ("M1 | appendices heading/label spacing", test_empty_paragraph_between_appendices_heading_and_first_label_is_removed),
         ("M1 | dry-run eligible boundary", test_marker_runtime_dry_run_clean_two_page_table_is_eligible),
