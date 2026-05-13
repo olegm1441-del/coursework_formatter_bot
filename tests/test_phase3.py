@@ -297,7 +297,7 @@ def test_front_matter_section_breaks_are_bounded() -> tuple[bool, str]:
     position_texts = [text for _, text in positions]
     if len(positions) != 3:
         return _result(False, f"expected 3 paragraph section breaks, got {positions!r}")
-    if position_texts != ["Титульная строка", "ВВЕДЕНИЕ\t3", "Текст главы."]:
+    if position_texts != ["Титульная строка", "ВВЕДЕНИЕ 3", "Текст главы."]:
         return _result(False, f"unexpected section break positions: {positions!r}")
     for idx, paragraph in enumerate(formatted.paragraphs):
         if not (paragraph.text or "").strip():
@@ -349,6 +349,56 @@ def test_front_matter_before_introduction_remains_protected() -> tuple[bool, str
     return _result(True, "front matter before ВВЕДЕНИЕ remains protected")
 
 
+def test_real_intro_detection_ignores_toc_embedded_intro() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.classifier import find_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("СОДЕРЖАНИЕ\nВВЕДЕНИЕ\n1. Теоретические основы")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+
+    body_start = find_body_start_index(doc)
+    if body_start != 3:
+        return _result(False, f"body_start={body_start!r}, expected real standalone intro at index 3")
+    return _result(True, "real intro detection ignores TOC-embedded ВВЕДЕНИЕ")
+
+
+def test_front_matter_text_before_real_intro_is_preserved() -> tuple[bool, str]:
+    doc = Document()
+    front_matter_texts = [
+        "Титульная строка",
+        "СОДЕРЖАНИЕ\nВВЕДЕНИЕ\n1. Теоретические основы\n1.1. Сущность подхода",
+        (
+            "2. Анализ и совершенствование\n"
+            "2.1. Общая характеристика\n"
+            "ЗАКЛЮЧЕНИЕ\n"
+            "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\n"
+            "ПРИЛОЖЕНИЕ А"
+        ),
+        "ВВЕДЕНИЕ........................................................3",
+    ]
+    for text in front_matter_texts:
+        doc.add_paragraph(text)
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+
+    formatted = _format_synthetic_doc(doc)
+    intro_idx = _paragraph_index(formatted, "ВВЕДЕНИЕ")
+    if intro_idx is None:
+        return _result(False, "real standalone ВВЕДЕНИЕ missing after formatting")
+
+    actual_front_matter = [paragraph.text for paragraph in formatted.paragraphs[:intro_idx]]
+    if actual_front_matter != front_matter_texts:
+        return _result(
+            False,
+            "front matter text before real intro was mutated:\n"
+            f"expected={front_matter_texts!r}\nactual={actual_front_matter!r}",
+        )
+    return _result(True, "front matter text before real intro is preserved exactly")
+
+
 def test_b2_contents_entries_have_stable_tab_leaders() -> tuple[bool, str]:
     doc = Document()
     doc.add_paragraph("Титульная строка.....9")
@@ -370,58 +420,129 @@ def test_b2_contents_entries_have_stable_tab_leaders() -> tuple[bool, str]:
     formatted = _format_synthetic_doc(doc)
     texts = [p.text for p in formatted.paragraphs]
 
-    if texts[0] != "Титульная строка.....9":
-        return _result(False, f"title page paragraph before contents was mutated: {texts[0]!r}")
-
-    contents_idx = _paragraph_index(formatted, "СОДЕРЖАНИЕ")
-    if contents_idx is None:
-        return _result(False, f"clean СОДЕРЖАНИЕ heading missing: {texts[:10]!r}")
-
     real_intro_idx = _paragraph_index(formatted, "ВВЕДЕНИЕ")
     if real_intro_idx is None:
         return _result(False, "real ВВЕДЕНИЕ paragraph missing")
 
-    expected_entries = [
-        ("ВВЕДЕНИЕ\t3", "ВВЕДЕНИЕ", "3"),
-        ("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ\t10", "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ", "10"),
-        (
-            "1.1. Очень длинный пункт содержания с продолжительным названием, которое должно сохранять номер страницы справа\t10",
-            "1.1. Очень длинный пункт содержания с продолжительным названием, которое должно сохранять номер страницы справа",
-            "10",
-        ),
-        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\t22", "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", "22"),
-        ("ПРИЛОЖЕНИЯ\t25", "ПРИЛОЖЕНИЯ", "25"),
+    expected_front_matter = [
+        "Титульная строка.....9",
+        "СОДЕРЖАНИЕ 2",
+        "ВВЕДЕНИЕ........................................................3",
+        "",
+        "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ",
+        "1.1. Очень длинный пункт содержания с продолжительным названием, которое должно сохранять номер страницы справа\t\t10",
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ . . . . . . . . . . 22",
+        "ПРИЛОЖЕНИЯ………25",
     ]
+    actual_front_matter = texts[:real_intro_idx]
+    if actual_front_matter != expected_front_matter:
+        return _result(
+            False,
+            "TOC/front matter must remain text-frozen before real intro:\n"
+            f"expected={expected_front_matter!r}\nactual={actual_front_matter!r}",
+        )
 
-    toc_texts = texts[contents_idx + 1:real_intro_idx]
-    if any(text == "" for text in toc_texts):
-        return _result(False, f"blank paragraph remained inside TOC block: {toc_texts!r}")
-    if toc_texts != [entry[0] for entry in expected_entries]:
-        return _result(False, f"unexpected TOC texts:\nexpected={[entry[0] for entry in expected_entries]!r}\nactual={toc_texts!r}")
+    return _result(True, "TOC/front matter text is frozen before real intro")
 
-    for offset, (_, title, page) in enumerate(expected_entries, start=1):
-        paragraph = formatted.paragraphs[contents_idx + offset]
-        text = paragraph.text
-        if text.count("\t") != 1:
-            return _result(False, f"TOC entry has duplicate/missing tab: {text!r}")
-        actual_title, actual_page = text.split("\t")
-        if actual_title != title or actual_page != page:
-            return _result(False, f"TOC entry did not preserve title/page: {text!r}")
-        if re.search(r"\.{2,}|…|·|•", actual_title):
-            return _result(False, f"literal dot leader remained in TOC title: {text!r}")
 
-        tabs_nodes = _toc_tab_stops(paragraph)
-        tab_elems = _toc_tab_elems(paragraph)
-        if len(tabs_nodes) != 1 or len(tab_elems) != 1:
-            return _result(False, f"expected one w:tabs with one w:tab for {text!r}, got {len(tabs_nodes)}/{len(tab_elems)}")
-        tab = tab_elems[0]
-        if tab.get(qn("w:val")) != "right" or tab.get(qn("w:leader")) != "dot":
-            return _result(False, f"TOC tab stop is not right-aligned dot leader: {tab.attrib!r}")
+def _paragraph_has_texts_in_order(doc: Document, expected: list[str]) -> bool:
+    texts = [paragraph.text for paragraph in doc.paragraphs]
+    pos = 0
+    for expected_text in expected:
+        try:
+            pos = texts.index(expected_text, pos) + 1
+        except ValueError:
+            return False
+    return True
 
-    if any("\t" in text for text in texts[real_intro_idx:]):
-        return _result(False, "TOC normalization touched paragraphs after real ВВЕДЕНИЕ")
 
-    return _result(True, "TOC entries use one tab and one right dot-leader tab stop")
+def test_body_soft_break_chapter_and_section_headings_are_separated() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("СОДЕРЖАНИЕ\nВВЕДЕНИЕ\n1. Теоретические основы")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph(
+        "1. Теоретические основы исследования\n"
+        "1.1. Сущность организационного покупательского поведения"
+    )
+    doc.add_paragraph("Текст раздела.")
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [paragraph.text for paragraph in formatted.paragraphs]
+    if any("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ ИССЛЕДОВАНИЯ" in text and "1.1." in text for text in texts):
+        return _result(False, "chapter and section headings remained merged")
+    if not _paragraph_has_texts_in_order(
+        formatted,
+        [
+            "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ ИССЛЕДОВАНИЯ",
+            "1.1. Сущность организационного покупательского поведения",
+            "Текст раздела.",
+        ],
+    ):
+        return _result(False, f"separated heading paragraphs missing or out of order: {texts!r}")
+    return _result(True, "body chapter and section headings are structurally separated")
+
+
+def test_body_soft_break_heading_and_body_are_separated_after_intro() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("СОДЕРЖАНИЕ\nВВЕДЕНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph(
+        "1. Теоретические основы\n"
+        "Обычный текст главы начинается после заголовка."
+    )
+    doc.add_paragraph("Следующий абзац.")
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [paragraph.text for paragraph in formatted.paragraphs]
+    if any("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ" in text and "Обычный текст" in text for text in texts):
+        return _result(False, "heading and body text remained merged")
+    if not _paragraph_has_texts_in_order(
+        formatted,
+        [
+            "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ",
+            "Обычный текст главы начинается после заголовка.",
+            "Следующий абзац.",
+        ],
+    ):
+        return _result(False, f"heading/body split paragraphs missing or out of order: {texts!r}")
+    return _result(True, "body heading and following body text are separated after intro")
+
+
+def test_body_soft_break_split_does_not_touch_toc() -> tuple[bool, str]:
+    doc = Document()
+    front_matter_texts = [
+        "Титульная строка",
+        "СОДЕРЖАНИЕ\nВВЕДЕНИЕ\n1. Теоретические основы\n1.1. Сущность подхода",
+    ]
+    for text in front_matter_texts:
+        doc.add_paragraph(text)
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Теоретические основы\n1.1. Сущность подхода")
+    doc.add_paragraph("Текст раздела.")
+
+    formatted = _format_synthetic_doc(doc)
+    intro_idx = _paragraph_index(formatted, "ВВЕДЕНИЕ")
+    if intro_idx is None:
+        return _result(False, "real standalone ВВЕДЕНИЕ missing after formatting")
+    actual_front_matter = [paragraph.text for paragraph in formatted.paragraphs[:intro_idx]]
+    if actual_front_matter != front_matter_texts:
+        return _result(False, f"TOC/front matter was touched by body splitter: {actual_front_matter!r}")
+    return _result(True, "body soft-break splitting does not touch TOC/front matter")
+
+
+def test_body_soft_break_split_does_not_split_ordinary_body_text() -> tuple[bool, str]:
+    ordinary = "Обычный абзац содержит перенос строки\nно не является структурным заголовком."
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph(ordinary)
+    doc.add_paragraph("Следующий обычный абзац.")
+
+    formatted = _format_synthetic_doc(doc)
+    if ordinary not in [paragraph.text for paragraph in formatted.paragraphs]:
+        return _result(False, "ordinary soft-break body paragraph was split or rewritten")
+    return _result(True, "ordinary body soft break is not structurally split")
 
 
 
@@ -5808,7 +5929,13 @@ def run_all() -> None:
         ("A1 | appendix numbering stops after first page", test_appendices_first_page_numbered_following_pages_unnumbered),
         ("A1 | appendix continuation unnumbered", test_appendix_continuation_pages_are_unnumbered),
         ("A1 | front matter protected", test_front_matter_before_introduction_remains_protected),
-        ("B2 | contents tab leaders stable", test_b2_contents_entries_have_stable_tab_leaders),
+        ("B2.2 | real intro detection ignores TOC", test_real_intro_detection_ignores_toc_embedded_intro),
+        ("B2.2 | front matter text frozen", test_front_matter_text_before_real_intro_is_preserved),
+        ("B2 | contents front matter frozen", test_b2_contents_entries_have_stable_tab_leaders),
+        ("B2.3 | merged chapter/section headings split", test_body_soft_break_chapter_and_section_headings_are_separated),
+        ("B2.3 | merged heading/body split", test_body_soft_break_heading_and_body_are_separated_after_intro),
+        ("B2.3 | body splitter keeps TOC frozen", test_body_soft_break_split_does_not_touch_toc),
+        ("B2.3 | ordinary body soft break kept", test_body_soft_break_split_does_not_split_ordinary_body_text),
         # Figure/paragraph preservation.
         ("A  | rule4 does not delete images",          test_a_rule4_does_not_delete_images),
         ("A  | _para_has_image helper",                test_a_para_has_image_helper),

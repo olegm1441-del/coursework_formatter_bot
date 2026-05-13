@@ -3210,47 +3210,8 @@ def _format_toc_entry(paragraph, title: str, page: str) -> None:
 
 
 def normalize_contents_layout(document, body_start):
-    if body_start is None or body_start <= 0:
-        return body_start
-
-    paragraphs = document.paragraphs
-    contents_idx = None
-    for idx, paragraph in enumerate(paragraphs[:body_start]):
-        if _contents_heading_text(paragraph.text):
-            contents_idx = idx
-            break
-
-    if contents_idx is None:
-        return body_start
-
-    heading_text = _contents_heading_text(paragraphs[contents_idx].text)
-    if heading_text:
-        _format_contents_heading(paragraphs[contents_idx], heading_text)
-
-    chapter_page_map = _build_toc_chapter_page_map(paragraphs, contents_idx + 1, body_start)
-
-    idx = contents_idx + 1
-    while idx < body_start:
-        paragraphs = document.paragraphs
-        paragraph = paragraphs[idx]
-        text = clean_spaces(paragraph.text)
-
-        if not text:
-            remove_paragraph(paragraph)
-            body_start -= 1
-            continue
-
-        entry = _split_toc_entry_text(paragraph.text)
-        if entry:
-            title, page = entry
-            _format_toc_entry(paragraph, title, page)
-        else:
-            inferred_entry = _infer_toc_chapter_entry_text(paragraph.text, chapter_page_map)
-            if inferred_entry:
-                title, page = inferred_entry
-                _format_toc_entry(paragraph, title, page)
-        idx += 1
-
+    # Product rule for B2.2: until TOC recovery is implemented as a separate
+    # patch, front matter before the real ВВЕДЕНИЕ is text-frozen.
     return body_start
 
 
@@ -3388,6 +3349,53 @@ def split_table_captions_prepass(document, body_start):
 
             changed = True
             break
+
+
+def _structural_soft_break_segment_kind(text: str) -> str:
+    t = clean_spaces(text)
+    if not t:
+        return ""
+    parsed_h1 = parse_heading1(t)
+    if parsed_h1 and parsed_h1["kind"] == "heading1_chapter":
+        return "heading1"
+    if parse_heading2(t):
+        return "heading2"
+    return "body"
+
+
+def _should_split_body_soft_break_segments(segments: list[str]) -> bool:
+    if len(segments) < 2:
+        return False
+    first_kind = _structural_soft_break_segment_kind(segments[0])
+    if first_kind not in {"heading1", "heading2"}:
+        return False
+    second_kind = _structural_soft_break_segment_kind(segments[1])
+    return second_kind in {"heading1", "heading2", "body"}
+
+
+def split_body_structural_soft_breaks(document, body_start):
+    if body_start is None:
+        return False
+
+    paragraphs = document.paragraphs
+    for idx, paragraph in enumerate(paragraphs):
+        if idx < body_start:
+            continue
+        raw = paragraph.text
+        if "\n" not in raw and "\v" not in raw:
+            continue
+
+        segments = [clean_spaces(part) for part in re.split(r"[\n\v]+", raw) if clean_spaces(part)]
+        if not _should_split_body_soft_break_segments(segments):
+            continue
+
+        replace_paragraph_text(paragraph, segments[0])
+        prev = paragraph
+        for segment in segments[1:]:
+            prev = insert_paragraph_after(prev, segment)
+        return True
+
+    return False
 
 
 REFERENCE_LEADING_NUMBER_RE = re.compile(
@@ -4592,7 +4600,7 @@ def ensure_front_matter_layout(document, body_start):
             r = run._element
             for br in list(r.findall(qn("w:br"))):
                 br_type = br.get(qn("w:type"))
-                if br_type in (None, "page"):
+                if br_type == "page":
                     r.remove(br)
 
     # Ищем содержание до введения
@@ -4834,6 +4842,12 @@ def process_document(input_path: Path, output_path: Path):
     normalize_semicolons_in_document(doc, body_start)
     normalize_citations_in_document(doc, body_start)
     normalize_plain_lists_in_document(doc, body_start)
+    run_with_pass_limit(
+        "split_body_structural_soft_breaks",
+        split_body_structural_soft_breaks,
+        doc,
+        body_start,
+    )
     # Преднормализация только тела работы; содержание не трогаем
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:

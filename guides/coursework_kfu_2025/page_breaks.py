@@ -29,7 +29,7 @@ def _remove_page_breaks_from_run(run):
     r = run._element
     for br in list(r.findall(qn("w:br"))):
         br_type = br.get(qn("w:type"))
-        if br_type in (None, "page"):
+        if br_type == "page":
             r.remove(br)
 
 
