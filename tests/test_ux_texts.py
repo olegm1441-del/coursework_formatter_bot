@@ -15,7 +15,7 @@ def test_file_received_format_text() -> tuple[bool, str]:
     expected = (
         "Файл получен.\n\n"
         "Начинаю оформление по методичке.\n"
-        "Готовый .docx-файл отправлю через 3 минуты."
+        "Готовый .docx-файл отправлю через минуту."
     )
     actual = services.build_file_received_text("format")
     if actual != expected:
