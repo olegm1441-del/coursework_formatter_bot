@@ -4250,40 +4250,251 @@ def remove_empty_between_figure_caption_and_source(document, body_start):
     return changed
 
 
-def reorder_figure_source_before_caption(document, body_start):
-    paragraphs = document.paragraphs
-    in_references = False
+def _is_figure_caption_text(text: str) -> bool:
+    match = FIG_RE.match(clean_spaces(text))
+    if not match:
+        return False
+    title = clean_spaces(match.group(3) or "")
+    if re.match(
+        r"^(показыва|отража|содерж|представлен|представля|демонстрир|иллюстрир)\w*\b",
+        title,
+        re.IGNORECASE,
+    ):
+        return False
+    return True
 
-    for idx, paragraph in enumerate(paragraphs):
-        if idx < body_start:
+
+def _is_figure_service_text(text: str) -> bool:
+    return bool(FIG_SERVICE_LINE_RE.match(clean_spaces(text)))
+
+
+def _is_figure_note_text(text: str) -> bool:
+    return bool(re.match(r"^\s*примечание\s*:", clean_spaces(text), re.IGNORECASE))
+
+
+def _is_paragraph_xml_with_image(child) -> bool:
+    return bool(
+        child.xpath(
+            ".//*[local-name()='drawing' or local-name()='pict' or local-name()='object']"
+        )
+    )
+
+
+def _figure_metadata_segments(text: str) -> list[str]:
+    segments = [clean_spaces(part) for part in re.split(r"[\n\v]+", text or "") if clean_spaces(part)]
+    if len(segments) < 2:
+        return []
+    if all(_is_figure_service_text(segment) or _is_figure_caption_text(segment) for segment in segments):
+        return segments
+    return []
+
+
+def _split_figure_metadata_soft_break_paragraph(paragraph) -> bool:
+    segments = _figure_metadata_segments(paragraph.text)
+    if not segments:
+        return False
+
+    replace_paragraph_text(paragraph, segments[0])
+    prev = paragraph
+    for segment in segments[1:]:
+        prev = insert_paragraph_after(prev, segment)
+    return True
+
+
+def _is_figure_hard_boundary_paragraph(paragraph, text: str) -> bool:
+    if paragraph_has_drawing(paragraph):
+        return True
+    if TABLE_NUM_RE.match(text):
+        return True
+    if is_table_continuation_text(text):
+        return True
+    if parse_heading1(text) or parse_heading2(text) or parse_broken_heading2(text):
+        return True
+    if is_references_heading_text(text):
+        return True
+    if text.lower() == "приложения":
+        return True
+    if normalize_appendix_start_label_text(text):
+        return True
+    if is_appendix_continuation_label_text(text):
+        return True
+    return False
+
+
+def _figure_neighbor_paragraphs(document, image_child_idx: int, body_start: int, *, direction: int, max_blocks: int):
+    children = list(document.element.body)
+    paragraph_lookup = _paragraph_lookup(document)
+    blocks = []
+    idx = image_child_idx + direction
+
+    while 0 <= idx < len(children) and len(blocks) < max_blocks:
+        child = children[idx]
+
+        if child.tag == qn("w:tbl"):
+            return blocks, True
+
+        if child.tag != qn("w:p"):
+            return blocks, True
+
+        if _is_empty_paragraph_xml(child):
+            idx += direction
             continue
+
+        info = paragraph_lookup.get(child)
+        if info is None:
+            return blocks, False
+
+        paragraph_idx, paragraph = info
+        if paragraph_idx < body_start:
+            return blocks, False
 
         text = clean_spaces(paragraph.text)
+        if _is_paragraph_xml_with_image(child):
+            return blocks, False
 
-        if is_references_heading_text(text):
-            in_references = True
+        if _is_figure_service_text(text) or _is_figure_caption_text(text) or _figure_metadata_segments(paragraph.text):
+            blocks.append(paragraph)
+            idx += direction
             continue
 
-        if in_references and is_appendix_heading_text(text):
-            in_references = False
+        if _is_figure_hard_boundary_paragraph(paragraph, text):
+            return blocks, True
 
-        if in_references or not FIG_RE.match(text):
+        return blocks, True
+
+    if len(blocks) >= max_blocks:
+        peek_idx = idx
+        while 0 <= peek_idx < len(children):
+            child = children[peek_idx]
+            if child.tag == qn("w:tbl"):
+                break
+            if child.tag != qn("w:p"):
+                break
+            if _is_empty_paragraph_xml(child):
+                peek_idx += direction
+                continue
+            info = paragraph_lookup.get(child)
+            if info is None:
+                break
+            paragraph_idx, paragraph = info
+            if paragraph_idx < body_start:
+                break
+            text = clean_spaces(paragraph.text)
+            if _is_paragraph_xml_with_image(child):
+                return blocks, False
+            if _is_figure_service_text(text) or _is_figure_caption_text(text) or _figure_metadata_segments(paragraph.text):
+                return blocks, False
+            break
+
+    if direction < 0:
+        blocks.reverse()
+    return blocks, True
+
+
+def _collect_figure_block_around_image(document, image_paragraph, body_start):
+    paragraph_info = _paragraph_lookup(document).get(image_paragraph._p)
+    if paragraph_info is None:
+        return None
+
+    paragraph_idx, _paragraph = paragraph_info
+    if paragraph_idx < body_start:
+        return None
+
+    children = list(document.element.body)
+    try:
+        image_child_idx = children.index(image_paragraph._p)
+    except ValueError:
+        return None
+
+    before, before_clear = _figure_neighbor_paragraphs(
+        document,
+        image_child_idx,
+        body_start,
+        direction=-1,
+        max_blocks=2,
+    )
+    after, after_clear = _figure_neighbor_paragraphs(
+        document,
+        image_child_idx,
+        body_start,
+        direction=1,
+        max_blocks=3,
+    )
+    if not before_clear or not after_clear:
+        return None
+
+    metadata = before + after
+    if not metadata:
+        return None
+
+    captions = [p for p in metadata if _is_figure_caption_text(p.text)]
+    services = [p for p in metadata if _is_figure_service_text(p.text)]
+    split_candidates = [p for p in metadata if _figure_metadata_segments(p.text)]
+
+    if split_candidates:
+        if len(split_candidates) > 1:
+            return None
+        return {"split": split_candidates[0]}
+
+    if len(captions) != 1:
+        return None
+
+    source_like = [p for p in services if not _is_figure_note_text(p.text)]
+    notes = [p for p in services if _is_figure_note_text(p.text)]
+    if len(source_like) > 1 or len(notes) > 1:
+        return None
+
+    desired = source_like + notes + captions
+    current_after = [p for p in after if p in desired]
+    already_canonical = not before and current_after == desired
+    return {
+        "split": None,
+        "desired": desired,
+        "already_canonical": already_canonical,
+    }
+
+
+def normalize_figure_blocks(document, body_start):
+    if body_start is None:
+        return False
+
+    for paragraph in list(document.paragraphs):
+        if not paragraph_has_drawing(paragraph):
             continue
 
-        if idx + 1 >= len(paragraphs):
+        block = _collect_figure_block_around_image(document, paragraph, body_start)
+        if not block:
             continue
 
-        source_paragraph = paragraphs[idx + 1]
-        source_text = clean_spaces(source_paragraph.text)
-        if not FIG_SERVICE_LINE_RE.match(source_text):
+        split_candidate = block.get("split")
+        if split_candidate is not None:
+            return _split_figure_metadata_soft_break_paragraph(split_candidate)
+
+        if block.get("already_canonical"):
+            for service in [p for p in block["desired"] if _is_figure_service_text(p.text)]:
+                format_source_line(service)
+            caption = block["desired"][-1]
+            normalize_figure_caption_text(caption)
+            format_figure_caption(caption)
             continue
 
-        paragraph._p.addprevious(source_paragraph._p)
-        format_source_line(source_paragraph)
-        format_figure_caption(paragraph)
+        anchor = paragraph._p
+        for metadata_paragraph in block["desired"]:
+            anchor.addnext(metadata_paragraph._p)
+            anchor = metadata_paragraph._p
+
+        for service in [p for p in block["desired"] if _is_figure_service_text(p.text)]:
+            format_source_line(service)
+        caption = block["desired"][-1]
+        normalize_figure_caption_text(caption)
+        format_figure_caption(caption)
         return True
 
     return False
+
+
+def reorder_figure_source_before_caption(document, body_start):
+    return normalize_figure_blocks(document, body_start)
 
 
 def ensure_empty_between_heading1_and_heading2(document, body_start):
@@ -5231,8 +5442,8 @@ def process_document(input_path: Path, output_path: Path):
     )
 
     run_with_pass_limit(
-        "reorder_figure_source_before_caption",
-        reorder_figure_source_before_caption,
+        "normalize_figure_blocks",
+        normalize_figure_blocks,
         doc,
         body_start,
     )

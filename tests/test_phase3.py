@@ -3260,6 +3260,255 @@ def test_b26_rybakov_style_split_caption_remains_stable() -> tuple[bool, str]:
     return _result(True, "Rybakov-style split caption remains stable")
 
 
+def _add_test_drawing_paragraph(doc: Document):
+    paragraph = doc.add_paragraph()
+    run = OxmlElement("w:r")
+    drawing = OxmlElement("w:drawing")
+    run.append(drawing)
+    paragraph._element.append(run)
+    return paragraph
+
+
+def _figure_block_tokens(doc: Document) -> list[str]:
+    from guides.coursework_kfu_2025.safe_formatter import paragraph_has_drawing
+
+    tokens = []
+    for paragraph in doc.paragraphs:
+        if paragraph_has_drawing(paragraph):
+            tokens.append("<IMAGE>")
+        elif paragraph.text:
+            tokens.append(" ".join(paragraph.text.split()))
+    return tokens
+
+
+def test_b27_canonical_image_source_note_caption_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    _add_test_drawing_paragraph(doc)
+    source = doc.add_paragraph("Источник: составлено автором.")
+    note = doc.add_paragraph("Примечание: условные данные.")
+    caption = doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if changed:
+        return _result(False, "canonical figure block reported a change")
+    if _figure_block_tokens(doc) != [
+        "<IMAGE>",
+        "Источник: составлено автором.",
+        "Примечание: условные данные.",
+        "Рис. 1.2.1. Схема процесса",
+    ]:
+        return _result(False, f"canonical figure block changed: {_figure_block_tokens(doc)!r}")
+    if doc.paragraphs[1]._p is not source._p or doc.paragraphs[2]._p is not note._p or doc.paragraphs[3]._p is not caption._p:
+        return _result(False, "canonical paragraphs were replaced or duplicated")
+    return _result(True, "canonical image/source/note/caption remains stable")
+
+
+def test_b27_caption_above_image_moves_below_image() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+    _add_test_drawing_paragraph(doc)
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != ["<IMAGE>", "Рис. 1.2.1. Схема процесса"]:
+        return _result(False, f"caption was not moved below image: {_figure_block_tokens(doc)!r}")
+    if not changed:
+        return _result(False, "caption/image reorder did not report a change")
+    return _result(True, "caption above image moves below image")
+
+
+def test_b27_source_above_image_moves_below_image() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Источник: составлено автором.")
+    _add_test_drawing_paragraph(doc)
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != [
+        "<IMAGE>",
+        "Источник: составлено автором.",
+        "Рис. 1.2.1. Схема процесса",
+    ]:
+        return _result(False, f"source was not moved below image: {_figure_block_tokens(doc)!r}")
+    if not changed:
+        return _result(False, "source/image reorder did not report a change")
+    return _result(True, "source above image moves below image")
+
+
+def test_b27_caption_and_source_above_image_normalize_to_canonical_order() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+    doc.add_paragraph("Источник: составлено автором.")
+    _add_test_drawing_paragraph(doc)
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != [
+        "<IMAGE>",
+        "Источник: составлено автором.",
+        "Рис. 1.2.1. Схема процесса",
+    ]:
+        return _result(False, f"caption/source/image block not canonical: {_figure_block_tokens(doc)!r}")
+    if not changed:
+        return _result(False, "caption/source/image reorder did not report a change")
+    return _result(True, "caption and source above image normalize to canonical order")
+
+
+def test_b27_merged_source_note_splits_only_near_image() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    _add_test_drawing_paragraph(doc)
+    doc.add_paragraph("Источник: составлено автором.\nПримечание: условные данные.")
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != [
+        "<IMAGE>",
+        "Источник: составлено автором.",
+        "Примечание: условные данные.",
+        "Рис. 1.2.1. Схема процесса",
+    ]:
+        return _result(False, f"merged source/note was not split near image: {_figure_block_tokens(doc)!r}")
+    if not changed:
+        return _result(False, "source/note split did not report a change")
+    return _result(True, "source/note soft break splits only in a confirmed figure block")
+
+
+def test_b27_no_image_source_paragraph_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Источник: данные исследования.")
+    doc.add_paragraph("Обычный текст после источника.")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if [p.text for p in doc.paragraphs] != ["Источник: данные исследования.", "Обычный текст после источника."]:
+        return _result(False, "source paragraph without image was changed")
+    if changed:
+        return _result(False, "no-image source paragraph reported a change")
+    return _result(True, "source paragraph without image remains untouched")
+
+
+def test_b27_table_source_nearby_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.1")
+    doc.add_table(rows=1, cols=1)
+    doc.add_paragraph("Источник: составлено автором.")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if [p.text for p in doc.paragraphs] != ["Таблица 1.2.1", "Источник: составлено автором."]:
+        return _result(False, "table source block was changed by figure pass")
+    if changed:
+        return _result(False, "table source block reported a figure change")
+    return _result(True, "table/source block remains untouched by figure pass")
+
+
+def test_b27_two_nearby_images_are_ambiguous_noop() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    _add_test_drawing_paragraph(doc)
+    doc.add_paragraph("Источник: составлено автором.")
+    _add_test_drawing_paragraph(doc)
+    doc.add_paragraph("Рис. 1.2.1. Схема процесса")
+
+    before = _figure_block_tokens(doc)
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != before:
+        return _result(False, f"ambiguous nearby images were reordered: {_figure_block_tokens(doc)!r}")
+    if changed:
+        return _result(False, "ambiguous nearby images reported a change")
+    return _result(True, "nearby images are treated as ambiguous and left unchanged")
+
+
+def test_b27_neuromarketing_style_disorder_normalizes() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Источник: данные автора.")
+    doc.add_paragraph("Примечание: значения условные.")
+    _add_test_drawing_paragraph(doc)
+    doc.add_paragraph("Рис. 1.1.1. Модель восприятия")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != [
+        "<IMAGE>",
+        "Источник: данные автора.",
+        "Примечание: значения условные.",
+        "Рис. 1.1.1. Модель восприятия",
+    ]:
+        return _result(False, f"neuromarketing-style figure block not canonical: {_figure_block_tokens(doc)!r}")
+    if not changed:
+        return _result(False, "neuromarketing-style disorder did not report a change")
+    return _result(True, "neuromarketing-style disorder normalizes")
+
+
+def test_b27_rybakov_stable_figure_block_unchanged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    doc.add_paragraph("Текст перед рисунком.")
+    _add_test_drawing_paragraph(doc)
+    source = doc.add_paragraph("Источник: составлено автором.")
+    caption = doc.add_paragraph("Рис. 2.1.1. Сравнение каналов коммуникации")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != [
+        "Текст перед рисунком.",
+        "<IMAGE>",
+        "Источник: составлено автором.",
+        "Рис. 2.1.1. Сравнение каналов коммуникации",
+    ]:
+        return _result(False, f"stable Rybakov-style figure block changed: {_figure_block_tokens(doc)!r}")
+    if doc.paragraphs[2]._p is not source._p or doc.paragraphs[3]._p is not caption._p:
+        return _result(False, "stable Rybakov-style paragraphs were replaced")
+    if changed:
+        return _result(False, "stable Rybakov-style figure block reported a change")
+    return _result(True, "Rybakov-style figure block remains stable")
+
+
+def test_b27_figure_prose_after_source_does_not_block_reorder() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_blocks
+
+    doc = Document()
+    _add_test_drawing_paragraph(doc)
+    doc.add_paragraph("Рис. 1.1.1. Закупочный центр")
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.1.1. показывает, что решение формируется под влиянием нескольких участников.")
+
+    changed = normalize_figure_blocks(doc, 0)
+
+    if _figure_block_tokens(doc) != [
+        "<IMAGE>",
+        "Источник: составлено автором.",
+        "Рис. 1.1.1. Закупочный центр",
+        "Рис. 1.1.1. показывает, что решение формируется под влиянием нескольких участников.",
+    ]:
+        return _result(False, f"figure prose after source blocked reorder: {_figure_block_tokens(doc)!r}")
+    if not changed:
+        return _result(False, "figure caption/source/prose reorder did not report a change")
+    return _result(True, "figure prose after source does not count as a second caption")
+
+
 def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
     """
     Figure captions require exactly one blank before the caption, but no blank
@@ -3310,15 +3559,16 @@ def test_figure_source_after_caption_is_moved_before_caption() -> tuple[bool, st
     from guides.coursework_kfu_2025.safe_formatter import reorder_figure_source_before_caption
 
     doc = Document()
+    _add_test_drawing_paragraph(doc)
     caption = doc.add_paragraph("Рис. 1.2.1. Схема процесса")
     source = doc.add_paragraph("Источник: составлено автором.")
 
     changed = reorder_figure_source_before_caption(doc, 0)
 
-    texts = [p.text for p in doc.paragraphs]
-    if texts != ["Источник: составлено автором.", "Рис. 1.2.1. Схема процесса"]:
+    texts = _figure_block_tokens(doc)
+    if texts != ["<IMAGE>", "Источник: составлено автором.", "Рис. 1.2.1. Схема процесса"]:
         return _result(False, f"wrong figure source/caption order: {texts!r}")
-    if doc.paragraphs[0]._p is not source._p or doc.paragraphs[1]._p is not caption._p:
+    if doc.paragraphs[1]._p is not source._p or doc.paragraphs[2]._p is not caption._p:
         return _result(False, "source/caption paragraphs were duplicated or replaced")
     if caption.alignment != WD_ALIGN_PARAGRAPH.CENTER:
         return _result(False, "figure caption is not centered after move")
@@ -3367,13 +3617,14 @@ def test_appendix_figure_source_after_caption_is_moved() -> tuple[bool, str]:
     doc = Document()
     doc.add_paragraph("ПРИЛОЖЕНИЯ")
     doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    _add_test_drawing_paragraph(doc)
     doc.add_paragraph("Рис. 3.1.1. Схема приложения")
     doc.add_paragraph("Источник: составлено автором.")
 
     changed = reorder_figure_source_before_caption(doc, 0)
 
-    texts = [p.text for p in doc.paragraphs]
-    if texts[-2:] != ["Источник: составлено автором.", "Рис. 3.1.1. Схема приложения"]:
+    texts = _figure_block_tokens(doc)
+    if texts[-3:] != ["<IMAGE>", "Источник: составлено автором.", "Рис. 3.1.1. Схема приложения"]:
         return _result(False, f"appendix figure order was not fixed: {texts!r}")
     if not changed:
         return _result(False, "appendix figure reorder did not report a change")
@@ -6343,6 +6594,17 @@ def run_all() -> None:
         ("B2.6 | appendix table-like title", test_b26_appendix_immediate_dash_table_like_title_stays_appendix_title),
         ("B2.6 | neuromarketing inline caption", test_b26_neuromarketing_style_inline_caption_normalizes),
         ("B2.6 | Rybakov split caption stable", test_b26_rybakov_style_split_caption_remains_stable),
+        ("B2.7 | canonical figure block stable", test_b27_canonical_image_source_note_caption_unchanged),
+        ("B2.7 | caption above image", test_b27_caption_above_image_moves_below_image),
+        ("B2.7 | source above image", test_b27_source_above_image_moves_below_image),
+        ("B2.7 | caption source above image", test_b27_caption_and_source_above_image_normalize_to_canonical_order),
+        ("B2.7 | merged source note near image", test_b27_merged_source_note_splits_only_near_image),
+        ("B2.7 | no-image source unchanged", test_b27_no_image_source_paragraph_unchanged),
+        ("B2.7 | table source unchanged", test_b27_table_source_nearby_unchanged),
+        ("B2.7 | nearby images ambiguous", test_b27_two_nearby_images_are_ambiguous_noop),
+        ("B2.7 | neuromarketing disorder", test_b27_neuromarketing_style_disorder_normalizes),
+        ("B2.7 | Rybakov figure stable", test_b27_rybakov_stable_figure_block_unchanged),
+        ("B2.7 | figure prose not caption", test_b27_figure_prose_after_source_does_not_block_reorder),
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
         ("T6 | figure source moved before caption", test_figure_source_after_caption_is_moved_before_caption),
         ("T6 | correct figure source order unchanged", test_figure_source_before_caption_is_unchanged),
