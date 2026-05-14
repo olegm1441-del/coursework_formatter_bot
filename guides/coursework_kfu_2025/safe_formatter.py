@@ -3409,6 +3409,12 @@ def _classify_paragraph_with_table_adjacency(document, paragraph, body_start, pr
     return kind
 
 
+def _clean_inline_table_caption_title(text: str) -> str:
+    title = clean_spaces(text)
+    title = re.sub(r"^\s*[-–—]\s*", "", title, count=1)
+    return clean_spaces(title)
+
+
 def split_table_captions_prepass(document, body_start):
     changed = True
     while changed:
@@ -3430,9 +3436,16 @@ def split_table_captions_prepass(document, body_start):
                 continue
 
             number = m.group(1)
-            tail = clean_spaces(m.group(2))
-            if not tail:
+            raw_tail = clean_spaces(m.group(2))
+            if not raw_tail:
                 continue
+
+            tail = _clean_inline_table_caption_title(raw_tail)
+            if not tail:
+                replace_paragraph_text(p, f"Таблица {number}")
+                format_table_caption(p)
+                changed = True
+                break
 
             replace_paragraph_text(p, f"Таблица {number}")
             title_p = insert_paragraph_after(p, tail)

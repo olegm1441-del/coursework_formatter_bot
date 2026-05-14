@@ -3107,6 +3107,159 @@ def test_b25_neuromarketing_style_table_false_positive_is_prevented() -> tuple[b
     return _result(True, "neuromarketing-style table false positive is prevented")
 
 
+def test_b26_inline_dash_table_caption_title_loses_leading_dash() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1 — Отличия индивидуального и организационного поведения")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Показатель"
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    if "Таблица 1.1.1" not in texts:
+        return _result(False, f"caption missing after inline split: {texts!r}")
+    expected_title = "Отличия индивидуального и организационного поведения"
+    if expected_title not in texts:
+        return _result(False, f"clean inline title missing: {texts!r}")
+    if any(text.startswith(("-", "–", "—")) and "Отличия" in text for text in texts):
+        return _result(False, f"inline title kept leading dash: {texts!r}")
+    return _result(True, "inline dash table title loses leading dash")
+
+
+def test_b26_inline_en_dash_table_caption_title_strips_extra_spaces() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1 –   Отличия индивидуального и организационного поведения")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Показатель"
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    expected_title = "Отличия индивидуального и организационного поведения"
+    if expected_title not in texts:
+        return _result(False, f"inline title was not cleaned: {texts!r}")
+    if any(text.startswith(("-", "–", "—")) and "Отличия" in text for text in texts):
+        return _result(False, f"inline title kept dash/extra spaces: {texts!r}")
+    return _result(True, "inline en dash title strips dash and extra spaces")
+
+
+def test_b26_already_split_table_caption_remains_single_title() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    title_text = "Отличия индивидуального и организационного поведения"
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1")
+    doc.add_paragraph(title_text)
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Показатель"
+
+    formatted = _format_synthetic_doc(doc)
+    matching_titles = [p for p in formatted.paragraphs if " ".join(p.text.split()) == title_text]
+    if len(matching_titles) != 1:
+        return _result(False, f"already split title duplicated or missing: count={len(matching_titles)}")
+    if matching_titles[0].alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "already split title is not centered")
+    return _result(True, "already split table caption remains single title")
+
+
+def test_b26_non_adjacent_table_prose_remains_unchanged() -> tuple[bool, str]:
+    prose = "Таблица 1.1.1 показывает, что показатели растут."
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph(prose)
+    doc.add_paragraph("Следующий аналитический абзац.")
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    if prose not in texts:
+        return _result(False, f"non-adjacent table prose was changed: {texts!r}")
+    if "Таблица 1.1.1" in texts:
+        return _result(False, f"non-adjacent table prose was split: {texts!r}")
+    return _result(True, "non-adjacent table prose remains unchanged")
+
+
+def test_b26_v_tablitse_prose_remains_unchanged() -> tuple[bool, str]:
+    prose = "В таблице 1.1.1 представлены основные показатели исследования."
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph(prose)
+
+    formatted = _format_synthetic_doc(doc)
+    if _paragraph_index(formatted, prose) is None:
+        return _result(False, "ordinary prose mentioning table was changed")
+    return _result(True, "ordinary prose mentioning table remains unchanged")
+
+
+def test_b26_appendix_immediate_dash_table_like_title_stays_appendix_title() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ 3")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ А")
+    doc.add_paragraph("Таблица А.1 — Расчет показателей.")
+    doc.add_table(rows=1, cols=1)
+
+    formatted = _format_synthetic_doc(doc)
+    title = next(
+        (
+            p for p in formatted.paragraphs
+            if "Таблица А.1" in " ".join(p.text.split()) and "Расчет показателей" in " ".join(p.text.split())
+        ),
+        None,
+    )
+    if title is None:
+        return _result(False, "appendix table-like title missing")
+    if " ".join(title.text.split()).startswith("Расчет"):
+        return _result(False, "appendix table-like title was split as ordinary table caption")
+    if title.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, "appendix table-like title is not centered")
+    return _result(True, "appendix immediate dash table-like title stays appendix title")
+
+
+def test_b26_neuromarketing_style_inline_caption_normalizes() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("СОДЕРЖАНИЕ\nВВЕДЕНИЕ\n1. Теоретические основы")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("Таблица 1.1.1 — Отличия индивидуального и организационного поведения")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Показатель"
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    expected_title = "Отличия индивидуального и организационного поведения"
+    if "Таблица 1.1.1" not in texts or expected_title not in texts:
+        return _result(False, f"neuromarketing-style inline caption was not normalized: {texts!r}")
+    if any(text.startswith(("-", "–", "—")) and "Отличия" in text for text in texts):
+        return _result(False, f"neuromarketing-style title kept leading dash: {texts!r}")
+    return _result(True, "neuromarketing-style inline caption normalizes")
+
+
+def test_b26_rybakov_style_split_caption_remains_stable() -> tuple[bool, str]:
+    title_text = "Сравнительная характеристика каналов коммуникации"
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1")
+    doc.add_paragraph(title_text)
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Канал"
+
+    formatted = _format_synthetic_doc(doc)
+    texts = [" ".join(p.text.split()) for p in formatted.paragraphs if " ".join(p.text.split())]
+    if texts.count("Таблица 1.1.1") != 1 or texts.count(title_text) != 1:
+        return _result(False, f"Rybakov-style split caption changed unexpectedly: {texts!r}")
+    return _result(True, "Rybakov-style split caption remains stable")
+
+
 def test_figure_caption_spacing_and_blank_font() -> tuple[bool, str]:
     """
     Figure captions require exactly one blank before the caption, but no blank
@@ -6182,6 +6335,14 @@ def run_all() -> None:
         ("B2.5 | source analytical prose body", test_b25_source_then_table_analytical_prose_is_not_promoted),
         ("B2.5 | appendix table-like title", test_b25_appendix_immediate_table_like_title_is_preserved),
         ("B2.5 | neuromarketing false positive", test_b25_neuromarketing_style_table_false_positive_is_prevented),
+        ("B2.6 | inline dash title cleanup", test_b26_inline_dash_table_caption_title_loses_leading_dash),
+        ("B2.6 | inline en dash spacing cleanup", test_b26_inline_en_dash_table_caption_title_strips_extra_spaces),
+        ("B2.6 | split caption stable", test_b26_already_split_table_caption_remains_single_title),
+        ("B2.6 | non-adjacent table prose", test_b26_non_adjacent_table_prose_remains_unchanged),
+        ("B2.6 | prose mentioning table", test_b26_v_tablitse_prose_remains_unchanged),
+        ("B2.6 | appendix table-like title", test_b26_appendix_immediate_dash_table_like_title_stays_appendix_title),
+        ("B2.6 | neuromarketing inline caption", test_b26_neuromarketing_style_inline_caption_normalizes),
+        ("B2.6 | Rybakov split caption stable", test_b26_rybakov_style_split_caption_remains_stable),
         ("T6 | figure caption spacing + blank font", test_figure_caption_spacing_and_blank_font),
         ("T6 | figure source moved before caption", test_figure_source_after_caption_is_moved_before_caption),
         ("T6 | correct figure source order unchanged", test_figure_source_before_caption_is_unchanged),
