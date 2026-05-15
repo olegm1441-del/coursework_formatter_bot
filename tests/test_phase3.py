@@ -6498,6 +6498,205 @@ def test_marker_runtime_real_bondarev_keeps_headings_safe() -> tuple[bool, str]:
     return _result(True, "Бондарев active mode leaves headings unchanged")
 
 
+def test_phase3_marker_budget_fail_open_many_tables() -> tuple[bool, str]:
+    """
+    When a document has more tables than the rendered-marker-split budget,
+    apply_rendered_table_continuation must skip the expensive diagnostic
+    (no LibreOffice render, no diagnose_all_tables call), return 0, and
+    surface a Russian warning via the FormattingReport.
+    """
+    import logging
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    for i in range(5):
+        doc.add_paragraph(f"Таблица 1.1.{i+1}")
+        tbl = doc.add_table(rows=2, cols=2)
+        tbl.rows[0].cells[0].text = f"h{i}0"
+        tbl.rows[0].cells[1].text = f"h{i}1"
+        tbl.rows[1].cells[0].text = f"v{i}0"
+        tbl.rows[1].cells[1].text = f"v{i}1"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "many_tables.docx"
+        doc.save(path)
+        before = path.read_bytes()
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_budget = os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = "1"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        render_calls: list = []
+        diagnose_calls: list = []
+        log_handler_buffer: list[str] = []
+
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                log_handler_buffer.append(record.getMessage())
+
+        handler = _CaptureHandler(level=logging.DEBUG)
+        previous_level = tc.logger.level
+        try:
+            def boom_diagnose(_path, keep_temp=False):
+                diagnose_calls.append(_path)
+                raise AssertionError(
+                    "diagnose_all_tables must not be called when render budget is exceeded"
+                )
+
+            def boom_render(_path):
+                render_calls.append(_path)
+                raise AssertionError(
+                    "render_docx_to_pdf must not be called when render budget is exceeded"
+                )
+
+            tm.diagnose_all_tables = boom_diagnose
+            tc.render_docx_to_pdf = boom_render
+            tc.analyze_pdf_lines = lambda _path: []
+
+            report = FormattingReport()
+            tc.logger.addHandler(handler)
+            tc.logger.setLevel(logging.DEBUG)
+            n = tc.apply_rendered_table_continuation(path, report=report)
+        finally:
+            tc.logger.removeHandler(handler)
+            tc.logger.setLevel(previous_level)
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_budget is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MAX_RENDERS", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = old_budget
+
+        after = path.read_bytes()
+
+    if n != 0:
+        return _result(False, f"expected 0 from budget skip, got {n}")
+    if before != after:
+        return _result(False, "budget skip should not mutate document bytes")
+    if diagnose_calls:
+        return _result(False, "diagnose_all_tables should not have been called")
+    if render_calls:
+        return _result(False, "render_docx_to_pdf should not have been called")
+    skip_log = next(
+        (m for m in log_handler_buffer if "render_budget_exceeded" in m and "marker_split_skipped" in m),
+        None,
+    )
+    if skip_log is None:
+        return _result(False, f"missing budget skip log; captured: {log_handler_buffer!r}")
+    if "count=5" not in skip_log or "budget=1" not in skip_log:
+        return _result(False, f"skip log missing count/budget: {skip_log!r}")
+    if not any("Автоперенос таблиц пропущен" in w for w in report.warnings):
+        return _result(False, f"expected Russian warning in report, got {report.warnings!r}")
+    return _result(True, "many-table doc fails open without render or diagnose")
+
+
+def test_phase3_marker_budget_allows_small_doc() -> tuple[bool, str]:
+    """
+    When the table count fits inside the budget, the marker diagnostic path
+    runs unchanged: diagnose_all_tables must be called and the existing
+    eligibility/skip logic must apply.
+    """
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=4, cols=2)
+    for i in range(4):
+        tbl.rows[i].cells[0].text = f"r{i}c0"
+        tbl.rows[i].cells[1].text = f"r{i}c1"
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=4,
+        pages_detected=[12, 13, 14],
+        row_pages={0: 12, 1: 12, 2: 13, 3: 14},
+        found_rows=[0, 1, 2, 3],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.1.1",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "small_doc.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "small_doc.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+        before = path.read_bytes()
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_budget = os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+        os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = "10"
+
+        old_diagnose_all = tm.diagnose_all_tables
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        diagnose_calls: list = []
+        try:
+            def spy_diagnose(_path, keep_temp=False):
+                diagnose_calls.append(_path)
+                return [diagnostic]
+
+            tm.diagnose_all_tables = spy_diagnose
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: []
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tm.diagnose_all_tables = old_diagnose_all
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_budget is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MAX_RENDERS", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = old_budget
+
+        after = path.read_bytes()
+
+    if not diagnose_calls:
+        return _result(False, "diagnose_all_tables must be called when budget allows")
+    if n != 0:
+        return _result(False, f"3-page diagnostic should be ineligible (n=0), got {n}")
+    if before != after:
+        return _result(False, "dry-run path with ineligible diagnostic should not mutate doc")
+    return _result(True, "small-doc marker split runs unchanged when within budget")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -6668,6 +6867,8 @@ def run_all() -> None:
         ("S1 | numbered original unchanged", test_split_prototype_numbered_original_document_unchanged),
         ("S1 | numbered row safe markup", test_split_prototype_numbered_row_has_no_numpr_and_no_calibri),
         ("M1 | headings unchanged across flags", test_marker_runtime_flags_do_not_change_headings),
+        ("M1 | render budget fail-open many tables", test_phase3_marker_budget_fail_open_many_tables),
+        ("M1 | render budget allows small doc", test_phase3_marker_budget_allows_small_doc),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":

@@ -1684,6 +1684,27 @@ def _marker_split_apply_enabled() -> bool:
     }
 
 
+_MARKER_SPLIT_MAX_RENDERS_DEFAULT = 6
+
+
+def _marker_split_max_renders() -> int:
+    """
+    Per-document cap on rendered marker-split candidates. Each candidate costs
+    one LibreOffice render; without a cap, large-table documents (e.g. requests
+    115/116) exceeded FORMAT_TIMEOUT_SECONDS=180. Env override:
+    KPFU_MARKER_SPLIT_MAX_RENDERS. Missing/invalid/negative values fall back to
+    the safe default.
+    """
+    raw = os.getenv("KPFU_MARKER_SPLIT_MAX_RENDERS", "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _MARKER_SPLIT_MAX_RENDERS_DEFAULT
+    if value < 0:
+        return _MARKER_SPLIT_MAX_RENDERS_DEFAULT
+    return value
+
+
 def _classify_marker_duplicate_rows(
     diagnostic,
     *,
@@ -2126,6 +2147,25 @@ def apply_rendered_table_continuation(
         len(doc.tables),
         max_passes,
     )
+
+    if _marker_split_enabled():
+        budget = _marker_split_max_renders()
+        table_count = len(doc.tables)
+        if table_count > budget:
+            emit_marker_summary()
+            logger.warning(
+                "marker_split_skipped reason=render_budget_exceeded count=%s budget=%s",
+                table_count,
+                budget,
+            )
+            if report is not None:
+                report.warn(
+                    "Автоперенос таблиц пропущен: в документе слишком много таблиц"
+                )
+            logger.info(
+                "rendered_final_decision action=rendered_no_action reason=render_budget_exceeded"
+            )
+            return 0
 
     if _marker_split_enabled():
         apply_marker_split = _marker_split_apply_enabled()
