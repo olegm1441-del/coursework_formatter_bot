@@ -6603,8 +6603,10 @@ def test_phase3_marker_budget_fail_open_many_tables() -> tuple[bool, str]:
         return _result(False, f"missing budget skip log; captured: {log_handler_buffer!r}")
     if "count=5" not in skip_log or "budget=1" not in skip_log:
         return _result(False, f"skip log missing count/budget: {skip_log!r}")
-    if not any("Автоперенос таблиц пропущен" in w for w in report.warnings):
+    if not any("Автоматическое разделение длинных таблиц пропущено" in w for w in report.warnings):
         return _result(False, f"expected Russian warning in report, got {report.warnings!r}")
+    if not any("Проверьте переносы таблиц вручную" in w for w in report.warnings):
+        return _result(False, f"expected advisory tail in report, got {report.warnings!r}")
     return _result(True, "many-table doc fails open without render or diagnose")
 
 

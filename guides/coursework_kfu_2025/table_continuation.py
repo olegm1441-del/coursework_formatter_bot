@@ -2160,7 +2160,8 @@ def apply_rendered_table_continuation(
             )
             if report is not None:
                 report.warn(
-                    "Автоперенос таблиц пропущен: в документе слишком много таблиц"
+                    "Автоматическое разделение длинных таблиц пропущено: "
+                    "в документе много таблиц. Проверьте переносы таблиц вручную."
                 )
             logger.info(
                 "rendered_final_decision action=rendered_no_action reason=render_budget_exceeded"
