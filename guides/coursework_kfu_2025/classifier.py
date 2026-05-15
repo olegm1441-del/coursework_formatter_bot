@@ -30,6 +30,29 @@ FIGURE_CAPTION_RE = re.compile(
 )
 SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:\s*.+$", re.IGNORECASE)
 
+# Russian reference-prose verbs that indicate "Таблица N …" / "Рис. N …" is body
+# text REFERRING to a table/figure, not a caption title.
+# Vocabulary kept in sync with the verb list already trusted by
+# safe_formatter._is_figure_caption_text (introduced in commit be38951).
+_CAPTION_REFERENCE_PROSE_RE = re.compile(
+    r"^(показыва|отража|содерж|представлен|представля|"
+    r"демонстрир|иллюстрир|свидетельств)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def caption_tail_is_reference_prose(tail: str) -> bool:
+    """
+    Return True when the text following a 'Таблица N' / 'Рис. N' prefix starts
+    with a Russian reference verb (e.g. 'показывает', 'демонстрирует'). Such
+    paragraphs are body prose referring to the table/figure, not caption titles.
+    """
+    if not tail:
+        return False
+    t = clean_spaces(tail).lstrip(".:—–-").lstrip()
+    if not t:
+        return False
+    return bool(_CAPTION_REFERENCE_PROSE_RE.match(t))
 
 
 def clean_spaces(text: str) -> str:
@@ -180,13 +203,19 @@ def classify_paragraph(text: str, prev_kind=None) -> str:
         return "reference_subheading"
 
     if TABLE_CAPTION_RE.match(t):
-        return "table_caption"
+        prefix = re.match(r"^\s*(таблица|table)\s+\d+(?:\.\d+){0,2}\.?", t, re.IGNORECASE)
+        tail = t[prefix.end():] if prefix else ""
+        if not caption_tail_is_reference_prose(tail):
+            return "table_caption"
 
     if is_table_continuation_line(t):
         return "table_continuation"
 
     if FIGURE_CAPTION_RE.match(t):
-        return "figure_caption"
+        prefix = re.match(r"^\s*(рис\.|рисунок|figure|fig\.)\s*\d+(?:\.\d+){0,2}", t, re.IGNORECASE)
+        tail = t[prefix.end():] if prefix else ""
+        if not caption_tail_is_reference_prose(tail):
+            return "figure_caption"
 
     if SOURCE_LINE_RE.match(t):
         return "source_line"

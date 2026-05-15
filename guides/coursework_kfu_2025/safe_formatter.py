@@ -486,6 +486,7 @@ from .classifier import (
     parse_heading1,
     parse_heading2,
     parse_broken_heading2,
+    caption_tail_is_reference_prose,
 )
 from .page_numbering import apply_page_numbering_policy
 from .page_breaks import apply_page_breaks
@@ -3258,13 +3259,15 @@ def detect_kind_from_paragraph_object(paragraph, text: str, prev_kind=None) -> s
     if parse_broken_heading2(t):
         return "broken_heading2"
 
-    if TABLE_NUM_RE.match(t):
+    m_tab = TABLE_NUM_RE.match(t)
+    if m_tab and not caption_tail_is_reference_prose(m_tab.group(2) or ""):
         return "table_caption"
 
     if is_table_continuation_text(t):
         return "table_continuation"
 
-    if FIG_RE.match(t):
+    m_fig = FIG_RE.match(t)
+    if m_fig and not caption_tail_is_reference_prose(m_fig.group(3) or ""):
         return "figure_caption"
 
     if re.match(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", t, re.IGNORECASE):
@@ -3369,6 +3372,11 @@ def _is_confirmed_table_caption_paragraph(document, paragraph, body_start) -> bo
     text = clean_spaces(paragraph.text)
     m = TABLE_NUM_RE.match(text)
     if not m:
+        return False
+
+    # Reject reference-prose paragraphs like "Таблица 1.1.1 показывает ...":
+    # these are body text referring to the table, not the caption itself.
+    if caption_tail_is_reference_prose(m.group(2) or ""):
         return False
 
     paragraph_info = _paragraph_lookup(document).get(paragraph._p)
@@ -5221,6 +5229,10 @@ def process_document(input_path: Path, output_path: Path):
         kind = detect_kind_from_paragraph_object(paragraph, text, prev_kind=prev_kind)
         if kind == "table_caption" and not _is_confirmed_table_caption_paragraph(doc, paragraph, body_start):
             kind = "body_text"
+        if kind == "figure_caption":
+            m_fig_main = FIG_RE.match(text)
+            if m_fig_main and caption_tail_is_reference_prose(m_fig_main.group(3) or ""):
+                kind = "body_text"
         prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
         is_body_list_item = is_probable_body_list_item(
             paragraph,
@@ -5605,7 +5617,8 @@ def process_document(input_path: Path, output_path: Path):
             prev_nonempty_kind = "table_title"
             continue
 
-        if FIG_RE.match(text):
+        m_fig_pass = FIG_RE.match(text)
+        if m_fig_pass and not caption_tail_is_reference_prose(m_fig_pass.group(3) or ""):
             normalize_figure_caption_text(paragraph)
             format_figure_caption(paragraph)
             prev_nonempty_kind = "figure_caption"

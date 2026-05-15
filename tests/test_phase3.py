@@ -6498,6 +6498,244 @@ def test_marker_runtime_real_bondarev_keeps_headings_safe() -> tuple[bool, str]:
     return _result(True, "Бондарев active mode leaves headings unchanged")
 
 
+def _get_para_xml_attrs(p):
+    from docx.oxml.ns import qn
+    pPr = p._element.find(qn("w:pPr"))
+    if pPr is None:
+        return {}
+    out = {}
+    ind = pPr.find(qn("w:ind"))
+    if ind is not None:
+        for k, v in ind.attrib.items():
+            out[f"ind:{k.split('}')[-1]}"] = v
+    jc = pPr.find(qn("w:jc"))
+    out["jc"] = jc.get(qn("w:val")) if jc is not None else None
+
+    def _bool_flag(elem):
+        # Word boolean toggle: element absent → off; element present without
+        # val → on; element present with val in {"0","false","off"} → off.
+        if elem is None:
+            return False
+        val = elem.get(qn("w:val"))
+        if val is None:
+            return True
+        return val.lower() not in {"0", "false", "off"}
+
+    out["keepNext"] = _bool_flag(pPr.find(qn("w:keepNext")))
+    out["pageBreakBefore"] = _bool_flag(pPr.find(qn("w:pageBreakBefore")))
+    return out
+
+
+def test_caption_tail_is_reference_prose_unit() -> tuple[bool, str]:
+    """Unit-test the shared helper used by the new caption demotion logic."""
+    from guides.coursework_kfu_2025.classifier import caption_tail_is_reference_prose
+    cases = [
+        ("показывает динамику", True),
+        ("показывают, что", True),
+        ("демонстрирует структуру", True),
+        ("отражает зависимость", True),
+        ("иллюстрирует тезис", True),
+        ("содержит данные", True),
+        ("представлены результаты", True),
+        ("свидетельствует о росте", True),
+        (". показывает, что", True),
+        ("— показывает, что", True),
+        ("Жизненный цикл документа", False),
+        ("— Влияние документооборота", False),
+        ("Закупочный центр потенциального франчайзи", False),
+        ("", False),
+        ("   ", False),
+    ]
+    for tail, expected in cases:
+        got = caption_tail_is_reference_prose(tail)
+        if got != expected:
+            return _result(False, f"caption_tail_is_reference_prose({tail!r}) = {got}, expected {expected}")
+    return _result(True, "caption_tail_is_reference_prose covers verb list and edge cases")
+
+
+def test_table_reference_paragraph_not_caption() -> tuple[bool, str]:
+    """'Таблица 1.1.1 показывает...' is body text even when adjacent to a real table."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("Таблица 1.1.1 показывает динамику внедрения ЭДО в крупных компаниях.")
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "h0"
+    tbl.rows[0].cells[1].text = "h1"
+    tbl.rows[1].cells[0].text = "v0"
+    tbl.rows[1].cells[1].text = "v1"
+    doc.add_paragraph("Заключительный текст.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    target = None
+    for p in result.paragraphs:
+        if p.text.strip().startswith("Таблица 1.1.1 показывает"):
+            target = p
+            break
+    if target is None:
+        return _result(False, "reference-prose paragraph missing from output")
+    attrs = _get_para_xml_attrs(target)
+    # Body paragraph: justified (or default body), 1.25cm first-line indent,
+    # no keepNext, no pageBreakBefore, not heading style.
+    if attrs.get("keepNext"):
+        return _result(False, f"reference-prose paragraph has keepNext: attrs={attrs!r}")
+    if attrs.get("pageBreakBefore"):
+        return _result(False, f"reference-prose paragraph has pageBreakBefore: attrs={attrs!r}")
+    if attrs.get("ind:firstLine") != "709":
+        return _result(False, f"reference-prose paragraph wrong first-line indent: attrs={attrs!r}")
+    if attrs.get("jc") not in (None, "both", "left"):
+        # process_document uses justify ("both" in DOCX) for body; allow None as inherited body default
+        return _result(False, f"reference-prose paragraph wrongly aligned: attrs={attrs!r}")
+    style = (target.style.name or "").lower()
+    if "heading" in style or "заголовок" in style:
+        return _result(False, f"reference-prose paragraph got heading style: {style!r}")
+    return _result(True, "Таблица N показывает... stays body text")
+
+
+def test_figure_reference_paragraph_not_caption() -> tuple[bool, str]:
+    """'Рис. 1.1.1. показывает...' is body text, not figure caption."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Вводный текст.")
+    # Real figure block (image + source + real caption)
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.1.1. Закупочный центр потенциального франчайзи")
+    # Body prose referencing the figure — must NOT be reclassified as caption
+    doc.add_paragraph("Рис. 1.1.1. показывает структуру закупочного центра в малом бизнесе.")
+    doc.add_paragraph("Заключительный текст.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    target = None
+    for p in result.paragraphs:
+        if p.text.strip().startswith("Рис. 1.1.1. показывает"):
+            target = p
+            break
+    if target is None:
+        return _result(False, "figure reference-prose paragraph missing from output")
+    attrs = _get_para_xml_attrs(target)
+    if attrs.get("keepNext"):
+        return _result(False, f"figure reference-prose has keepNext: attrs={attrs!r}")
+    if attrs.get("pageBreakBefore"):
+        return _result(False, f"figure reference-prose has pageBreakBefore: attrs={attrs!r}")
+    if attrs.get("jc") == "center":
+        return _result(False, f"figure reference-prose centered: attrs={attrs!r}")
+    if attrs.get("ind:firstLine") != "709":
+        return _result(False, f"figure reference-prose wrong first-line indent: attrs={attrs!r}")
+    return _result(True, "Рис. N. показывает... stays body text, not centered")
+
+
+def test_no_keep_with_next_on_reference_paragraph() -> tuple[bool, str]:
+    """Phase 2 pagination must not set keepWithNext on reference-prose paragraphs."""
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1 показывает результаты пилота.")
+    tbl = doc.add_table(rows=1, cols=1)
+    tbl.rows[0].cells[0].text = "cell"
+    doc.add_paragraph("Рис. 1.1.1. показывает структуру.")
+
+    apply_pagination_rules(doc)
+
+    target_tab = next((p for p in doc.paragraphs if p.text.startswith("Таблица 1.1.1 показывает")), None)
+    target_fig = next((p for p in doc.paragraphs if p.text.startswith("Рис. 1.1.1. показывает")), None)
+    if target_tab is None or target_fig is None:
+        return _result(False, "reference-prose paragraphs missing from doc")
+    if _get_para_xml_attrs(target_tab).get("keepNext"):
+        return _result(False, "Phase 2 set keepNext on table reference-prose paragraph")
+    if _get_para_xml_attrs(target_fig).get("keepNext"):
+        return _result(False, "Phase 2 set keepNext on figure reference-prose paragraph")
+    return _result(True, "pagination_rules leaves reference-prose paragraphs alone")
+
+
+def test_actual_table_caption_still_formats() -> tuple[bool, str]:
+    """Regression guard: a real table caption is still classified and formatted as caption."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "h0"
+    tbl.rows[0].cells[1].text = "h1"
+    tbl.rows[1].cells[0].text = "v0"
+    tbl.rows[1].cells[1].text = "v1"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+    apply_pagination_rules(result)
+
+    caption = next((p for p in result.paragraphs if p.text.strip() == "Таблица 1.1.1"), None)
+    if caption is None:
+        return _result(False, "real table caption missing after format")
+    attrs = _get_para_xml_attrs(caption)
+    if not attrs.get("keepNext"):
+        return _result(False, f"real table caption lost keepNext: attrs={attrs!r}")
+    # format_table_caption sets right alignment — the existing Phase 1 behavior must be preserved.
+    if attrs.get("jc") != "right":
+        return _result(False, f"real table caption alignment changed: attrs={attrs!r}")
+    return _result(True, "real table caption still formatted as caption and keepNext set")
+
+
+def test_actual_figure_caption_still_formats() -> tuple[bool, str]:
+    """Regression guard: a real figure caption is still classified as figure_caption."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    from guides.coursework_kfu_2025.classifier import classify_paragraph
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.1.1. Жизненный цикл документа")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    caption = next((p for p in result.paragraphs if "Жизненный цикл документа" in p.text), None)
+    if caption is None:
+        return _result(False, "real figure caption missing after format")
+    # The text-only classifier must still call this a figure caption.
+    if classify_paragraph(caption.text) != "figure_caption":
+        return _result(False, f"real figure caption misclassified: {caption.text!r} -> {classify_paragraph(caption.text)}")
+    return _result(True, "real figure caption still classified as figure_caption")
+
+
 def test_phase3_marker_budget_fail_open_many_tables() -> tuple[bool, str]:
     """
     When a document has more tables than the rendered-marker-split budget,
@@ -6871,6 +7109,13 @@ def run_all() -> None:
         ("M1 | headings unchanged across flags", test_marker_runtime_flags_do_not_change_headings),
         ("M1 | render budget fail-open many tables", test_phase3_marker_budget_fail_open_many_tables),
         ("M1 | render budget allows small doc", test_phase3_marker_budget_allows_small_doc),
+        # Caption demotion: reference-prose paragraphs must stay body text.
+        ("PA | caption_tail_is_reference_prose unit", test_caption_tail_is_reference_prose_unit),
+        ("PA | Таблица N показывает... stays body", test_table_reference_paragraph_not_caption),
+        ("PA | Рис. N показывает... stays body", test_figure_reference_paragraph_not_caption),
+        ("PA | no keepNext on reference-prose", test_no_keep_with_next_on_reference_paragraph),
+        ("PA | real table caption still formats", test_actual_table_caption_still_formats),
+        ("PA | real figure caption still formats", test_actual_figure_caption_still_formats),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":
