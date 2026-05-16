@@ -2468,7 +2468,7 @@ def format_reference_subheading(paragraph):
 
 def format_figure_caption(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
@@ -4258,6 +4258,65 @@ def remove_empty_between_figure_caption_and_source(document, body_start):
     return changed
 
 
+def remove_empty_between_figure_source_and_caption(document, body_start):
+    """Remove blank paragraphs between Источник/Примечание and the real figure caption."""
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+            text = clean_spaces(p.text)
+            if not FIG_SERVICE_LINE_RE.match(text):
+                continue
+            j = idx + 1
+            empty_paragraphs = []
+            while j < len(paragraphs) and is_empty_paragraph(paragraphs[j]):
+                empty_paragraphs.append(paragraphs[j])
+                j += 1
+            if not empty_paragraphs or j >= len(paragraphs):
+                continue
+            if not _is_figure_caption_text(clean_spaces(paragraphs[j].text)):
+                continue
+            for blank in reversed(empty_paragraphs):
+                remove_paragraph(blank)
+            changed = True
+            break
+    return changed
+
+
+def remove_empty_after_figure_caption_before_body_prose(document, body_start):
+    """Remove blank paragraphs between a figure caption and following reference prose."""
+    changed = True
+    while changed:
+        changed = False
+        paragraphs = document.paragraphs
+        for idx, p in enumerate(paragraphs):
+            if idx < body_start:
+                continue
+            text = clean_spaces(p.text)
+            if not _is_figure_caption_text(text):
+                continue
+            j = idx + 1
+            empty_paragraphs = []
+            while j < len(paragraphs) and is_empty_paragraph(paragraphs[j]):
+                empty_paragraphs.append(paragraphs[j])
+                j += 1
+            if not empty_paragraphs or j >= len(paragraphs):
+                continue
+            next_text = clean_spaces(paragraphs[j].text)
+            # Only remove blank when the next paragraph is figure reference prose,
+            # not another figure caption or unrelated body text.
+            if not FIG_RE.match(next_text) or _is_figure_caption_text(next_text):
+                continue
+            for blank in reversed(empty_paragraphs):
+                remove_paragraph(blank)
+            changed = True
+            break
+    return changed
+
+
 def _is_figure_caption_text(text: str) -> bool:
     match = FIG_RE.match(clean_spaces(text))
     if not match:
@@ -5491,6 +5550,20 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "ensure_empty_after_source_and_note",
         ensure_empty_after_source_and_note,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "remove_empty_between_figure_source_and_caption",
+        remove_empty_between_figure_source_and_caption,
+        doc,
+        body_start,
+    )
+
+    run_with_pass_limit(
+        "remove_empty_after_figure_caption_before_body_prose",
+        remove_empty_after_figure_caption_before_body_prose,
         doc,
         body_start,
     )

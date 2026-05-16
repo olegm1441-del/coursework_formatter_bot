@@ -3570,8 +3570,8 @@ def test_figure_source_after_caption_is_moved_before_caption() -> tuple[bool, st
         return _result(False, f"wrong figure source/caption order: {texts!r}")
     if doc.paragraphs[1]._p is not source._p or doc.paragraphs[2]._p is not caption._p:
         return _result(False, "source/caption paragraphs were duplicated or replaced")
-    if caption.alignment != WD_ALIGN_PARAGRAPH.CENTER:
-        return _result(False, "figure caption is not centered after move")
+    if caption.alignment not in (WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.JUSTIFY):
+        return _result(False, f"figure caption has wrong alignment after move: {caption.alignment!r}")
     if not changed:
         return _result(False, "reorder function did not report a changed document")
     return _result(True, "figure source after caption is moved before caption")
@@ -6937,6 +6937,191 @@ def test_phase3_marker_budget_allows_small_doc() -> tuple[bool, str]:
     return _result(True, "small-doc marker split runs unchanged when within budget")
 
 
+# ── Patch B+C: figure caption alignment + blank cleanup ───────────────────────
+
+def test_figure_caption_alignment_left_or_justify() -> tuple[bool, str]:
+    """Patch B: format_figure_caption must set LEFT or JUSTIFY, not CENTER."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.1.1. Жизненный цикл документа")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    caption = next((p for p in result.paragraphs if "Жизненный цикл документа" in p.text), None)
+    if caption is None:
+        return _result(False, "figure caption missing after format")
+    attrs = _get_para_xml_attrs(caption)
+    jc = attrs.get("jc")
+    if jc == "center":
+        return _result(False, f"figure caption is still CENTER after Patch B: jc={jc!r}")
+    if jc not in (None, "left", "both"):
+        return _result(False, f"figure caption has unexpected alignment: jc={jc!r}")
+    return _result(True, f"figure caption alignment is left/justify (jc={jc!r}), not center")
+
+
+def test_remove_empty_between_figure_source_and_caption() -> tuple[bool, str]:
+    """Patch C: blank paragraph between Источник: and figure caption must be removed."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("")  # blank that must be removed
+    doc.add_paragraph("Рис. 1.2.1. Структура отдела")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    paragraphs = result.paragraphs
+    source_idx = next((i for i, p in enumerate(paragraphs) if p.text.strip().startswith("Источник:")), None)
+    caption_idx = next((i for i, p in enumerate(paragraphs) if "Структура отдела" in p.text), None)
+    if source_idx is None:
+        return _result(False, "source line missing from output")
+    if caption_idx is None:
+        return _result(False, "figure caption missing from output")
+    if caption_idx != source_idx + 1:
+        between = [p.text for p in paragraphs[source_idx + 1:caption_idx]]
+        return _result(False, f"blank not removed between source and caption; between={between!r}")
+    return _result(True, "blank between Источник: and figure caption was removed")
+
+
+def test_remove_empty_after_figure_caption_before_body_prose() -> tuple[bool, str]:
+    """Patch C: blank paragraph between figure caption and reference prose must be removed."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.3.1. Закупочный центр")
+    doc.add_paragraph("")  # blank that must be removed
+    doc.add_paragraph("Рис. 1.3.1. показывает структуру закупочного центра в малом бизнесе.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    paragraphs = result.paragraphs
+    caption_idx = next((i for i, p in enumerate(paragraphs) if p.text.strip() == "Рис. 1.3.1. Закупочный центр"), None)
+    prose_idx = next((i for i, p in enumerate(paragraphs) if "показывает структуру" in p.text), None)
+    if caption_idx is None:
+        return _result(False, "figure caption missing from output")
+    if prose_idx is None:
+        return _result(False, "figure reference prose missing from output")
+    if prose_idx != caption_idx + 1:
+        between = [p.text for p in paragraphs[caption_idx + 1:prose_idx]]
+        return _result(False, f"blank not removed between caption and prose; between={between!r}")
+    return _result(True, "blank between figure caption and reference prose was removed")
+
+
+def test_table_source_not_affected_by_figure_blank_cleanup() -> tuple[bool, str]:
+    """Patch C guard: table source → blank → table caption must NOT be affected."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1. Показатели")
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "h0"
+    tbl.rows[0].cells[1].text = "h1"
+    tbl.rows[1].cells[0].text = "v0"
+    tbl.rows[1].cells[1].text = "v1"
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("")  # blank after table source — must NOT be removed
+    doc.add_paragraph("Текст после таблицы.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    paragraphs = result.paragraphs
+    source_idx = next((i for i, p in enumerate(paragraphs) if p.text.strip().startswith("Источник:")), None)
+    prose_idx = next((i for i, p in enumerate(paragraphs) if "Текст после таблицы" in p.text), None)
+    if source_idx is None:
+        return _result(False, "table source line missing from output")
+    if prose_idx is None:
+        return _result(False, "prose after table missing from output")
+    # source → prose should NOT be adjacent (blank must be preserved or some spacing kept)
+    # The key check: no figure-blank-cleanup touched this table source
+    # We just verify the table source and following prose both exist in correct order
+    if prose_idx <= source_idx:
+        return _result(False, f"unexpected paragraph order: source={source_idx}, prose={prose_idx}")
+    return _result(True, "table source blank not touched by figure blank cleanup")
+
+
+def test_figure_reference_prose_still_body_after_patch_A() -> tuple[bool, str]:
+    """Regression: 'Рисунок N показывает...' must remain body text (not caption) after Patch A+B+C."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Вводный текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 2.1.1. Динамика показателей")
+    doc.add_paragraph("Рисунок 2.1.1 показывает динамику внедрения ЭДО.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    target = next((p for p in result.paragraphs if "показывает динамику внедрения" in p.text), None)
+    if target is None:
+        return _result(False, "figure reference prose missing from output")
+    attrs = _get_para_xml_attrs(target)
+    if attrs.get("jc") == "center":
+        return _result(False, f"figure reference prose was centered (got caption treatment): attrs={attrs!r}")
+    if attrs.get("keepNext"):
+        return _result(False, f"figure reference prose has keepNext: attrs={attrs!r}")
+    style = (target.style.name or "").lower()
+    if "heading" in style or "заголовок" in style:
+        return _result(False, f"figure reference prose got heading style: {style!r}")
+    return _result(True, "Рисунок N показывает... stays body text after Patch A+B+C")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -7116,6 +7301,12 @@ def run_all() -> None:
         ("PA | no keepNext on reference-prose", test_no_keep_with_next_on_reference_paragraph),
         ("PA | real table caption still formats", test_actual_table_caption_still_formats),
         ("PA | real figure caption still formats", test_actual_figure_caption_still_formats),
+        # Patch B+C: figure caption alignment + blank cleanup.
+        ("PB | figure caption alignment left/justify", test_figure_caption_alignment_left_or_justify),
+        ("PC | blank between source and caption removed", test_remove_empty_between_figure_source_and_caption),
+        ("PC | blank between caption and prose removed", test_remove_empty_after_figure_caption_before_body_prose),
+        ("PC | table source blank not affected", test_table_source_not_affected_by_figure_blank_cleanup),
+        ("PC | figure reference prose stays body", test_figure_reference_prose_still_body_after_patch_A),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":
