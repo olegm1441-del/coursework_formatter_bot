@@ -7339,6 +7339,177 @@ def test_table_block_unaffected_by_figure_keepnext() -> tuple[bool, str]:
     return _result(True, "table source paragraph unaffected by figure-block keepNext pass")
 
 
+# ── TCF-A: universal <w:cantSplit/> on every table row ───────────────────────
+
+def _count_cant_split_per_row(table):
+    """Return list of <w:cantSplit/> counts per <w:tr> in the given table element."""
+    from docx.oxml.ns import qn
+    counts = []
+    for tr in table._element.findall(qn("w:tr")):
+        tr_pr = tr.find(qn("w:trPr"))
+        if tr_pr is None:
+            counts.append(0)
+            continue
+        counts.append(len(tr_pr.findall(qn("w:cantSplit"))))
+    return counts
+
+
+def test_tcfa_all_table_rows_have_cant_split() -> tuple[bool, str]:
+    """TCF-A: every <w:tr> in every table must carry <w:cantSplit/> after process_document."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    for rows, cols in ((2, 2), (3, 3), (4, 2)):
+        doc.add_paragraph(f"Таблица 1.1.{rows}")
+        tbl = doc.add_table(rows=rows, cols=cols)
+        for r in range(rows):
+            for c in range(cols):
+                tbl.rows[r].cells[c].text = f"r{r}c{c}"
+        doc.add_paragraph("")  # spacing
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    if len(result.tables) < 3:
+        return _result(False, f"expected at least 3 tables in output, got {len(result.tables)}")
+
+    for ti, table in enumerate(result.tables):
+        counts = _count_cant_split_per_row(table)
+        if not counts:
+            return _result(False, f"table {ti} has no rows after format")
+        for ri, c in enumerate(counts):
+            if c < 1:
+                return _result(False, f"table {ti} row {ri} missing <w:cantSplit/>")
+    return _result(True, f"all {sum(len(_count_cant_split_per_row(t)) for t in result.tables)} rows across {len(result.tables)} tables have cantSplit")
+
+
+def test_tcfa_cant_split_is_idempotent() -> tuple[bool, str]:
+    """TCF-A: running process_document twice must not duplicate <w:cantSplit/> on any row."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=2, cols=2)
+    for r in range(2):
+        for c in range(2):
+            tbl.rows[r].cells[c].text = f"r{r}c{c}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        mid = Path(tmp) / "mid.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, mid)
+        process_document(mid, out)
+        result = Document(str(out))
+
+    for ti, table in enumerate(result.tables):
+        counts = _count_cant_split_per_row(table)
+        for ri, c in enumerate(counts):
+            if c != 1:
+                return _result(False, f"second run: table {ti} row {ri} has {c} <w:cantSplit/> elements, expected exactly 1")
+    return _result(True, "two runs preserve exactly one <w:cantSplit/> per row")
+
+
+def test_tcfa_existing_cant_split_preserved() -> tuple[bool, str]:
+    """TCF-A: a pre-existing <w:cantSplit/> set on input rows must be preserved (exactly one element each)."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=2, cols=2)
+    for r in range(2):
+        for c in range(2):
+            tbl.rows[r].cells[c].text = f"r{r}c{c}"
+    # Manually pre-set <w:cantSplit/> on every row
+    for tr in tbl._element.findall(qn("w:tr")):
+        tr_pr = tr.find(qn("w:trPr"))
+        if tr_pr is None:
+            tr_pr = OxmlElement("w:trPr")
+            tr.insert(0, tr_pr)
+        tr_pr.append(OxmlElement("w:cantSplit"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    if not result.tables:
+        return _result(False, "table missing from output")
+    counts = _count_cant_split_per_row(result.tables[0])
+    for ri, c in enumerate(counts):
+        if c != 1:
+            return _result(False, f"row {ri} has {c} <w:cantSplit/> elements, expected exactly 1 (no duplication)")
+    return _result(True, "pre-existing cantSplit preserved, not duplicated")
+
+
+def test_tcfa_does_not_change_caption_or_source_classification() -> tuple[bool, str]:
+    """TCF-A guard: adding cantSplit must not perturb caption / source / reference-prose classification."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    from guides.coursework_kfu_2025.classifier import classify_paragraph
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=2, cols=2)
+    for r in range(2):
+        for c in range(2):
+            tbl.rows[r].cells[c].text = f"r{r}c{c}"
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Таблица 1.1.1 показывает динамику внедрения ЭДО.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    caption = next((p for p in result.paragraphs if p.text.strip() == "Таблица 1.1.1"), None)
+    source = next((p for p in result.paragraphs if p.text.strip().startswith("Источник:")), None)
+    prose = next((p for p in result.paragraphs if p.text.strip().startswith("Таблица 1.1.1 показывает")), None)
+
+    if caption is None:
+        return _result(False, "table caption missing from output")
+    if source is None:
+        return _result(False, "table source missing from output")
+    if prose is None:
+        return _result(False, "reference prose missing from output")
+
+    if classify_paragraph(caption.text) != "table_caption":
+        return _result(False, f"table caption misclassified: {classify_paragraph(caption.text)!r}")
+
+    # Source must NOT have figure-style keepNext (PB2 guard)
+    pPr = source._element.find(qn("w:pPr"))
+    if pPr is not None:
+        keep_next = pPr.find(qn("w:keepNext"))
+        if keep_next is not None:
+            v = keep_next.get(qn("w:val"))
+            if v is None or v.lower() not in {"0", "false", "off"}:
+                return _result(False, "table source got figure-style keepNext (PB2 guard regression)")
+
+    # Reference prose stays body — must not be classified as caption
+    if classify_paragraph(prose.text) == "table_caption":
+        return _result(False, f"reference prose wrongly classified as table_caption: {prose.text!r}")
+
+    return _result(True, "caption/source/prose classification unchanged after TCF-A")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -7530,6 +7701,11 @@ def run_all() -> None:
         ("PB2 | IMG+source+note chained via keepNext", test_figure_block_image_keeps_with_source_and_caption),
         ("PB2 | appendix IMG→CAP keepNext", test_figure_block_appendix_image_keeps_with_caption),
         ("PB2 | table source unaffected by figure keepNext", test_table_block_unaffected_by_figure_keepnext),
+        # TCF-A: universal <w:cantSplit/> on every table row.
+        ("TCF-A | all table rows have cantSplit", test_tcfa_all_table_rows_have_cant_split),
+        ("TCF-A | cantSplit is idempotent", test_tcfa_cant_split_is_idempotent),
+        ("TCF-A | existing cantSplit preserved", test_tcfa_existing_cant_split_preserved),
+        ("TCF-A | caption/source classification unchanged", test_tcfa_does_not_change_caption_or_source_classification),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":

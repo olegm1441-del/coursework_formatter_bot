@@ -2841,6 +2841,15 @@ def _set_table_fixed_widths_from_grid(table):
 
             logical_col_idx += grid_span
             
+def ensure_all_table_rows_cant_split(document):
+    """Set <w:cantSplit/> on every <w:tr> in the document so rows are never split
+    across page boundaries. Idempotent — reuses the helper from
+    table_split_prototype which checks for the existing element before adding."""
+    from .table_split_prototype import _ensure_table_rows_cant_split
+    for table in document.tables:
+        _ensure_table_rows_cant_split(table._element)
+
+
 def format_tables(document):
     for table in document.tables:
         apply_table_borders(table)
@@ -5476,6 +5485,7 @@ def process_document(input_path: Path, output_path: Path):
         prev_kind = kind
 
     format_tables(doc)
+    ensure_all_table_rows_cant_split(doc)
     run_with_pass_limit(
         "center_image_paragraphs",
         center_image_paragraphs,
