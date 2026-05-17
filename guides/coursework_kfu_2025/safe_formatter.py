@@ -4287,37 +4287,6 @@ def remove_empty_between_figure_source_and_caption(document, body_start):
     return changed
 
 
-def remove_empty_after_figure_caption_before_body_prose(document, body_start):
-    """Remove blank paragraphs between a figure caption and following reference prose."""
-    changed = True
-    while changed:
-        changed = False
-        paragraphs = document.paragraphs
-        for idx, p in enumerate(paragraphs):
-            if idx < body_start:
-                continue
-            text = clean_spaces(p.text)
-            if not _is_figure_caption_text(text):
-                continue
-            j = idx + 1
-            empty_paragraphs = []
-            while j < len(paragraphs) and is_empty_paragraph(paragraphs[j]):
-                empty_paragraphs.append(paragraphs[j])
-                j += 1
-            if not empty_paragraphs or j >= len(paragraphs):
-                continue
-            next_text = clean_spaces(paragraphs[j].text)
-            # Only remove blank when the next paragraph is figure reference prose,
-            # not another figure caption or unrelated body text.
-            if not FIG_RE.match(next_text) or _is_figure_caption_text(next_text):
-                continue
-            for blank in reversed(empty_paragraphs):
-                remove_paragraph(blank)
-            changed = True
-            break
-    return changed
-
-
 def ensure_figure_block_keep_with_next(document, body_start):
     """Keep IMG → optional source/note → real Рис. caption together across a page break.
 
@@ -5604,13 +5573,6 @@ def process_document(input_path: Path, output_path: Path):
     run_with_pass_limit(
         "remove_empty_between_figure_source_and_caption",
         remove_empty_between_figure_source_and_caption,
-        doc,
-        body_start,
-    )
-
-    run_with_pass_limit(
-        "remove_empty_after_figure_caption_before_body_prose",
-        remove_empty_after_figure_caption_before_body_prose,
         doc,
         body_start,
     )

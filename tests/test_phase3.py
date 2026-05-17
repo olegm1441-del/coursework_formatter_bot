@@ -7009,9 +7009,9 @@ def test_remove_empty_between_figure_source_and_caption() -> tuple[bool, str]:
     return _result(True, "blank between Источник: and figure caption was removed")
 
 
-def test_remove_empty_after_figure_caption_before_body_prose() -> tuple[bool, str]:
-    """Patch C: blank paragraph between figure caption and reference prose must be removed."""
-    from guides.coursework_kfu_2025.safe_formatter import process_document
+def test_one_blank_after_real_figure_caption_before_body_prose() -> tuple[bool, str]:
+    """FSP: real figure caption must be followed by exactly one blank before reference prose."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document, is_empty_paragraph
 
     doc = Document()
     doc.add_paragraph("ВВЕДЕНИЕ")
@@ -7023,8 +7023,7 @@ def test_remove_empty_after_figure_caption_before_body_prose() -> tuple[bool, st
     img_p._element.append(r)
     doc.add_paragraph("Источник: составлено автором.")
     doc.add_paragraph("Рис. 1.3.1. Закупочный центр")
-    doc.add_paragraph("")  # blank that must be removed
-    doc.add_paragraph("Рис. 1.3.1. показывает структуру закупочного центра в малом бизнесе.")
+    doc.add_paragraph("Рисунок 1.3.1 показывает структуру закупочного центра в малом бизнесе.")
 
     with tempfile.TemporaryDirectory() as tmp:
         inp = Path(tmp) / "in.docx"
@@ -7034,16 +7033,58 @@ def test_remove_empty_after_figure_caption_before_body_prose() -> tuple[bool, st
         result = Document(str(out))
 
     paragraphs = result.paragraphs
-    caption_idx = next((i for i, p in enumerate(paragraphs) if p.text.strip() == "Рис. 1.3.1. Закупочный центр"), None)
-    prose_idx = next((i for i, p in enumerate(paragraphs) if "показывает структуру" in p.text), None)
-    if caption_idx is None:
+    cap_idx = next((i for i, p in enumerate(paragraphs) if p.text.strip() == "Рис. 1.3.1. Закупочный центр"), None)
+    prose_idx = next((i for i, p in enumerate(paragraphs) if "Рисунок 1.3.1 показывает структуру" in p.text), None)
+    if cap_idx is None:
         return _result(False, "figure caption missing from output")
     if prose_idx is None:
         return _result(False, "figure reference prose missing from output")
-    if prose_idx != caption_idx + 1:
-        between = [p.text for p in paragraphs[caption_idx + 1:prose_idx]]
-        return _result(False, f"blank not removed between caption and prose; between={between!r}")
-    return _result(True, "blank between figure caption and reference prose was removed")
+
+    between = paragraphs[cap_idx + 1:prose_idx]
+    if len(between) != 1:
+        return _result(False, f"expected exactly 1 paragraph between cap and prose, got {len(between)}: {[p.text for p in between]!r}")
+    if not is_empty_paragraph(between[0]):
+        return _result(False, f"paragraph between cap and prose is not empty: {between[0].text!r}")
+    return _result(True, "exactly one blank paragraph between real figure caption and reference prose")
+
+
+def test_one_blank_after_caption_is_idempotent() -> tuple[bool, str]:
+    """FSP: running process_document twice keeps exactly one blank after caption (no doubling)."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document, is_empty_paragraph
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.3.1. Закупочный центр")
+    doc.add_paragraph("Рисунок 1.3.1 показывает структуру.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        mid = Path(tmp) / "mid.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, mid)
+        process_document(mid, out)
+        result = Document(str(out))
+
+    paragraphs = result.paragraphs
+    cap_idx = next((i for i, p in enumerate(paragraphs) if p.text.strip() == "Рис. 1.3.1. Закупочный центр"), None)
+    prose_idx = next((i for i, p in enumerate(paragraphs) if "Рисунок 1.3.1 показывает структуру" in p.text), None)
+    if cap_idx is None or prose_idx is None:
+        return _result(False, "caption or reference prose missing after second run")
+
+    between = paragraphs[cap_idx + 1:prose_idx]
+    if len(between) != 1:
+        return _result(False, f"second run gave {len(between)} paragraphs between cap and prose, expected 1: {[p.text for p in between]!r}")
+    if not is_empty_paragraph(between[0]):
+        return _result(False, "second run: paragraph between cap and prose is not empty")
+    return _result(True, "two consecutive process_document runs preserve exactly one blank after caption")
 
 
 def test_table_source_not_affected_by_figure_blank_cleanup() -> tuple[bool, str]:
@@ -7480,7 +7521,8 @@ def run_all() -> None:
         # Patch B+C: figure caption alignment + blank cleanup.
         ("PB | figure caption alignment left/justify", test_figure_caption_alignment_left_or_justify),
         ("PC | blank between source and caption removed", test_remove_empty_between_figure_source_and_caption),
-        ("PC | blank between caption and prose removed", test_remove_empty_after_figure_caption_before_body_prose),
+        ("FSP | one blank after real caption before body prose", test_one_blank_after_real_figure_caption_before_body_prose),
+        ("FSP | one blank after caption is idempotent", test_one_blank_after_caption_is_idempotent),
         ("PC | table source blank not affected", test_table_source_not_affected_by_figure_blank_cleanup),
         ("PC | figure reference prose stays body", test_figure_reference_prose_still_body_after_patch_A),
         # PB2: figure caption keepLines + figure block keepWithNext chain.
