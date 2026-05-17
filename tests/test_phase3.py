@@ -7122,6 +7122,182 @@ def test_figure_reference_prose_still_body_after_patch_A() -> tuple[bool, str]:
     return _result(True, "Рисунок N показывает... stays body text after Patch A+B+C")
 
 
+# ── PB2: figure caption keepLines + figure block keepWithNext chain ───────────
+
+def _keep_flags(p):
+    """Return (keepNext, keepLines) as booleans for a paragraph."""
+    from docx.oxml.ns import qn
+    pPr = p._element.find(qn("w:pPr"))
+    if pPr is None:
+        return (False, False)
+
+    def _flag(tag):
+        el = pPr.find(qn(f"w:{tag}"))
+        if el is None:
+            return False
+        val = el.get(qn("w:val"))
+        return val is None or val.lower() not in {"0", "false", "off"}
+
+    return (_flag("keepNext"), _flag("keepLines"))
+
+
+def test_figure_caption_keep_lines_true() -> tuple[bool, str]:
+    """PB2: format_figure_caption must set keepLines so caption text doesn't split across pages."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Рис. 1.1.1. Длинная подпись рисунка, которая может занять больше одной строки в готовом документе")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    caption = next((p for p in result.paragraphs if "Длинная подпись" in p.text), None)
+    if caption is None:
+        return _result(False, "figure caption missing after format")
+    keep_next, keep_lines = _keep_flags(caption)
+    if not keep_lines:
+        return _result(False, f"caption keepLines is False, expected True")
+    if keep_next:
+        return _result(False, f"caption keepNext is True, expected False (caption is last link)")
+    return _result(True, "figure caption has keepLines=True, keepNext=False")
+
+
+def test_figure_block_image_keeps_with_source_and_caption() -> tuple[bool, str]:
+    """PB2: IMG → Источник → Примечание → CAP chain has keepNext on IMG and both service lines, none on CAP."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Вводный текст.")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Примечание: схема упрощена.")
+    doc.add_paragraph("Рис. 1.3.1. Этапы организационной покупки франшизы")
+    doc.add_paragraph("Заключительный текст после рисунка.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    paragraphs = result.paragraphs
+    img = next((p for p in paragraphs if p._element.xpath(".//*[local-name()='drawing']")), None)
+    src = next((p for p in paragraphs if p.text.strip().startswith("Источник:")), None)
+    note = next((p for p in paragraphs if p.text.strip().startswith("Примечание:")), None)
+    cap = next((p for p in paragraphs if p.text.strip().startswith("Рис. 1.3.1.")), None)
+    for name, par in (("image", img), ("source", src), ("note", note), ("caption", cap)):
+        if par is None:
+            return _result(False, f"{name} paragraph missing from output")
+
+    img_kn, _ = _keep_flags(img)
+    src_kn, _ = _keep_flags(src)
+    note_kn, _ = _keep_flags(note)
+    cap_kn, cap_kl = _keep_flags(cap)
+
+    if not img_kn:
+        return _result(False, "image paragraph missing keepNext")
+    if not src_kn:
+        return _result(False, "source line missing keepNext")
+    if not note_kn:
+        return _result(False, "note line missing keepNext")
+    if cap_kn:
+        return _result(False, "caption has keepNext (should be False, it is the last link)")
+    if not cap_kl:
+        return _result(False, "caption missing keepLines")
+    return _result(True, "IMG+source+note chained via keepNext; caption keepLines=True keepNext=False")
+
+
+def test_figure_block_appendix_image_keeps_with_caption() -> tuple[bool, str]:
+    """PB2: appendix block IMG → CAP (no source) — IMG must have keepNext, caption must not."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    img_p = doc.add_paragraph()
+    drawing = OxmlElement("w:drawing")
+    r = OxmlElement("w:r")
+    r.append(drawing)
+    img_p._element.append(r)
+    doc.add_paragraph("Рис. 1. Страница сайта франшизы")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    paragraphs = result.paragraphs
+    img = next((p for p in paragraphs if p._element.xpath(".//*[local-name()='drawing']")), None)
+    cap = next((p for p in paragraphs if p.text.strip().startswith("Рис. 1.")), None)
+    if img is None or cap is None:
+        return _result(False, "appendix image or caption missing from output")
+
+    img_kn, _ = _keep_flags(img)
+    cap_kn, cap_kl = _keep_flags(cap)
+
+    if not img_kn:
+        return _result(False, "appendix image paragraph missing keepNext")
+    if cap_kn:
+        return _result(False, "appendix caption has keepNext (should be False)")
+    if not cap_kl:
+        return _result(False, "appendix caption missing keepLines")
+    return _result(True, "appendix IMG→CAP chain: IMG keepNext=True, CAP keepNext=False keepLines=True")
+
+
+def test_table_block_unaffected_by_figure_keepnext() -> tuple[bool, str]:
+    """PB2 guard: table source 'Источник:' must NOT receive figure-style keepNext."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1. Показатели")
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "h0"
+    tbl.rows[0].cells[1].text = "h1"
+    tbl.rows[1].cells[0].text = "v0"
+    tbl.rows[1].cells[1].text = "v1"
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("Текст после таблицы.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(str(inp))
+        process_document(inp, out)
+        result = Document(str(out))
+
+    src = next((p for p in result.paragraphs if p.text.strip().startswith("Источник:")), None)
+    if src is None:
+        return _result(False, "table source paragraph missing from output")
+    src_kn, _ = _keep_flags(src)
+    if src_kn:
+        return _result(False, "table source got figure-style keepNext (should be False — no preceding image)")
+    return _result(True, "table source paragraph unaffected by figure-block keepNext pass")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -7307,6 +7483,11 @@ def run_all() -> None:
         ("PC | blank between caption and prose removed", test_remove_empty_after_figure_caption_before_body_prose),
         ("PC | table source blank not affected", test_table_source_not_affected_by_figure_blank_cleanup),
         ("PC | figure reference prose stays body", test_figure_reference_prose_still_body_after_patch_A),
+        # PB2: figure caption keepLines + figure block keepWithNext chain.
+        ("PB2 | figure caption keepLines=True", test_figure_caption_keep_lines_true),
+        ("PB2 | IMG+source+note chained via keepNext", test_figure_block_image_keeps_with_source_and_caption),
+        ("PB2 | appendix IMG→CAP keepNext", test_figure_block_appendix_image_keeps_with_caption),
+        ("PB2 | table source unaffected by figure keepNext", test_table_block_unaffected_by_figure_keepnext),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":

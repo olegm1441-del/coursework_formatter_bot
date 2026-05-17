@@ -2469,6 +2469,7 @@ def format_reference_subheading(paragraph):
 def format_figure_caption(paragraph):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    paragraph.paragraph_format.keep_together = True
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, all_caps=False)
 
@@ -4317,6 +4318,52 @@ def remove_empty_after_figure_caption_before_body_prose(document, body_start):
     return changed
 
 
+def ensure_figure_block_keep_with_next(document, body_start):
+    """Keep IMG → optional source/note → real Рис. caption together across a page break.
+
+    Walks from image paragraphs only; never starts from "Источник:" alone, so table
+    sources are not affected. Caption itself stays keep_with_next=False (its keep_together
+    flag, set by format_figure_caption, prevents the caption's own lines from splitting).
+    """
+    if body_start is None:
+        return False
+
+    changed = False
+    paragraphs = document.paragraphs
+    n = len(paragraphs)
+
+    for idx, p in enumerate(paragraphs):
+        if idx < body_start:
+            continue
+        if not paragraph_has_drawing(p):
+            continue
+
+        chain_keepnext = [p]
+        j = idx + 1
+        while j < n:
+            nxt = paragraphs[j]
+            if is_empty_paragraph(nxt):
+                j += 1
+                continue
+            text = clean_spaces(nxt.text)
+            if paragraph_has_drawing(nxt):
+                break
+            if _is_figure_service_text(text):
+                chain_keepnext.append(nxt)
+                j += 1
+                continue
+            if _is_figure_caption_text(text):
+                # Confirmed figure block: apply keep_with_next to every link before the caption.
+                for link in chain_keepnext:
+                    if link.paragraph_format.keep_with_next is not True:
+                        link.paragraph_format.keep_with_next = True
+                        changed = True
+                break
+            break
+
+    return changed
+
+
 def _is_figure_caption_text(text: str) -> bool:
     match = FIG_RE.match(clean_spaces(text))
     if not match:
@@ -5754,5 +5801,12 @@ def process_document(input_path: Path, output_path: Path):
     remove_empty_paragraphs_after_appendix_labels(doc, body_start)
 
     clear_heading_style_numbering(doc)
+
+    run_with_pass_limit(
+        "ensure_figure_block_keep_with_next",
+        ensure_figure_block_keep_with_next,
+        doc,
+        body_start,
+    )
 
     doc.save(str(output_path))
