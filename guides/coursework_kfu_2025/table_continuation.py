@@ -1705,6 +1705,83 @@ def _marker_split_max_renders() -> int:
     return value
 
 
+# E1 — Phase 3 marker-split candidate classification (logging-only, no behavior change).
+# Cheap predicate that selects which tables WOULD be diagnosed under future E2.
+# Does not render. Does not mutate. Does not call LibreOffice or any PDF tool.
+_MIN_ROWS_FOR_SPLIT_CANDIDACY = 6
+
+
+def _classify_marker_split_candidates(doc: Document) -> dict:
+    """Return cheap candidate classification for Phase 3 marker split.
+
+    Output keys:
+      total_tables                 -- int, len(doc.tables)
+      manual_continuation_skipped  -- list[int], indices in an already-valid manual chain
+      no_caption_skipped           -- list[int], no standard 'Таблица N' caption above
+      tiny_table_skipped           -- list[int], rows < _MIN_ROWS_FOR_SPLIT_CANDIDACY
+      candidate_tables             -- list[int], priority-ordered
+      candidate_priority           -- list[(table_idx, priority_score)], priority-ordered
+      candidate_budget             -- int, current _marker_split_max_renders()
+      would_process                -- list[int], first N candidates within budget
+      would_skip_for_budget        -- list[int], candidates beyond budget
+    """
+    from . import table_markers
+
+    total_tables = len(doc.tables)
+    manual_skip_ids = _valid_manual_continuation_table_ids(doc)
+
+    try:
+        contexts = table_markers._iter_body_tables_with_context(doc)
+    except Exception:
+        contexts = []
+
+    manual_continuation_skipped: list[int] = []
+    no_caption_skipped: list[int] = []
+    tiny_table_skipped: list[int] = []
+    candidate_pairs: list[tuple[int, int]] = []
+
+    for idx, table in enumerate(doc.tables):
+        if id(table._element) in manual_skip_ids:
+            manual_continuation_skipped.append(idx)
+            continue
+
+        if idx < len(contexts):
+            ctx = contexts[idx]
+            has_standard = bool(ctx.get("has_standard_table_caption"))
+            is_appendix = bool(ctx.get("appendix_table"))
+        else:
+            has_standard = False
+            is_appendix = False
+
+        if not has_standard:
+            no_caption_skipped.append(idx)
+            continue
+
+        rows_count = len(table.rows)
+        if rows_count < _MIN_ROWS_FOR_SPLIT_CANDIDACY:
+            tiny_table_skipped.append(idx)
+            continue
+
+        priority = rows_count + (1 if is_appendix else 0)
+        candidate_pairs.append((idx, priority))
+
+    candidate_priority = sorted(candidate_pairs, key=lambda x: (-x[1], x[0]))
+    candidate_tables = [idx for idx, _ in candidate_priority]
+    budget = _marker_split_max_renders()
+
+    return {
+        "total_tables": total_tables,
+        "manual_continuation_skipped": manual_continuation_skipped,
+        "no_caption_skipped": no_caption_skipped,
+        "tiny_table_skipped": tiny_table_skipped,
+        "candidate_tables": candidate_tables,
+        "candidate_priority": candidate_priority,
+        "candidate_budget": budget,
+        "would_process": candidate_tables[:budget],
+        "would_skip_for_budget": candidate_tables[budget:],
+    }
+
+
 def _classify_marker_duplicate_rows(
     diagnostic,
     *,
@@ -2147,6 +2224,37 @@ def apply_rendered_table_continuation(
         len(doc.tables),
         max_passes,
     )
+
+    # E1: log future-E2 candidate classification BEFORE any existing skip/run logic.
+    # Strictly observe-only — no behavior change.
+    if _marker_split_enabled():
+        try:
+            _classification = _classify_marker_split_candidates(doc)
+            logger.info(
+                "phase3_candidate_classification total=%s manual_chain=%s no_caption=%s tiny=%s candidates=%s budget=%s would_process=%s would_skip_for_budget=%s",
+                _classification["total_tables"],
+                len(_classification["manual_continuation_skipped"]),
+                len(_classification["no_caption_skipped"]),
+                len(_classification["tiny_table_skipped"]),
+                len(_classification["candidate_tables"]),
+                _classification["candidate_budget"],
+                _classification["would_process"],
+                _classification["would_skip_for_budget"],
+            )
+            try:
+                from . import table_markers as _tm_e1
+                _ctxs = _tm_e1._iter_body_tables_with_context(doc)
+            except Exception:
+                _ctxs = []
+            for _idx, _priority in _classification["candidate_priority"]:
+                _rows = len(doc.tables[_idx].rows) if _idx < len(doc.tables) else 0
+                _appendix = bool(_ctxs[_idx].get("appendix_table")) if _idx < len(_ctxs) else False
+                logger.info(
+                    "marker_split_candidate_preview table_index=%s priority=%s rows=%s appendix=%s",
+                    _idx, _priority, _rows, _appendix,
+                )
+        except Exception as _exc:
+            logger.warning("phase3_candidate_classification_failed error=%s", _exc)
 
     if _marker_split_enabled():
         budget = _marker_split_max_renders()

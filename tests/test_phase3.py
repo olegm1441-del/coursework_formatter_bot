@@ -7510,6 +7510,266 @@ def test_tcfa_does_not_change_caption_or_source_classification() -> tuple[bool, 
     return _result(True, "caption/source/prose classification unchanged after TCF-A")
 
 
+# ── E1: Phase 3 marker-split candidate classification (logging-only) ─────────
+
+def _e1_build_synth_doc(table_specs: list[tuple[int, int, str | None]]) -> Document:
+    """Build a synthetic doc with [(rows, cols, caption_or_None), ...] tables."""
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    for rows, cols, caption in table_specs:
+        if caption is not None:
+            doc.add_paragraph(caption)
+        tbl = doc.add_table(rows=rows, cols=cols)
+        for r in range(rows):
+            for c in range(cols):
+                tbl.rows[r].cells[c].text = f"r{r}c{c}"
+        doc.add_paragraph("")
+    return doc
+
+
+def test_e1_classify_many_tiny_tables_no_candidates() -> tuple[bool, str]:
+    """E1: 20 tables × 2 rows with real captions → zero candidates (all tiny)."""
+    from guides.coursework_kfu_2025.table_continuation import _classify_marker_split_candidates
+
+    specs = [(2, 2, f"Таблица 1.1.{i+1}") for i in range(20)]
+    doc = _e1_build_synth_doc(specs)
+    c = _classify_marker_split_candidates(doc)
+    if c["total_tables"] != 20:
+        return _result(False, f"total_tables={c['total_tables']}, expected 20")
+    if c["candidate_tables"]:
+        return _result(False, f"expected no candidates, got {c['candidate_tables']}")
+    if len(c["tiny_table_skipped"]) != 20:
+        return _result(False, f"expected 20 tiny skipped, got {len(c['tiny_table_skipped'])}")
+    return _result(True, f"20 tiny tables → 0 candidates, all in tiny_table_skipped")
+
+
+def test_e1_classify_one_long_candidate_among_many() -> tuple[bool, str]:
+    """E1: 1 long table + 9 tiny tables → exactly 1 candidate, the long one."""
+    from guides.coursework_kfu_2025.table_continuation import _classify_marker_split_candidates
+
+    specs = [(2, 2, f"Таблица 1.1.{i+1}") for i in range(9)]
+    specs.insert(4, (30, 3, "Таблица 1.1.10"))  # one big table in the middle
+    doc = _e1_build_synth_doc(specs)
+    c = _classify_marker_split_candidates(doc)
+    if len(c["candidate_tables"]) != 1:
+        return _result(False, f"expected 1 candidate, got {c['candidate_tables']}")
+    if len(c["tiny_table_skipped"]) != 9:
+        return _result(False, f"expected 9 tiny, got {len(c['tiny_table_skipped'])}")
+    # Verify the candidate is the long one (rows=30, priority=30 since not appendix)
+    cand_idx, cand_priority = c["candidate_priority"][0]
+    if cand_priority != 30:
+        return _result(False, f"candidate priority={cand_priority}, expected 30")
+    return _result(True, f"1 long candidate selected (idx={cand_idx}, priority={cand_priority})")
+
+
+def test_e1_classify_skips_manual_continuation() -> tuple[bool, str]:
+    """E1: tables already in a valid manual continuation chain must be filtered out."""
+    from guides.coursework_kfu_2025.table_continuation import _classify_marker_split_candidates
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1")
+    # Matching headers + 6+ rows so it would otherwise be a candidate.
+    tbl1 = doc.add_table(rows=8, cols=3)
+    tbl1.rows[0].cells[0].text = "H1"; tbl1.rows[0].cells[1].text = "H2"; tbl1.rows[0].cells[2].text = "H3"
+    for r in range(1, 8):
+        for c_ in range(3):
+            tbl1.rows[r].cells[c_].text = f"r{r}c{c_}"
+
+    marker = doc.add_paragraph("Продолжение таблицы 1.1.1")
+    marker.alignment = 2  # WD_ALIGN_PARAGRAPH.RIGHT
+    marker.paragraph_format.keep_with_next = True
+
+    tbl2 = doc.add_table(rows=6, cols=3)
+    tbl2.rows[0].cells[0].text = "H1"; tbl2.rows[0].cells[1].text = "H2"; tbl2.rows[0].cells[2].text = "H3"
+    for r in range(1, 6):
+        for c_ in range(3):
+            tbl2.rows[r].cells[c_].text = f"r{r}c{c_}"
+
+    c = _classify_marker_split_candidates(doc)
+    if len(c["manual_continuation_skipped"]) != 2:
+        return _result(False, f"expected 2 tables in manual_continuation_skipped, got {c['manual_continuation_skipped']}")
+    if any(idx in c["candidate_tables"] for idx in c["manual_continuation_skipped"]):
+        return _result(False, "manual-chain table also appeared in candidate_tables")
+    return _result(True, f"manual continuation chain filtered: {c['manual_continuation_skipped']}")
+
+
+def test_e1_classify_skips_tables_without_caption() -> tuple[bool, str]:
+    """E1: a long table without a 'Таблица N' caption above must not become a candidate."""
+    from guides.coursework_kfu_2025.table_continuation import _classify_marker_split_candidates
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Просто текст без подписи таблицы.")  # no caption
+    tbl = doc.add_table(rows=20, cols=2)
+    for r in range(20):
+        for c_ in range(2):
+            tbl.rows[r].cells[c_].text = f"r{r}c{c_}"
+
+    c = _classify_marker_split_candidates(doc)
+    if c["candidate_tables"]:
+        return _result(False, f"no-caption table wrongly became candidate: {c['candidate_tables']}")
+    if not c["no_caption_skipped"]:
+        return _result(False, "expected no_caption_skipped to contain the table")
+    return _result(True, f"no-caption table correctly filtered to no_caption_skipped={c['no_caption_skipped']}")
+
+
+def test_e1_classify_priority_ordering() -> tuple[bool, str]:
+    """E1: multiple candidates ordered by descending priority (rows + appendix bonus)."""
+    from guides.coursework_kfu_2025.table_continuation import _classify_marker_split_candidates
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    # Body tables: rows 10, 25, 15
+    for caption, rows in (("Таблица 1.1.1", 10), ("Таблица 1.1.2", 25), ("Таблица 1.1.3", 15)):
+        doc.add_paragraph(caption)
+        t = doc.add_table(rows=rows, cols=2)
+        for r in range(rows):
+            for cc in range(2):
+                t.rows[r].cells[cc].text = "x"
+
+    c = _classify_marker_split_candidates(doc)
+    if len(c["candidate_tables"]) != 3:
+        return _result(False, f"expected 3 candidates, got {c['candidate_tables']}")
+    priorities = [p for _, p in c["candidate_priority"]]
+    if priorities != sorted(priorities, reverse=True):
+        return _result(False, f"priorities not descending: {priorities}")
+    # Top candidate should be the 25-row table
+    if priorities[0] != 25:
+        return _result(False, f"top priority={priorities[0]}, expected 25")
+    return _result(True, f"candidates ordered by priority desc: {priorities}")
+
+
+def test_e1_log_emitted_with_classification() -> tuple[bool, str]:
+    """E1: apply_rendered_table_continuation emits phase3_candidate_classification + previews."""
+    import logging
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    # 2 candidates (rows>=6, real captions) so previews are emitted
+    for caption, rows in (("Таблица 1.1.1", 8), ("Таблица 1.1.2", 12)):
+        doc.add_paragraph(caption)
+        t = doc.add_table(rows=rows, cols=2)
+        for r in range(rows):
+            for cc in range(2):
+                t.rows[r].cells[cc].text = "x"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        before = path.read_bytes()
+
+        captured: list[str] = []
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                captured.append(record.getMessage())
+
+        handler = _CaptureHandler(level=logging.DEBUG)
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        old_diagnose = tm.diagnose_all_tables
+        prev_level = tc.logger.level
+        try:
+            # Block any real diagnose call so this test never touches LibreOffice.
+            tm.diagnose_all_tables = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run"))
+            tc.logger.addHandler(handler)
+            tc.logger.setLevel(logging.DEBUG)
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.logger.removeHandler(handler)
+            tc.logger.setLevel(prev_level)
+            tm.diagnose_all_tables = old_diagnose
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+
+        after = path.read_bytes()
+
+    classification_line = next((m for m in captured if m.startswith("phase3_candidate_classification ")), None)
+    if classification_line is None:
+        return _result(False, "phase3_candidate_classification log line not emitted")
+    if "candidates=2" not in classification_line:
+        return _result(False, f"expected candidates=2 in log, got: {classification_line!r}")
+    previews = [m for m in captured if m.startswith("marker_split_candidate_preview ")]
+    if len(previews) != 2:
+        return _result(False, f"expected 2 preview lines, got {len(previews)}: {previews!r}")
+    if before != after:
+        return _result(False, "doc bytes changed despite E1 being observe-only")
+    return _result(True, f"classification + 2 previews emitted; doc unchanged; return={n}")
+
+
+def test_e1_does_not_change_existing_behaviour() -> tuple[bool, str]:
+    """E1: docs > budget still hit render_budget_exceeded skip; output bytes unchanged; return 0."""
+    import logging
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    # 8 tables — exceeds default budget of 6
+    for i in range(8):
+        doc.add_paragraph(f"Таблица 1.1.{i+1}")
+        t = doc.add_table(rows=2, cols=2)
+        for r in range(2):
+            for cc in range(2):
+                t.rows[r].cells[cc].text = "x"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        before = path.read_bytes()
+
+        captured: list[str] = []
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                captured.append(record.getMessage())
+
+        handler = _CaptureHandler(level=logging.DEBUG)
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_budget = os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS")
+        os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = "6"
+
+        old_diagnose = tm.diagnose_all_tables
+        prev_level = tc.logger.level
+        try:
+            tm.diagnose_all_tables = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run on >budget doc"))
+            tc.logger.addHandler(handler)
+            tc.logger.setLevel(logging.DEBUG)
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.logger.removeHandler(handler)
+            tc.logger.setLevel(prev_level)
+            tm.diagnose_all_tables = old_diagnose
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_budget is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MAX_RENDERS", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = old_budget
+
+        after = path.read_bytes()
+
+    if n != 0:
+        return _result(False, f"expected return 0 (skip), got {n}")
+    if before != after:
+        return _result(False, "doc bytes changed under render_budget_exceeded path")
+    if not any(m.startswith("phase3_candidate_classification ") for m in captured):
+        return _result(False, "phase3_candidate_classification not emitted on >budget doc")
+    if not any("render_budget_exceeded" in m for m in captured):
+        return _result(False, "render_budget_exceeded log missing — existing behavior lost")
+    return _result(True, "8>6 docs still skip with render_budget_exceeded; bytes unchanged; new logs additive only")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -7706,6 +7966,14 @@ def run_all() -> None:
         ("TCF-A | cantSplit is idempotent", test_tcfa_cant_split_is_idempotent),
         ("TCF-A | existing cantSplit preserved", test_tcfa_existing_cant_split_preserved),
         ("TCF-A | caption/source classification unchanged", test_tcfa_does_not_change_caption_or_source_classification),
+        # E1: Phase 3 marker-split candidate classification (logging-only, no behavior change).
+        ("E1 | many tiny tables → no candidates", test_e1_classify_many_tiny_tables_no_candidates),
+        ("E1 | one long candidate among many tiny", test_e1_classify_one_long_candidate_among_many),
+        ("E1 | manual continuation filtered", test_e1_classify_skips_manual_continuation),
+        ("E1 | no-caption table filtered", test_e1_classify_skips_tables_without_caption),
+        ("E1 | priority ordering desc by rows", test_e1_classify_priority_ordering),
+        ("E1 | classification + previews logged", test_e1_log_emitted_with_classification),
+        ("E1 | existing budget skip preserved", test_e1_does_not_change_existing_behaviour),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":
