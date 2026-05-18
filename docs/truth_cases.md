@@ -40,6 +40,24 @@ Smoke/truth cases used to protect formatter behavior. Paths may vary by workstat
 - Appendix continuation logic remains unchanged.
 - First appendix page numbering and later appendix-page numbering rules remain stable.
 
+#### Bondarev table-split truth targets
+
+These are the per-table expectations for the marker-driven table-split subsystem (see `docs/formatter_invariants.md` → "Table Continuation Rules"). Any patch that touches table continuation must pass smoke against this list.
+
+Known **bad / needs fixing** (current marker split produces invalid layout):
+
+- `Таблица 1.1.3` — did not split correctly.
+- `Таблица 1.2.1` — did not split correctly.
+- `Таблица 2.1.5` — did not split correctly.
+- `Таблица 2.3.1` — layout broke.
+- `Таблица 2.3.3` — layout broke.
+
+Known **gold / regression-protected** (must remain correct):
+
+- `Таблица 1.3.2` — split looked correct under the d19e6ea baseline. Do not regress.
+
+Any future table-split patch must either fix the "bad" tables above or explicitly skip them with a logged reason; in either case it must not regress 1.3.2.
+
 ### bad2 / example_coursework_bad2
 
 - Useful for TOC checks only when the active batch touches contents/front matter.

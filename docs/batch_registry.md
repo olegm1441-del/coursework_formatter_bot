@@ -79,3 +79,25 @@ Operational registry for completed and planned formatter/UX batches.
   - Intentional section/page breaks remain.
   - Page numbering behavior from A1/P0 remains stable.
 - Smoke docs: Neuromarketing, Bondarev, Rybakov.
+
+### Table Continuation Quality
+
+See `docs/formatter_invariants.md` → "Table Continuation Rules" for the canonical product rules and `docs/truth_cases.md` → "Bondarev table-split truth targets" for the per-table fix list.
+
+- Completed so far (baseline `d19e6ea`):
+  - `formatter: bound marker split render budget` (`9923e16`) — pre-E1 budget skip.
+  - `formatter: log table split candidates` (`547d302`) — E1 candidate classification logging.
+  - `formatter: process table split candidates` (`d19e6ea`) — E2 candidate-mode + E3 numbered-row compensation, in one combined commit.
+- Open / planned:
+  - Bондарев `Таблица 1.1.3`, `1.2.1`, `2.1.5`, `2.3.1`, `2.3.3` — currently produce invalid splits or layout breakage. Each must be fixed or explicitly skipped with reason.
+  - Bондарев `Таблица 1.3.2` — gold case, must not regress.
+  - Forbidden scope for any table-continuation patch: figure logic, formula logic, headings, TOC, references, page numbering, runtime/worker/handler files.
+- Acceptance per patch — must hold all:
+  - Bад tables above are fixed or explicitly skipped with logged reason.
+  - 1.3.2 remains correct.
+  - `курсовая пример 1` and `нейромаркетинг` (Рыбаков) have no regressions.
+  - No global `render_budget_exceeded` regression.
+  - User warning fires only when real candidates were skipped/failed.
+  - All formatter tests pass.
+  - Side-by-side PDF smoke is provided.
+- Smoke docs: Bondarev, Neuromarketing, курсовая пример 1.
