@@ -4731,7 +4731,9 @@ def test_marker_runtime_dry_run_only_does_not_mutate_document() -> tuple[bool, s
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -4800,8 +4802,10 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -4823,6 +4827,10 @@ def test_marker_runtime_apply_split_for_appendix_table() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -4909,8 +4917,10 @@ def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -4932,6 +4942,10 @@ def test_marker_runtime_apply_split_for_ordinary_table() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -5028,8 +5042,10 @@ def test_marker_runtime_apply_skips_nested_ordinary_table_header() -> tuple[bool
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -5058,6 +5074,10 @@ def test_marker_runtime_apply_skips_nested_ordinary_table_header() -> tuple[bool
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         after = path.read_bytes()
         out = Document(str(path))
@@ -5221,8 +5241,10 @@ def test_marker_runtime_apply_is_idempotent_on_second_run() -> tuple[bool, str]:
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -5282,6 +5304,10 @@ def test_marker_runtime_apply_is_idempotent_on_second_run() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -5350,8 +5376,10 @@ def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -5381,6 +5409,10 @@ def test_marker_runtime_apply_processes_multiple_ordinary_tables() -> tuple[bool
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -5450,8 +5482,10 @@ def test_marker_runtime_apply_skips_stale_candidate_and_continues() -> tuple[boo
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -5476,6 +5510,10 @@ def test_marker_runtime_apply_skips_stale_candidate_and_continues() -> tuple[boo
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -5540,8 +5578,10 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -5571,6 +5611,10 @@ def test_marker_runtime_apply_processes_mixed_ordinary_and_appendix_tables() -> 
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -5667,8 +5711,10 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -5697,6 +5743,10 @@ def test_marker_runtime_apply_skips_generated_appendix_continuation_tables() -> 
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         out = Document(str(path))
 
@@ -5738,8 +5788,10 @@ def test_marker_runtime_apply_loop_is_bounded() -> tuple[bool, str]:
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_pass = tc._run_marker_split_detection_pass
         old_render = tc.render_docx_to_pdf
@@ -5766,6 +5818,10 @@ def test_marker_runtime_apply_loop_is_bounded() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
     if n != 1:
         return _result(False, f"single marker pass should return pass result 1, got {n}")
@@ -6421,6 +6477,10 @@ def test_marker_runtime_real_rybakov_target_applies_split() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         doc = Document(str(out))
 
@@ -6485,6 +6545,10 @@ def test_marker_runtime_real_bondarev_keeps_headings_safe() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
 
         off_snapshot = snapshot(off)
         on_snapshot = snapshot(on)
@@ -6766,9 +6830,11 @@ def test_phase3_marker_budget_fail_open_many_tables() -> tuple[bool, str]:
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
         old_budget = os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
         os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = "1"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -6818,6 +6884,10 @@ def test_phase3_marker_budget_fail_open_many_tables() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
             if old_budget is None:
                 os.environ.pop("KPFU_MARKER_SPLIT_MAX_RENDERS", None)
             else:
@@ -6892,9 +6962,11 @@ def test_phase3_marker_budget_allows_small_doc() -> tuple[bool, str]:
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
         old_budget = os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
         os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
         os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = "10"
+        os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
 
         old_diagnose_all = tm.diagnose_all_tables
         old_render = tc.render_docx_to_pdf
@@ -6921,6 +6993,10 @@ def test_phase3_marker_budget_allows_small_doc() -> tuple[bool, str]:
                 os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
             else:
                 os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode_e2 is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode_e2
             if old_budget is None:
                 os.environ.pop("KPFU_MARKER_SPLIT_MAX_RENDERS", None)
             else:
@@ -7770,6 +7846,676 @@ def test_e1_does_not_change_existing_behaviour() -> tuple[bool, str]:
     return _result(True, "8>6 docs still skip with render_budget_exceeded; bytes unchanged; new logs additive only")
 
 
+# ── E2: quality-first candidate-mode marker split ────────────────────────────
+
+class _E2Report:
+    """Minimal FormattingReport stub for E2 tests."""
+    def __init__(self):
+        self.warnings: list[str] = []
+    def warn(self, msg: str):
+        self.warnings.append(msg)
+
+
+def _e2_make_long_table_doc(num_long_tables: int, rows_per_table: int = 8) -> Document:
+    """Synthetic doc with N captioned long tables (each ≥ candidate threshold)."""
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    for i in range(num_long_tables):
+        doc.add_paragraph(f"Таблица 1.1.{i+1}")
+        t = doc.add_table(rows=rows_per_table, cols=3)
+        for r in range(rows_per_table):
+            for c in range(3):
+                t.rows[r].cells[c].text = f"r{r}c{c}"
+        doc.add_paragraph("")
+    return doc
+
+
+def _e2_set_candidate_mode(budget: int | None = None, hard_timeout: float | None = None):
+    """Set env for candidate mode; return restore dict."""
+    save = {
+        "enable": os.environ.get("KPFU_ENABLE_MARKER_SPLIT"),
+        "apply":  os.environ.get("KPFU_APPLY_MARKER_SPLIT"),
+        "mode":   os.environ.get("KPFU_MARKER_SPLIT_MODE"),
+        "budget": os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS"),
+        "hto":    os.environ.get("KPFU_MARKER_SPLIT_HARD_TIMEOUT_SECONDS"),
+    }
+    os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_MARKER_SPLIT_MODE"] = "candidate"
+    if budget is not None:
+        os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = str(budget)
+    if hard_timeout is not None:
+        os.environ["KPFU_MARKER_SPLIT_HARD_TIMEOUT_SECONDS"] = str(hard_timeout)
+    return save
+
+
+def _e2_restore_env(save):
+    for key, env in (("enable", "KPFU_ENABLE_MARKER_SPLIT"),
+                     ("apply",  "KPFU_APPLY_MARKER_SPLIT"),
+                     ("mode",   "KPFU_MARKER_SPLIT_MODE"),
+                     ("budget", "KPFU_MARKER_SPLIT_MAX_RENDERS"),
+                     ("hto",    "KPFU_MARKER_SPLIT_HARD_TIMEOUT_SECONDS")):
+        if save[key] is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = save[key]
+
+
+def _e2_fake_diagnostic(tm, table_index, rows_count, two_page=True):
+    """Build a TableMarkerDiagnostic that the eligibility evaluator considers eligible
+    for a clean 2-page split."""
+    # Put first half on page 1 and second half on page 2.
+    split = rows_count // 2
+    row_pages = {}
+    for r in range(rows_count):
+        row_pages[r] = 1 if r < split else 2
+    page_spans = [tm.TablePageSpan(0, split - 1, 1), tm.TablePageSpan(split, rows_count - 1, 2)]
+    return tm.TableMarkerDiagnostic(
+        table_index=table_index,
+        rows_count=rows_count,
+        pages_detected=[1, 2] if two_page else [1],
+        row_pages=row_pages if two_page else {r: 1 for r in range(rows_count)},
+        found_rows=list(range(rows_count)),
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=page_spans if two_page else [tm.TablePageSpan(0, rows_count - 1, 1)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text=f"Таблица 1.1.{table_index+1}",
+    )
+
+
+def test_e2_31_total_8_candidates_marker_split_enters() -> tuple[bool, str]:
+    """E2: doc with 31 total tables (8 candidates after filter) enters marker split (not global skip)."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    # 8 long tables + 23 tiny tables (no caption) = 31 total, 8 candidates.
+    doc = _e2_make_long_table_doc(8, rows_per_table=8)
+    for i in range(23):
+        # tiny tables without caption — filtered as no_caption.
+        t = doc.add_table(rows=2, cols=2)
+        for r in range(2):
+            for c in range(2):
+                t.rows[r].cells[c].text = "x"
+        doc.add_paragraph("")
+
+    diagnosed: list[int] = []
+    def _fake_diag(_path, idx, keep_temp=False):
+        diagnosed.append(idx)
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)  # no eligible split
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _fake_diag
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            report = _E2Report()
+            n = tc.apply_rendered_table_continuation(path, report=report)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if len(diagnosed) != 8:
+        return _result(False, f"expected 8 diagnose calls, got {len(diagnosed)}")
+    if report.warnings:
+        return _result(False, f"expected no user warnings (all candidates processed), got {report.warnings!r}")
+    return _result(True, f"31 total / 8 candidates → 8 diagnose calls, no warning, return={n}")
+
+
+def test_e2_25_total_7_candidates_marker_split_enters() -> tuple[bool, str]:
+    """E2: 25 total / 7 candidates enters marker split."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = _e2_make_long_table_doc(7, rows_per_table=8)
+    for i in range(18):
+        t = doc.add_table(rows=2, cols=2)
+        for r in range(2):
+            for c in range(2):
+                t.rows[r].cells[c].text = "x"
+        doc.add_paragraph("")
+
+    diagnosed: list[int] = []
+    def _fake_diag(_path, idx, keep_temp=False):
+        diagnosed.append(idx)
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _fake_diag
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            report = _E2Report()
+            n = tc.apply_rendered_table_continuation(path, report=report)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if len(diagnosed) != 7:
+        return _result(False, f"expected 7 diagnose calls, got {len(diagnosed)}")
+    if report.warnings:
+        return _result(False, f"unexpected warnings: {report.warnings!r}")
+    return _result(True, f"25 total / 7 candidates → 7 diagnose calls, no warning")
+
+
+def test_e2_11_total_10_candidates_marker_split_enters() -> tuple[bool, str]:
+    """E2: 11 total / 10 candidates enters marker split within budget=20."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = _e2_make_long_table_doc(10, rows_per_table=8)
+    # +1 tiny without caption
+    t = doc.add_table(rows=2, cols=2)
+    for r in range(2):
+        for c in range(2):
+            t.rows[r].cells[c].text = "x"
+
+    diagnosed: list[int] = []
+    def _fake_diag(_path, idx, keep_temp=False):
+        diagnosed.append(idx)
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _fake_diag
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            report = _E2Report()
+            n = tc.apply_rendered_table_continuation(path, report=report)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if len(diagnosed) != 10:
+        return _result(False, f"expected 10 diagnose calls, got {len(diagnosed)}")
+    if report.warnings:
+        return _result(False, f"unexpected warnings: {report.warnings!r}")
+    return _result(True, f"11 total / 10 candidates → 10 diagnose calls, no warning")
+
+
+def test_e2_no_warning_when_all_candidates_processed() -> tuple[bool, str]:
+    """E2: report.warn must NOT fire when all candidates are diagnosed within budget."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = _e2_make_long_table_doc(5, rows_per_table=8)
+    def _fake_diag(_path, idx, keep_temp=False):
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _fake_diag
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            report = _E2Report()
+            tc.apply_rendered_table_continuation(path, report=report)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if report.warnings:
+        return _result(False, f"warnings emitted when all candidates processed: {report.warnings!r}")
+    return _result(True, "no user warning when all candidates fit in budget")
+
+
+def test_e2_warning_when_some_candidates_skipped_for_budget() -> tuple[bool, str]:
+    """E2: when candidates > budget, overflow tables logged + user warning fires."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    # 10 long candidates, budget=6 → 4 overflow
+    doc = _e2_make_long_table_doc(10, rows_per_table=8)
+
+    diagnosed: list[int] = []
+    def _fake_diag(_path, idx, keep_temp=False):
+        diagnosed.append(idx)
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)
+
+    save = _e2_set_candidate_mode(budget=6)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _fake_diag
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            report = _E2Report()
+            tc.apply_rendered_table_continuation(path, report=report)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if len(diagnosed) != 6:
+        return _result(False, f"expected 6 diagnose calls (budget), got {len(diagnosed)}")
+    if not report.warnings:
+        return _result(False, "expected user warning for budget overflow, got none")
+    msg = report.warnings[0]
+    if "частично" not in msg.lower() or "10" not in msg:
+        return _result(False, f"warning text wrong: {msg!r}")
+    return _result(True, f"6/10 processed; warning fires: {msg[:80]!r}")
+
+
+def test_e2_candidate_diagnose_failure_does_not_abort_others() -> tuple[bool, str]:
+    """E2: a single diagnose_table failure logs and continues with the next candidate."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = _e2_make_long_table_doc(3, rows_per_table=8)
+
+    diagnosed: list[int] = []
+    def _flaky(_path, idx, keep_temp=False):
+        diagnosed.append(idx)
+        if idx == 0:
+            raise RuntimeError("simulated diagnose failure")
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _flaky
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            report = _E2Report()
+            tc.apply_rendered_table_continuation(path, report=report)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if diagnosed != [0, 1, 2]:
+        return _result(False, f"expected diagnose attempts on all 3 candidates, got {diagnosed!r}")
+    if not report.warnings:
+        return _result(False, "expected user warning for the 1 diagnose failure, got none")
+    return _result(True, f"diagnose failure on idx=0 did not abort idx=1,2; warning fires")
+
+
+def test_e2_existing_manual_continuation_preserved() -> tuple[bool, str]:
+    """E2: a valid manual chain is filtered out of candidates; not diagnosed."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("Таблица 1.1.1")
+    t1 = doc.add_table(rows=8, cols=3)
+    t1.rows[0].cells[0].text = "H1"; t1.rows[0].cells[1].text = "H2"; t1.rows[0].cells[2].text = "H3"
+    for r in range(1, 8):
+        for c in range(3):
+            t1.rows[r].cells[c].text = f"r{r}c{c}"
+    marker = doc.add_paragraph("Продолжение таблицы 1.1.1")
+    marker.alignment = 2
+    marker.paragraph_format.keep_with_next = True
+    t2 = doc.add_table(rows=6, cols=3)
+    t2.rows[0].cells[0].text = "H1"; t2.rows[0].cells[1].text = "H2"; t2.rows[0].cells[2].text = "H3"
+    for r in range(1, 6):
+        for c in range(3):
+            t2.rows[r].cells[c].text = f"r{r}c{c}"
+
+    diagnosed: list[int] = []
+    def _fake_diag(_path, idx, keep_temp=False):
+        diagnosed.append(idx)
+        return _e2_fake_diagnostic(tm, idx, rows_count=8, two_page=False)
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = _fake_diag
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            tc.apply_rendered_table_continuation(path)
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if diagnosed:
+        return _result(False, f"manual chain tables wrongly diagnosed: {diagnosed!r}")
+    return _result(True, "valid manual chain filtered before diagnose")
+
+
+def test_e2_continuation_label_has_blank_after_before_table() -> tuple[bool, str]:
+    """E2: auto-inserted ordinary continuation has structure tbl → marker_p → blank_p → tbl."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.3")
+    tbl = doc.add_table(rows=6, cols=3)
+    tbl.rows[0].cells[0].text = "H1"; tbl.rows[0].cells[1].text = "H2"; tbl.rows[0].cells[2].text = "H3"
+    for r in range(1, 6):
+        for c in range(3):
+            tbl.rows[r].cells[c].text = f"r{r}c{c}"
+    doc.add_paragraph("Источник: данные автора")
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=6,
+        pages_detected=[1, 2],
+        row_pages={0: 1, 1: 1, 2: 1, 3: 2, 4: 2, 5: 2},
+        found_rows=[0, 1, 2, 3, 4, 5],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 1), tm.TablePageSpan(3, 5, 2)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.2.3",
+    )
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    try:
+        tm.diagnose_table = lambda _p, idx, keep_temp=False: diagnostic
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            n = tc.apply_rendered_table_continuation(path)
+            out = Document(str(path))
+    finally:
+        tm.diagnose_table = old_dt
+        _e2_restore_env(save)
+
+    if n != 1:
+        return _result(False, f"expected 1 split applied, got {n}")
+    if len(out.tables) != 2:
+        return _result(False, f"expected 2 tables after split, got {len(out.tables)}")
+
+    body = out.element.body
+    children = list(body)
+    tbl1 = out.tables[0]._element
+    tbl2 = out.tables[1]._element
+    i1 = children.index(tbl1)
+    i2 = children.index(tbl2)
+    if i2 - i1 != 3:
+        return _result(False, f"chain shape wrong: expected tbl→p→blank→tbl, got gap={i2-i1}")
+    marker = children[i1 + 1]
+    blank = children[i1 + 2]
+    if marker.tag != qn("w:p"):
+        return _result(False, "marker node is not a paragraph")
+    if blank.tag != qn("w:p"):
+        return _result(False, "blank node is not a paragraph")
+    marker_text = "".join(t.text or "" for t in marker.findall(".//" + qn("w:t"))).strip()
+    blank_text = "".join(t.text or "" for t in blank.findall(".//" + qn("w:t"))).strip()
+    if "Продолжение таблицы" not in marker_text:
+        return _result(False, f"marker text not as expected: {marker_text!r}")
+    if blank_text:
+        return _result(False, f"blank paragraph is not empty: {blank_text!r}")
+    return _result(True, "ordinary continuation has tbl → marker → blank → tbl")
+
+
+def test_e2_rollback_global_skip_mode_preserves_pre_e2_behaviour() -> tuple[bool, str]:
+    """E2: KPFU_MARKER_SPLIT_MODE=global_skip restores pre-E2 behaviour."""
+    import logging
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    for i in range(8):
+        doc.add_paragraph(f"Таблица 1.1.{i+1}")
+        t = doc.add_table(rows=2, cols=2)
+        for r in range(2):
+            for c in range(2):
+                t.rows[r].cells[c].text = "x"
+
+    captured: list[str] = []
+    class _Cap(logging.Handler):
+        def __init__(self): super().__init__(level=logging.DEBUG)
+        def emit(self, r): captured.append(r.getMessage())
+
+    save = {
+        "enable": os.environ.get("KPFU_ENABLE_MARKER_SPLIT"),
+        "mode":   os.environ.get("KPFU_MARKER_SPLIT_MODE"),
+        "budget": os.environ.get("KPFU_MARKER_SPLIT_MAX_RENDERS"),
+    }
+    os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_MARKER_SPLIT_MODE"] = "global_skip"
+    os.environ["KPFU_MARKER_SPLIT_MAX_RENDERS"] = "6"
+
+    old_dt = tm.diagnose_table
+    handler = _Cap()
+    prev = tc.logger.level
+    tc.logger.addHandler(handler)
+    tc.logger.setLevel(logging.DEBUG)
+    try:
+        # diagnose_table must NOT be called under global_skip with overflow.
+        tm.diagnose_table = lambda *a, **k: (_ for _ in ()).throw(AssertionError("global_skip must not diagnose"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            n = tc.apply_rendered_table_continuation(path)
+    finally:
+        tm.diagnose_table = old_dt
+        tc.logger.removeHandler(handler)
+        tc.logger.setLevel(prev)
+        for key, env in (("enable","KPFU_ENABLE_MARKER_SPLIT"),
+                         ("mode","KPFU_MARKER_SPLIT_MODE"),
+                         ("budget","KPFU_MARKER_SPLIT_MAX_RENDERS")):
+            if save[key] is None:
+                os.environ.pop(env, None)
+            else:
+                os.environ[env] = save[key]
+
+    if n != 0:
+        return _result(False, f"expected 0 (skip), got {n}")
+    if not any("render_budget_exceeded" in m for m in captured):
+        return _result(False, "render_budget_exceeded log missing in global_skip mode")
+    return _result(True, "global_skip rollback preserves pre-E2 behavior")
+
+
+# ── E3: NUM-row compensation for marker split ─────────────────────────────────
+
+def _e3_build_table_doc(rows: int, cols: int = 3, *, with_numbered_row=False,
+                        caption: str = "Таблица 1.1.1") -> Document:
+    """Build a synthetic doc with one table.
+
+    Layout:
+      ВВЕДЕНИЕ
+      Текст.
+      <caption>
+      <table with `rows` rows × `cols` cols>
+    If with_numbered_row=True, row 1 is the exact numbered row "1 2 ... cols".
+    """
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph(caption)
+    tbl = doc.add_table(rows=rows, cols=cols)
+    for r in range(rows):
+        for c in range(cols):
+            if r == 0:
+                tbl.rows[r].cells[c].text = f"H{c+1}"
+            elif r == 1 and with_numbered_row:
+                tbl.rows[r].cells[c].text = str(c + 1)
+            else:
+                tbl.rows[r].cells[c].text = f"r{r}c{c}"
+    return doc
+
+
+def _e3_make_diagnostic(tm, *, table_index=0, rows_count=9, split_at=4,
+                        appendix=False, has_caption=True):
+    """Build a TableMarkerDiagnostic where rows 0..split_at-1 are on page 1 and
+    rows split_at..rows_count-1 are on page 2 (a clean 2-page boundary)."""
+    row_pages = {}
+    for r in range(rows_count):
+        row_pages[r] = 1 if r < split_at else 2
+    page_spans = [
+        tm.TablePageSpan(0, split_at - 1, 1),
+        tm.TablePageSpan(split_at, rows_count - 1, 2),
+    ]
+    return tm.TableMarkerDiagnostic(
+        table_index=table_index,
+        rows_count=rows_count,
+        pages_detected=[1, 2],
+        row_pages=row_pages,
+        found_rows=list(range(rows_count)),
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=page_spans,
+        appendix_table=appendix,
+        caption_detected=True,
+        has_standard_table_caption=has_caption,
+        preceding_paragraph_text=("ПРИЛОЖЕНИЕ 1" if appendix else "Таблица 1.1.1"),
+    )
+
+
+def _e3_save_and_get_args(diagnostic, **kwargs):
+    """Helper: write a docx with the given table shape, run _effective_marker_split_before_row.
+    Returns (K_effective)."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    rows = kwargs.pop("rows", 9)
+    cols = kwargs.pop("cols", 3)
+    with_num = kwargs.pop("with_numbered_row", False)
+    flag = kwargs.pop("flag", None)  # None / "0" / "1"
+    doc = _e3_build_table_doc(rows, cols, with_numbered_row=with_num)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        decision = tc._MarkerSplitDecision(eligible=True, split_before_row=diagnostic.row_pages and (
+            min(r for r, p in diagnostic.row_pages.items() if p == diagnostic.pages_detected[-1])
+        ), skip_reason=None)
+        saved = os.environ.get("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION")
+        if flag is None:
+            os.environ.pop("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION", None)
+        else:
+            os.environ["KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION"] = flag
+        try:
+            return tc._effective_marker_split_before_row(diagnostic, decision, docx_path=path)
+        finally:
+            if saved is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION"] = saved
+
+
+def test_e3_compensation_applies_for_ordinary_body_table() -> tuple[bool, str]:
+    """E3: ordinary body table without pre-existing NUM row, rows_count - K >= 2 → K-1."""
+    import guides.coursework_kfu_2025.table_markers as tm
+    diag = _e3_make_diagnostic(tm, rows_count=9, split_at=4, appendix=False)
+    K = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=False)
+    if K != 3:
+        return _result(False, f"expected K=3 (compensation 4->3), got {K}")
+    return _result(True, "compensation K=4 → K=3 for ordinary body table without NUM row 1")
+
+
+def test_e3_compensation_skipped_when_table_has_pre_existing_numbered_row() -> tuple[bool, str]:
+    """E3: pre-existing numbered row at row 1 → no insertion will fire → no compensation."""
+    import guides.coursework_kfu_2025.table_markers as tm
+    diag = _e3_make_diagnostic(tm, rows_count=9, split_at=4, appendix=False)
+    K = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=True)
+    if K != 4:
+        return _result(False, f"expected K=4 (no compensation, pre-existing NUM), got {K}")
+    return _result(True, "compensation skipped when original row 1 is already numbered")
+
+
+def test_e3_compensation_skipped_for_appendix() -> tuple[bool, str]:
+    """E3: appendix branch still uses the existing -1 (unrelated path); body E3 path must skip."""
+    import guides.coursework_kfu_2025.table_markers as tm
+    diag = _e3_make_diagnostic(tm, rows_count=9, split_at=4, appendix=True)
+    K = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=False)
+    # Appendix branch: K=4, header_rows=1, K > header_rows + 1 (4 > 2) → returns K-1 = 3 via the
+    # existing appendix logic — but NOT via E3. Verify the existing behavior is preserved.
+    if K != 3:
+        return _result(False, f"expected K=3 from appendix branch, got {K}")
+    return _result(True, "appendix branch returns K-1 via existing logic (E3 path not used)")
+
+
+def test_e3_compensation_skipped_when_fragment2_too_small() -> tuple[bool, str]:
+    """E3: rows_count - K < 2 → compensation guard blocks the -1."""
+    import guides.coursework_kfu_2025.table_markers as tm
+    # rows_count=6, K=5: rows_count - K = 1 → guard fails → return K unchanged
+    diag = _e3_make_diagnostic(tm, rows_count=6, split_at=5, appendix=False)
+    K = _e3_save_and_get_args(diag, rows=6, cols=3, with_numbered_row=False)
+    if K != 5:
+        return _result(False, f"expected K=5 (Бондарев-shape guard), got {K}")
+    return _result(True, "compensation blocked when fragment 2 would have only 1 data row (Case-A guard)")
+
+
+def test_e3_compensation_skipped_when_fragment1_would_be_empty() -> tuple[bool, str]:
+    """E3: K-1 < header_rows + 1 (i.e., fragment 1 would have 0 data rows) → no compensation."""
+    import guides.coursework_kfu_2025.table_markers as tm
+    # rows_count=9, K=2: K-1 = 1 = header_rows (= 1), K-1 < header_rows + 1 → guard fails
+    diag = _e3_make_diagnostic(tm, rows_count=9, split_at=2, appendix=False)
+    K = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=False)
+    if K != 2:
+        return _result(False, f"expected K=2 (no compensation when fragment 1 would be near-empty), got {K}")
+    return _result(True, "compensation blocked when fragment 1 would have 0 data rows")
+
+
+def test_e3_feature_flag_off_disables_compensation() -> tuple[bool, str]:
+    """E3: KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION=0 disables the new logic."""
+    import guides.coursework_kfu_2025.table_markers as tm
+    diag = _e3_make_diagnostic(tm, rows_count=9, split_at=4, appendix=False)
+    K_off = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=False, flag="0")
+    if K_off != 4:
+        return _result(False, f"flag=0 expected K=4, got {K_off}")
+    K_off_false = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=False, flag="false")
+    if K_off_false != 4:
+        return _result(False, f"flag=false expected K=4, got {K_off_false}")
+    K_on = _e3_save_and_get_args(diag, rows=9, cols=3, with_numbered_row=False, flag="1")
+    if K_on != 3:
+        return _result(False, f"flag=1 expected K=3, got {K_on}")
+    return _result(True, "feature flag toggles compensation correctly (default ON; '0'/'false' disable)")
+
+
+def test_e3_integration_apply_marker_split_passes_compensated_k() -> tuple[bool, str]:
+    """E3 integration: _apply_marker_split_candidate routes through E3 and the resulting split
+    matches the compensated K. Synthesize a Case-B-shape table (no pre-existing NUM, rows_count - K >= 2)
+    and verify that apply_numbered_split_to_document is called with K-1, producing the expected
+    fragment sizes."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    rows_count = 9
+    natural_K = 4
+    doc = _e3_build_table_doc(rows=rows_count, cols=3, with_numbered_row=False,
+                              caption="Таблица 1.1.1")
+    diag = _e3_make_diagnostic(tm, rows_count=rows_count, split_at=natural_K, appendix=False)
+
+    saved = os.environ.get("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION")
+    os.environ["KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION"] = "1"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            decision = tc._evaluate_marker_split_diagnostic(diag, header_rows=1)
+            if not decision.eligible:
+                return _result(False, f"decision not eligible: {decision!r}")
+            result, skip_reason = tc._apply_marker_split_candidate(path, diag, decision)
+            if result is None:
+                return _result(False, f"apply returned None, skip_reason={skip_reason!r}")
+            out = Document(str(path))
+    finally:
+        if saved is None:
+            os.environ.pop("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION", None)
+        else:
+            os.environ["KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION"] = saved
+
+    if len(out.tables) != 2:
+        return _result(False, f"expected 2 tables after split, got {len(out.tables)}")
+    # With compensation: K=3 → table 1 has rows 0..2 of original (3 rows) + NUM = 4 rows total.
+    # Table 2 has NUM + rows 3..8 of original = 7 rows total.
+    if len(out.tables[0].rows) != 4:
+        return _result(False, f"expected fragment 1 to have 4 rows after compensation, got {len(out.tables[0].rows)}")
+    if len(out.tables[1].rows) != 7:
+        return _result(False, f"expected fragment 2 to have 7 rows after compensation, got {len(out.tables[1].rows)}")
+    return _result(True, "compensation propagated through _apply_marker_split_candidate (4-row fragment 1, 7-row fragment 2)")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 def run_all() -> None:
@@ -7974,6 +8720,24 @@ def run_all() -> None:
         ("E1 | priority ordering desc by rows", test_e1_classify_priority_ordering),
         ("E1 | classification + previews logged", test_e1_log_emitted_with_classification),
         ("E1 | existing budget skip preserved", test_e1_does_not_change_existing_behaviour),
+        # E2: quality-first candidate-mode marker split.
+        ("E2 | 31 total / 8 candidates marker split enters", test_e2_31_total_8_candidates_marker_split_enters),
+        ("E2 | 25 total / 7 candidates marker split enters", test_e2_25_total_7_candidates_marker_split_enters),
+        ("E2 | 11 total / 10 candidates marker split enters", test_e2_11_total_10_candidates_marker_split_enters),
+        ("E2 | no warning when all candidates processed", test_e2_no_warning_when_all_candidates_processed),
+        ("E2 | warning when budget overflow skips candidates", test_e2_warning_when_some_candidates_skipped_for_budget),
+        ("E2 | one diagnose failure does not abort others", test_e2_candidate_diagnose_failure_does_not_abort_others),
+        ("E2 | manual continuation preserved (not diagnosed)", test_e2_existing_manual_continuation_preserved),
+        ("E2 | continuation has blank between marker and table", test_e2_continuation_label_has_blank_after_before_table),
+        ("E2 | rollback global_skip preserves pre-E2", test_e2_rollback_global_skip_mode_preserves_pre_e2_behaviour),
+        # E3: NUM-row compensation for marker-split first fragment.
+        ("E3 | compensation applies for ordinary body table", test_e3_compensation_applies_for_ordinary_body_table),
+        ("E3 | compensation skipped when pre-existing NUM row", test_e3_compensation_skipped_when_table_has_pre_existing_numbered_row),
+        ("E3 | compensation skipped for appendix path", test_e3_compensation_skipped_for_appendix),
+        ("E3 | compensation skipped when fragment 2 too small (Case-A guard)", test_e3_compensation_skipped_when_fragment2_too_small),
+        ("E3 | compensation skipped when fragment 1 would be empty", test_e3_compensation_skipped_when_fragment1_would_be_empty),
+        ("E3 | feature flag off disables compensation", test_e3_feature_flag_off_disables_compensation),
+        ("E3 | integration: K-1 propagates through apply", test_e3_integration_apply_marker_split_passes_compensated_k),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":

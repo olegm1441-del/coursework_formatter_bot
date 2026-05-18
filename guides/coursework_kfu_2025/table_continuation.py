@@ -712,26 +712,49 @@ def _collect_table_signatures(doc: Document) -> list[TableSignature]:
 
 def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
     """
-    Return table XML ids that are already part of a valid manual continuation.
-    Valid manual chains must be preserved exactly.
+    Return table XML ids that are already part of a valid continuation chain
+    (manual student-authored OR auto-inserted by an earlier marker-split run).
+
+    Accepted chain shapes (both must be preserved across re-runs):
+      tbl → marker_p → tbl                  (manual; no blank between marker and table 2)
+      tbl → marker_p → blank_p → tbl        (auto; one blank between marker and table 2)
     """
     body = doc.element.body
     children = list(body)
     skip: set[int] = set()
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+
+    def _is_empty_p(elem) -> bool:
+        if elem.tag != qn("w:p"):
+            return False
+        p_obj = para_by_xml.get(elem)
+        return p_obj is not None and not _norm_text(p_obj.text or "")
 
     i = 1
     while i < len(children) - 1:
         prev_node = children[i - 1]
         node = children[i]
-        next_node = children[i + 1]
 
-        if prev_node.tag != qn("w:tbl") or node.tag != qn("w:p") or next_node.tag != qn("w:tbl"):
+        if prev_node.tag != qn("w:tbl") or node.tag != qn("w:p"):
             i += 1
             continue
 
-        p_obj = next((p for p in doc.paragraphs if p._element is node), None)
+        p_obj = para_by_xml.get(node)
         marker_text = _norm_text(p_obj.text if p_obj is not None else "")
         if not _is_any_continuation_marker(marker_text):
+            i += 1
+            continue
+
+        # Locate the second table: either immediately after the marker (manual)
+        # or after exactly one blank paragraph (auto-inserted by marker split).
+        next_idx = i + 1
+        if next_idx < len(children) and _is_empty_p(children[next_idx]):
+            next_idx += 1
+        if next_idx >= len(children):
+            i += 1
+            continue
+        next_node = children[next_idx]
+        if next_node.tag != qn("w:tbl"):
             i += 1
             continue
 
@@ -1684,16 +1707,18 @@ def _marker_split_apply_enabled() -> bool:
     }
 
 
-_MARKER_SPLIT_MAX_RENDERS_DEFAULT = 6
+_MARKER_SPLIT_MAX_RENDERS_DEFAULT = 20
+_MARKER_SPLIT_HARD_TIMEOUT_DEFAULT = 300.0
+_MARKER_SPLIT_MODE_DEFAULT = "candidate"
+_MARKER_SPLIT_MODE_VALID = {"candidate", "global_skip"}
 
 
 def _marker_split_max_renders() -> int:
     """
-    Per-document cap on rendered marker-split candidates. Each candidate costs
-    one LibreOffice render; without a cap, large-table documents (e.g. requests
-    115/116) exceeded FORMAT_TIMEOUT_SECONDS=180. Env override:
-    KPFU_MARKER_SPLIT_MAX_RENDERS. Missing/invalid/negative values fall back to
-    the safe default.
+    Per-document cap on rendered marker-split *candidates*. Each candidate
+    diagnose costs one LibreOffice render. Env override:
+    KPFU_MARKER_SPLIT_MAX_RENDERS. Missing/invalid/negative values fall back
+    to the default. Default raised to 20 for quality-first candidate mode.
     """
     raw = os.getenv("KPFU_MARKER_SPLIT_MAX_RENDERS", "")
     try:
@@ -1703,6 +1728,62 @@ def _marker_split_max_renders() -> int:
     if value < 0:
         return _MARKER_SPLIT_MAX_RENDERS_DEFAULT
     return value
+
+
+def _marker_split_mode() -> str:
+    """
+    Phase 3 marker split execution mode. Env override KPFU_MARKER_SPLIT_MODE.
+      "candidate"   (default) — per-candidate diagnose loop with hard wall-time
+                                 cap. User warning only if real candidates were
+                                 skipped.
+      "global_skip" (legacy)  — pre-E2 behaviour. Whole pass skipped when
+                                 total table count exceeds the budget.
+    Unknown / missing values fall back to the default.
+    """
+    raw = (os.getenv("KPFU_MARKER_SPLIT_MODE") or "").strip().lower()
+    if raw not in _MARKER_SPLIT_MODE_VALID:
+        return _MARKER_SPLIT_MODE_DEFAULT
+    return raw
+
+
+def _marker_split_hard_timeout_seconds() -> float:
+    """
+    Hard wall-time cap (seconds) for the per-candidate marker-split loop.
+    Checked before starting each candidate's diagnose. Does NOT interrupt an
+    in-flight diagnose. Env override KPFU_MARKER_SPLIT_HARD_TIMEOUT_SECONDS.
+    Defaults to 300 s. Non-positive / invalid → default.
+    """
+    raw = os.getenv("KPFU_MARKER_SPLIT_HARD_TIMEOUT_SECONDS", "")
+    if not raw:
+        return _MARKER_SPLIT_HARD_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _MARKER_SPLIT_HARD_TIMEOUT_DEFAULT
+    if value <= 0:
+        return _MARKER_SPLIT_HARD_TIMEOUT_DEFAULT
+    return value
+
+
+def _marker_split_num_row_compensation_enabled() -> bool:
+    """
+    E3: NUM-row compensation for marker-split first fragment.
+
+    When apply_numbered_split_to_document inserts a synthesized "1, 2, 3, …"
+    row at the top of the first fragment (because the original table doesn't
+    have one), the fragment is one row taller than LO measured. With cantSplit
+    on every row (TCF-A), the last data row can be pushed alone to the next
+    page (orphan / near-empty page). Compensation: subtract 1 from
+    split_before_row so the fragment matches LO's measured capacity.
+
+    Env override KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION. Default ON. Values
+    "0", "false", "off", "no" (case-insensitive) disable it; anything else
+    enables it.
+    """
+    raw = (os.getenv("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION") or "").strip().lower()
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    return True
 
 
 # E1 — Phase 3 marker-split candidate classification (logging-only, no behavior change).
@@ -1988,6 +2069,7 @@ def _effective_marker_split_before_row(
     decision: _MarkerSplitDecision,
     *,
     header_rows: int = 1,
+    docx_path=None,
 ) -> int | None:
     split_before_row = decision.split_before_row
     if split_before_row is None:
@@ -1999,7 +2081,91 @@ def _effective_marker_split_before_row(
         # a repeated textual header above the generated numbered row.
         return split_before_row - 1
 
+    # E3: NUM-row compensation for ordinary body tables.
+    # apply_numbered_split_to_document will insert a synthesized "1, 2, 3, ..."
+    # row at index 1 of the first fragment if the original table doesn't
+    # already have one. That extra row was NOT present when LO marker render
+    # measured split_before_row, so post-split the fragment is one row taller
+    # than measured — and TCF-A cantSplit can push the last data row alone
+    # to a new page (orphan). Compensate by returning K - 1, but only when:
+    #   (a) feature flag enabled
+    #   (b) ordinary body table (appendix branch above handles its own case)
+    #   (c) we have a docx_path to inspect the original table
+    #   (d) original row 1 is NOT already an exact numbered row
+    #   (e) K - 1 still leaves ≥ 1 data row in the first fragment
+    #   (f) fragment 2 will have ≥ 2 data rows after the bump
+    # Condition (f) avoids the Case-A worsening: when K is already at the
+    # natural maximum (rows_count - 1), a -1 would push a row unnecessarily.
+    if (
+        not diagnostic.appendix_table
+        and docx_path is not None
+        and _marker_split_num_row_compensation_enabled()
+        and split_before_row - 1 >= header_rows + 1
+        and diagnostic.rows_count - split_before_row >= 2
+    ):
+        try:
+            from .table_split_prototype import (
+                _row_is_exact_numbered_row,
+                _tbl_grid_column_count,
+            )
+            _doc = Document(str(docx_path))
+            if 0 <= diagnostic.table_index < len(_doc.tables):
+                tbl_xml = _doc.tables[diagnostic.table_index]._tbl
+                cols = _tbl_grid_column_count(tbl_xml)
+                trs = tbl_xml.findall(qn("w:tr"))
+                if (
+                    cols
+                    and len(trs) > 1
+                    and not _row_is_exact_numbered_row(trs[1], cols)
+                ):
+                    logger.info(
+                        "marker_split_num_row_compensation table_index=%s K=%s -> %s rows_count=%s",
+                        diagnostic.table_index,
+                        split_before_row,
+                        split_before_row - 1,
+                        diagnostic.rows_count,
+                    )
+                    return split_before_row - 1
+        except Exception as exc:
+            logger.warning(
+                "marker_split_num_row_compensation_failed table_index=%s error=%s",
+                diagnostic.table_index, exc,
+            )
+
     return split_before_row
+
+
+def _ensure_blank_between_marker_and_second_table(doc, first_idx: int) -> bool:
+    """Insert exactly one blank <w:p> between the continuation marker and the
+    second table of a just-applied auto-split, if not already present.
+    Idempotent. No-op if the chain shape is unexpected.
+    """
+    tables = doc.tables
+    second_idx = first_idx + 1
+    if first_idx < 0 or second_idx >= len(tables):
+        return False
+    tbl1 = tables[first_idx]._element
+    tbl2 = tables[second_idx]._element
+    body = tbl1.getparent()
+    if body is None:
+        return False
+    children = list(body)
+    try:
+        i1 = children.index(tbl1)
+        i2 = children.index(tbl2)
+    except ValueError:
+        return False
+    # Expect tbl1 → marker_p → tbl2 (auto-split just inserted).
+    if i2 != i1 + 2:
+        # Either no marker between (rare appendix shape with no continuation_p)
+        # or already shaped tbl1 → marker → blank → tbl2 → nothing to do.
+        return False
+    marker_node = children[i1 + 1]
+    if marker_node.tag != qn("w:p"):
+        return False
+    blank = OxmlElement("w:p")
+    marker_node.addnext(blank)
+    return True
 
 
 def _apply_marker_split_candidate(
@@ -2024,7 +2190,9 @@ def _apply_marker_split_candidate(
     ):
         return None, "body_contains_nested_table_header"
 
-    split_before_row = _effective_marker_split_before_row(diagnostic, decision)
+    split_before_row = _effective_marker_split_before_row(
+        diagnostic, decision, docx_path=docx_path,
+    )
     if split_before_row is None:
         return None, "no_boundary"
 
@@ -2043,6 +2211,15 @@ def _apply_marker_split_candidate(
 
     if result.source_note_after_second is False:
         return None, "source_note_ordering_failed"
+
+    # Insert exactly one blank paragraph between the body-table continuation
+    # marker "Продолжение таблицы X.Y.Z" and the second table fragment.
+    # KFU norm: caption / EMPTY LINE / continued fragment.
+    # Appendix continuation labels ("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ N") use a different
+    # layout — leave them adjacent so existing tests + visual checks remain
+    # correct. Idempotent — no-op when the blank is already there.
+    if not diagnostic.appendix_table:
+        _ensure_blank_between_marker_and_second_table(doc, diagnostic.table_index)
 
     doc.save(str(docx_path))
     return result, None
@@ -2188,6 +2365,129 @@ def _run_marker_split_detection_pass(docx_path: Path, *, apply_split: bool = Fal
     return applied_count
 
 
+def _run_marker_split_for_candidates(
+    docx_path: Path,
+    candidates: list[int],
+    overflow: list[int],
+    hard_timeout_seconds: float,
+    apply_split: bool,
+    report,
+) -> int:
+    """Quality-first per-candidate marker-split pass (E2).
+
+    Diagnoses each candidate table individually (one LibreOffice render per
+    call). Per-candidate try/except so a single failure does not abort the
+    rest. Wall-time check before starting each diagnose. Overflow indices
+    (filtered out by candidate budget) are logged individually.
+
+    Emits a user warning only when at least one *candidate* was skipped due
+    to budget / wall-time / diagnose error — never just because the document
+    has many tables.
+    """
+    from . import table_markers
+
+    stats = _ACTIVE_MARKER_STATS
+    started_at = time.monotonic()
+
+    eligible_apply_candidates: list = []
+    diagnose_failed: list[int] = []
+    timed_out: list[int] = []
+
+    for ci, idx in enumerate(candidates):
+        elapsed = time.monotonic() - started_at
+        if elapsed > hard_timeout_seconds:
+            for r in candidates[ci:]:
+                logger.warning(
+                    "marker_split_skipped table_index=%s reason=hard_timeout_exceeded elapsed=%.1fs limit=%.1fs",
+                    r, elapsed, hard_timeout_seconds,
+                )
+                _record_marker_skip("hard_timeout_exceeded")
+                timed_out.append(r)
+            break
+
+        try:
+            diagnostic = table_markers.diagnose_table(docx_path, idx, keep_temp=False)
+        except Exception as exc:
+            logger.warning(
+                "marker_split_skipped table_index=%s reason=diagnose_error error=%s",
+                idx, exc,
+            )
+            _record_marker_skip("diagnose_error")
+            diagnose_failed.append(idx)
+            continue
+
+        if stats is not None:
+            stats.renders += _count_marker_renders([diagnostic])
+            stats.candidates += 1
+
+        logger.info(
+            "marker_split_candidate table_index=%s rows=%s pages=%s",
+            diagnostic.table_index,
+            diagnostic.rows_count,
+            diagnostic.pages_detected,
+        )
+
+        decision = _evaluate_marker_split_diagnostic(diagnostic, header_rows=1)
+        if decision.eligible:
+            logger.info(
+                "marker_split_decision=ELIGIBLE table_index=%s split_before_row=%s",
+                diagnostic.table_index, decision.split_before_row,
+            )
+            if apply_split:
+                eligible_apply_candidates.append((diagnostic, decision))
+        else:
+            logger.info(
+                "marker_split_skipped table_index=%s reason=%s",
+                diagnostic.table_index, decision.skip_reason,
+            )
+            _record_marker_skip(decision.skip_reason)
+
+    for idx in overflow:
+        logger.warning(
+            "marker_split_skipped table_index=%s reason=candidate_budget_exhausted",
+            idx,
+        )
+        _record_marker_skip("candidate_budget_exhausted")
+
+    applied_count = 0
+    if apply_split:
+        for diagnostic, decision in sorted(
+            eligible_apply_candidates,
+            key=lambda item: item[0].table_index,
+            reverse=True,
+        ):
+            result, skip_reason = _apply_marker_split_candidate(
+                docx_path, diagnostic, decision,
+            )
+            if result is not None:
+                applied_count += 1
+                _record_marker_applied(docx_path, diagnostic.table_index)
+                logger.info(
+                    "marker_split_applied table_index=%s split_before_row=%s appendix=%s",
+                    diagnostic.table_index,
+                    result.split_before_row,
+                    diagnostic.appendix_table,
+                )
+                continue
+            logger.info(
+                "marker_split_skipped table_index=%s reason=%s",
+                diagnostic.table_index, skip_reason or "unknown",
+            )
+            _record_marker_skip(skip_reason or "apply_failed")
+
+    real_skips = list(overflow) + list(timed_out) + list(diagnose_failed)
+    if report is not None and real_skips:
+        total_attempted = len(candidates) + len(overflow)
+        processed = total_attempted - len(real_skips)
+        report.warn(
+            "Автоматическое разделение длинных таблиц выполнено частично: "
+            f"обработано {processed} из {total_attempted} длинных таблиц. "
+            "Остальные проверьте вручную."
+        )
+
+    return applied_count
+
+
 def apply_rendered_table_continuation(
     docx_path: Path,
     report: FormattingReport | None = None,
@@ -2256,7 +2556,13 @@ def apply_rendered_table_continuation(
         except Exception as _exc:
             logger.warning("phase3_candidate_classification_failed error=%s", _exc)
 
-    if _marker_split_enabled():
+    # E2: branch on KPFU_MARKER_SPLIT_MODE.
+    # candidate (default) — per-candidate diagnose, hard wall-time cap, warning
+    #                       fires only if real candidates were skipped.
+    # global_skip (legacy) — pre-E2 behaviour: skip wholesale when total > budget.
+    _split_mode = _marker_split_mode()
+
+    if _marker_split_enabled() and _split_mode == "global_skip":
         budget = _marker_split_max_renders()
         table_count = len(doc.tables)
         if table_count > budget:
@@ -2283,23 +2589,33 @@ def apply_rendered_table_continuation(
         _ACTIVE_MARKER_STATS = marker_stats
         try:
             try:
-                if apply_marker_split:
+                if _split_mode == "candidate":
+                    marker_total = _run_marker_split_for_candidates(
+                        docx_path,
+                        candidates=_classification["would_process"],
+                        overflow=_classification["would_skip_for_budget"],
+                        hard_timeout_seconds=_marker_split_hard_timeout_seconds(),
+                        apply_split=apply_marker_split,
+                        report=report,
+                    )
+                elif apply_marker_split:
                     marker_total = _run_marker_split_detection_pass(
                         docx_path,
                         apply_split=True,
                     )
-                    if marker_total:
-                        emit_marker_summary()
-                        logger.info(
-                            "rendered_final_decision action=marker_split_applied count=%s",
-                            marker_total,
-                        )
-                        return marker_total
                 else:
                     _run_marker_split_detection_pass(
                         docx_path,
                         apply_split=False,
                     )
+                    marker_total = 0
+                if marker_total and apply_marker_split:
+                    emit_marker_summary()
+                    logger.info(
+                        "rendered_final_decision action=marker_split_applied count=%s",
+                        marker_total,
+                    )
+                    return marker_total
             except Exception:
                 emit_marker_summary()
                 raise
