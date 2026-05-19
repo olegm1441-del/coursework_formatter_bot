@@ -873,6 +873,28 @@ def _is_valid_manual_continuation_chain(doc: Document, tbl1, marker_p, tbl2) -> 
     return compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
 
 
+def _is_structurally_valid_student_chain(doc: Document, tbl1, marker_p, tbl2) -> bool:
+    # Looser merge-safety gate: structurally sound student-authored chain that
+    # only lacks keepNext (a formatter-applied attribute). Used by
+    # apply_table_merging to avoid destroying valid student splits.
+    marker_text = ""
+    for text_node in marker_p.findall(".//" + qn("w:t")):
+        marker_text += text_node.text or ""
+    marker_text = _norm_text(marker_text)
+    if not _is_any_continuation_marker(marker_text):
+        return False
+    if not _manual_marker_matches_caption(doc, tbl1, marker_text):
+        return False
+    if not _paragraph_is_right_aligned(marker_p):
+        return False
+
+    compatible = _table_col_count(tbl1) == _table_col_count(tbl2) and _table_col_count(tbl1) > 0
+    rows1 = tbl1.findall(qn("w:tr"))
+    rows2 = tbl2.findall(qn("w:tr"))
+    headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
+    return compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
+
+
 def _row_matches_line(sig: RowSignature, line_text: str) -> bool:
     pos = 0
     for fragment in sig.fragments:
@@ -1621,8 +1643,9 @@ def apply_table_merging(doc: Document) -> int:
         rows2 = tbl2.findall(qn("w:tr"))
         headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
         keep_manual_split = _is_valid_manual_continuation_chain(doc, tbl1, node, tbl2)
+        keep_student_chain = _is_structurally_valid_student_chain(doc, tbl1, node, tbl2)
 
-        if keep_manual_split:
+        if keep_manual_split or keep_student_chain:
             i += 1
             continue
 

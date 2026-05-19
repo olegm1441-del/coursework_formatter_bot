@@ -34,9 +34,10 @@ SOURCE_LINE_RE = re.compile(r"^\s*(источник|составлено по|р
 # text REFERRING to a table/figure, not a caption title.
 # Vocabulary kept in sync with the verb list already trusted by
 # safe_formatter._is_figure_caption_text (introduced in commit be38951).
+# "связыва"/"позволя" added for DEFECT 3 (neuromarketing analytical prose).
 _CAPTION_REFERENCE_PROSE_RE = re.compile(
     r"^(показыва|отража|содерж|представлен|представля|"
-    r"демонстрир|иллюстрир|свидетельств)\w*\b",
+    r"демонстрир|иллюстрир|свидетельств|связыва|позволя)\w*\b",
     re.IGNORECASE,
 )
 

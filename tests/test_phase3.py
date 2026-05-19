@@ -741,7 +741,16 @@ def test_c_apply_table_merging_keeps_valid_manual_split() -> tuple[bool, str]:
     return _result(True, "valid manual split preserved")
 
 
-def test_c_apply_table_merging_rebuilds_marker_without_keep_next() -> tuple[bool, str]:
+def test_c_apply_table_merging_keeps_marker_without_keep_next() -> tuple[bool, str]:
+    """
+    P0-α: a student-authored continuation chain that is structurally sound
+    (caption-matching right-aligned marker, matching column count and header row,
+    second table has data rows) must NOT be destroyed just because the marker
+    paragraph lacks keepNext. Phase 1 normalizes the marker text and alignment
+    but does not add keepNext — that attribute is formatter-applied. Without
+    this guard, apply_table_merging silently destroys valid student chains
+    (Bondarev: 1.3.1, 2.1.1, 2.1.4, 2.1.5, 2.2.3).
+    """
     from guides.coursework_kfu_2025.table_continuation import apply_table_merging
 
     doc = Document()
@@ -753,7 +762,44 @@ def test_c_apply_table_merging_rebuilds_marker_without_keep_next() -> tuple[bool
     t1.rows[1].cells[1].text = "b"
 
     marker = doc.add_paragraph("Продолжение таблицы 1.3.1")
-    marker.alignment = 2  # right, but not tightly coupled to the continuation table
+    marker.alignment = 2  # right-aligned (Phase 1 normalisation); no keepNext
+
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.rows[0].cells[0].text = "H1"
+    t2.rows[0].cells[1].text = "H2"
+    t2.rows[1].cells[0].text = "c"
+    t2.rows[1].cells[1].text = "d"
+
+    n = apply_table_merging(doc)
+    if n != 0:
+        return _result(False, f"expected 0 merges (chain structurally valid), got {n}")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 tables preserved, got {len(doc.tables)}")
+    if not any("Продолжение таблицы" in (p.text or "") for p in doc.paragraphs):
+        return _result(False, "continuation marker paragraph was lost")
+    return _result(True, "structurally valid student chain preserved without keepNext")
+
+
+def test_c_apply_table_merging_rebuilds_caption_mismatch() -> tuple[bool, str]:
+    """
+    Negative gate for P0-α: when the marker number does not match the caption
+    number above tbl1, the chain is NOT structurally valid and apply_table_merging
+    must still rebuild it. Verifies that loosening the keepNext requirement did
+    not accidentally accept arbitrary marker text.
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1")
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "a"
+    t1.rows[1].cells[1].text = "b"
+
+    # marker references a different table number than the caption above tbl1
+    marker = doc.add_paragraph("Продолжение таблицы 9.9.9")
+    marker.alignment = 2
 
     t2 = doc.add_table(rows=2, cols=2)
     t2.rows[0].cells[0].text = "H1"
@@ -763,14 +809,91 @@ def test_c_apply_table_merging_rebuilds_marker_without_keep_next() -> tuple[bool
 
     n = apply_table_merging(doc)
     if n != 1:
-        return _result(False, f"expected malformed manual chain to be rebuilt, got {n}")
+        return _result(False, f"expected caption-mismatched chain to be rebuilt, got {n}")
     if len(doc.tables) != 1:
-        return _result(False, f"expected 1 table after rebuild, got {len(doc.tables)}")
-    if any("Продолжение таблицы" in (p.text or "") for p in doc.paragraphs):
-        return _result(False, "malformed continuation marker was preserved")
-    if len(doc.tables[0].rows) != 3:
-        return _result(False, f"expected duplicate header skipped after merge, rows={len(doc.tables[0].rows)}")
-    return _result(True, "manual chain without keepWithNext rebuilt")
+        return _result(False, f"expected 1 merged table, got {len(doc.tables)}")
+    return _result(True, "caption-mismatched chain still rebuilt")
+
+
+# ── DEFECT 3 — caption-like analytical prose under table must stay body_text ──
+
+def test_table_caption_reference_prose_with_svyazyvaet_demoted() -> tuple[bool, str]:
+    """
+    DEFECT 3: a paragraph whose text starts with 'Таблица X.Y.Z' followed by an
+    analytical reference verb (e.g. 'связывает …', 'позволяет …') is analytical
+    body prose, not a caption. classify_paragraph must return body_text so that
+    pagination_rules._apply_rule3 does NOT set keep_with_next on it.
+    """
+    from guides.coursework_kfu_2025.classifier import classify_paragraph
+
+    cases = [
+        "Таблица 1.3.1 связывает каждую точку контакта с конкретным вопросом",
+        "Таблица 2.1.1 позволяет проследить динамику показателей",
+        "Таблица 1.2.1 показывает структуру выручки",
+        "Таблица 1.2.1 отражает изменения за период",
+    ]
+    for text in cases:
+        kind = classify_paragraph(text, prev_kind="empty_paragraph")
+        if kind == "table_caption":
+            return _result(False, f"analytical prose classified as table_caption: {text!r}")
+        if kind != "body_text":
+            return _result(False, f"expected body_text, got {kind!r} for {text!r}")
+    return _result(True, "analytical prose under table classified as body_text")
+
+
+def test_pagination_rule3_does_not_set_keepnext_on_prose_below_table() -> tuple[bool, str]:
+    """
+    DEFECT 3 integration: a paragraph beginning 'Таблица 2.1.1 связывает …'
+    appearing in body context (after table + Источник: + blank) must NOT receive
+    <w:keepNext/> from pagination_rules._apply_rule3.
+    """
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "a"
+    tbl.rows[1].cells[1].text = "b"
+    doc.add_paragraph("Источник: составлено автором.")
+    doc.add_paragraph("")
+    prose = doc.add_paragraph(
+        "Таблица 2.1.1 связывает каждую точку контакта с конкретным вопросом потенциального франчайзи."
+    )
+    doc.add_paragraph("Далее следует обычный текст основного содержания.")
+
+    apply_pagination_rules(doc)
+
+    pPr = prose._element.find(qn("w:pPr"))
+    has_keep_next = pPr is not None and pPr.find(qn("w:keepNext")) is not None
+    if has_keep_next:
+        return _result(False, "analytical prose paragraph below table received keepNext")
+    return _result(True, "analytical prose paragraph below table has no keepNext")
+
+
+def test_genuine_table_caption_still_gets_keepnext() -> tuple[bool, str]:
+    """
+    DEFECT 3 regression: a genuine caption 'Таблица 2.1.1 — Структура выручки'
+    immediately preceding a real table must still receive keep_with_next from
+    pagination_rules._apply_rule3.
+    """
+    from guides.coursework_kfu_2025.pagination_rules import apply_pagination_rules
+
+    doc = Document()
+    caption = doc.add_paragraph("Таблица 2.1.1 — Структура выручки")
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "x"
+    tbl.rows[1].cells[1].text = "y"
+
+    apply_pagination_rules(doc)
+
+    pPr = caption._element.find(qn("w:pPr"))
+    has_keep_next = pPr is not None and pPr.find(qn("w:keepNext")) is not None
+    if not has_keep_next:
+        return _result(False, "genuine table caption lost keepNext (regression)")
+    return _result(True, "genuine table caption still has keepNext")
 
 
 def test_c_apply_table_continuation_does_not_heuristic_split() -> tuple[bool, str]:
@@ -8547,7 +8670,11 @@ def run_all() -> None:
         ("C  | strict caption-number extraction",      test_c_caption_number_extraction_strict),
         ("C  | merge invalid manual split",            test_c_apply_table_merging_rebuilds_invalid_split),
         ("C  | keep valid manual split",               test_c_apply_table_merging_keeps_valid_manual_split),
-        ("C  | rebuild loose manual marker",           test_c_apply_table_merging_rebuilds_marker_without_keep_next),
+        ("C  | keep loose manual marker (no keepNext)", test_c_apply_table_merging_keeps_marker_without_keep_next),
+        ("C  | rebuild caption-mismatch chain",         test_c_apply_table_merging_rebuilds_caption_mismatch),
+        ("D3 | analytical prose svyazyvaet demoted",    test_table_caption_reference_prose_with_svyazyvaet_demoted),
+        ("D3 | rule3 no keepNext on prose below table", test_pagination_rule3_does_not_set_keepnext_on_prose_below_table),
+        ("D3 | genuine caption still keepNext",         test_genuine_table_caption_still_gets_keepnext),
         ("C  | heuristic split disabled",              test_c_apply_table_continuation_does_not_heuristic_split),
         ("C  | width normalisation only",              test_c_apply_table_continuation_width_normalization_only),
         ("C  | no-split double-run idempotency",       test_c_apply_table_continuation_no_split_double_run_idempotent),
