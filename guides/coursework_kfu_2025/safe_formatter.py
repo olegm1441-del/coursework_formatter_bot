@@ -3487,14 +3487,31 @@ def _structural_soft_break_segment_kind(text: str) -> str:
     return "body"
 
 
+# P4 / DEFECT 4: source/note semantic-line prefix.
+# Matches "Источник: …", "Примечание: …", "Составлено по: …", "Рассчитано по: …".
+_SOURCE_NOTE_SEGMENT_RE = re.compile(
+    r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:",
+    re.IGNORECASE,
+)
+
+
+def _is_source_note_segment(text: str) -> bool:
+    return bool(_SOURCE_NOTE_SEGMENT_RE.match(clean_spaces(text)))
+
+
 def _should_split_body_soft_break_segments(segments: list[str]) -> bool:
     if len(segments) < 2:
         return False
     first_kind = _structural_soft_break_segment_kind(segments[0])
-    if first_kind not in {"heading1", "heading2"}:
-        return False
-    second_kind = _structural_soft_break_segment_kind(segments[1])
-    return second_kind in {"heading1", "heading2", "body"}
+    if first_kind in {"heading1", "heading2"}:
+        second_kind = _structural_soft_break_segment_kind(segments[1])
+        return second_kind in {"heading1", "heading2", "body"}
+    # P4 / DEFECT 4: allow body→body split only when every segment is a
+    # source/note semantic line (e.g. "Источник: … ↵ Примечание: …").
+    # Avoids broadening generic body-soft-break splitting.
+    if all(_is_source_note_segment(seg) for seg in segments):
+        return True
+    return False
 
 
 def split_body_structural_soft_breaks(document, body_start):

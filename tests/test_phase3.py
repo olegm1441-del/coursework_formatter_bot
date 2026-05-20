@@ -896,6 +896,146 @@ def test_genuine_table_caption_still_gets_keepnext() -> tuple[bool, str]:
     return _result(True, "genuine table caption still has keepNext")
 
 
+# ── P4 / DEFECT 4 — source/note soft-break normalization ─────────────────────
+
+def _paragraph_has_w_br(paragraph) -> bool:
+    return bool(paragraph._element.findall(".//" + qn("w:br")))
+
+
+def test_p4_source_note_softbreak_splits_into_two_paragraphs() -> tuple[bool, str]:
+    """
+    DEFECT 4 positive: a single paragraph containing
+    'Источник: ... <w:br/> Примечание: ...' must be split into two proper
+    paragraphs, with the inline soft-break removed.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        split_body_structural_soft_breaks,
+    )
+
+    doc = Document()
+    p = doc.add_paragraph()
+    r1 = p.add_run("Источник: составлено автором по [1].")
+    r1.add_break()
+    p.add_run("Примечание: ставки на 2026 г.")
+
+    raw_text_before = p.text
+    if "\n" not in raw_text_before:
+        return _result(False, f"fixture failed to create soft-break in paragraph.text: {raw_text_before!r}")
+    if not _paragraph_has_w_br(p):
+        return _result(False, "fixture failed to insert <w:br/> element")
+
+    split_body_structural_soft_breaks(doc, body_start=0)
+
+    paras = doc.paragraphs
+    if len(paras) != 2:
+        return _result(False, f"expected 2 paragraphs after split, got {len(paras)}: {[p.text for p in paras]!r}")
+    if not paras[0].text.startswith("Источник:"):
+        return _result(False, f"first paragraph not Источник: {paras[0].text!r}")
+    if not paras[1].text.startswith("Примечание:"):
+        return _result(False, f"second paragraph not Примечание: {paras[1].text!r}")
+    if _paragraph_has_w_br(paras[0]) or _paragraph_has_w_br(paras[1]):
+        return _result(False, "inline <w:br/> still present in resulting paragraphs")
+    return _result(True, "source/note soft-break split into two clean paragraphs")
+
+
+def test_p4_ordinary_body_softbreak_remains_single_paragraph() -> tuple[bool, str]:
+    """
+    DEFECT 4 regression: a paragraph with a generic body-text soft-break (neither
+    segment is heading / source / note) must NOT be split. Preserves the
+    existing 'preserve structural soft breaks' invariant (commit 31a612a).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        split_body_structural_soft_breaks,
+    )
+
+    doc = Document()
+    p = doc.add_paragraph()
+    r1 = p.add_run("Первая строка обычного тела абзаца.")
+    r1.add_break()
+    p.add_run("Вторая строка обычного тела абзаца.")
+
+    if not _paragraph_has_w_br(p):
+        return _result(False, "fixture failed to insert <w:br/>")
+
+    split_body_structural_soft_breaks(doc, body_start=0)
+
+    paras = doc.paragraphs
+    if len(paras) != 1:
+        return _result(False, f"ordinary body paragraph was split unexpectedly: {len(paras)} paragraphs: {[p.text for p in paras]!r}")
+    if not _paragraph_has_w_br(paras[0]):
+        return _result(False, "ordinary body soft-break was removed (regression)")
+    return _result(True, "ordinary body soft-break preserved as single paragraph")
+
+
+def test_p4_heading_body_softbreak_still_splits() -> tuple[bool, str]:
+    """
+    DEFECT 4 regression: pre-existing heading→body soft-break split behavior
+    must remain intact (predicate accepts heading1/heading2 as first segment).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        split_body_structural_soft_breaks,
+    )
+
+    doc = Document()
+    p = doc.add_paragraph()
+    r1 = p.add_run("1. Теоретические основы предмета исследования")
+    r1.add_break()
+    p.add_run("Современная теория данной области активно развивается.")
+
+    if not _paragraph_has_w_br(p):
+        return _result(False, "fixture failed to insert <w:br/>")
+
+    split_body_structural_soft_breaks(doc, body_start=0)
+
+    paras = doc.paragraphs
+    if len(paras) != 2:
+        return _result(False, f"heading→body split regressed: {len(paras)} paragraphs: {[p.text for p in paras]!r}")
+    return _result(True, "heading→body split still works")
+
+
+def test_p4_source_note_split_resulting_paras_format_through_phase1() -> tuple[bool, str]:
+    """
+    DEFECT 4: after process_document runs end-to-end, the resulting Источник: and
+    Примечание: paragraphs must be classified as source_line and receive the
+    canonical source/note formatting (justify alignment, first-line indent).
+    Verifies that the split paragraphs go through the regular Phase 1 dispatch.
+    """
+    import os, tempfile
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc = Document()
+        # Minimal viable body — needs an "Введение" heading so body_start gets detected.
+        doc.add_paragraph("ВВЕДЕНИЕ")
+        doc.add_paragraph("Краткое введение для запуска Phase 1.")
+        # Soft-break paragraph between two body paragraphs.
+        sn = doc.add_paragraph()
+        r1 = sn.add_run("Источник: составлено автором по [1], [2].")
+        r1.add_break()
+        sn.add_run("Примечание: данные на 1 января 2026 года.")
+        doc.add_paragraph("Заключительный обычный абзац.")
+        doc.save(src)
+
+        process_document(src, out)
+
+        d2 = Document(out)
+        # Find paragraphs by text prefix
+        ist = next((p for p in d2.paragraphs if (p.text or "").startswith("Источник:")), None)
+        pri = next((p for p in d2.paragraphs if (p.text or "").startswith("Примечание:")), None)
+        if ist is None or pri is None:
+            return _result(False, f"missing Источник or Примечание paragraph after process_document; texts={[p.text for p in d2.paragraphs]!r}")
+        if _paragraph_has_w_br(ist) or _paragraph_has_w_br(pri):
+            return _result(False, "soft-break <w:br/> survived process_document")
+        # Should be justified (source_line format)
+        for p in (ist, pri):
+            if p.alignment != WD_ALIGN_PARAGRAPH.JUSTIFY:
+                return _result(False, f"paragraph alignment != JUSTIFY: {p.text!r} -> {p.alignment!r}")
+        return _result(True, "process_document split + normalized source/note paragraphs")
+
+
 def test_c_apply_table_continuation_does_not_heuristic_split() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
 
@@ -8675,6 +8815,10 @@ def run_all() -> None:
         ("D3 | analytical prose svyazyvaet demoted",    test_table_caption_reference_prose_with_svyazyvaet_demoted),
         ("D3 | rule3 no keepNext on prose below table", test_pagination_rule3_does_not_set_keepnext_on_prose_below_table),
         ("D3 | genuine caption still keepNext",         test_genuine_table_caption_still_gets_keepnext),
+        ("D4 | source/note softbreak splits",           test_p4_source_note_softbreak_splits_into_two_paragraphs),
+        ("D4 | ordinary body softbreak preserved",      test_p4_ordinary_body_softbreak_remains_single_paragraph),
+        ("D4 | heading→body softbreak still splits",    test_p4_heading_body_softbreak_still_splits),
+        ("D4 | resulting paras formatted by Phase 1",   test_p4_source_note_split_resulting_paras_format_through_phase1),
         ("C  | heuristic split disabled",              test_c_apply_table_continuation_does_not_heuristic_split),
         ("C  | width normalisation only",              test_c_apply_table_continuation_width_normalization_only),
         ("C  | no-split double-run idempotency",       test_c_apply_table_continuation_no_split_double_run_idempotent),
