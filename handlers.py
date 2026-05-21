@@ -41,7 +41,11 @@ import services
 
 logger = logging.getLogger(__name__)
 
-PAYMENTS_API_BASE_URL = "https://courseworkformatterbot-production.up.railway.app"
+DEFAULT_PAYMENTS_API_BASE_URL = "https://courseworkformatterbot-production.up.railway.app"
+PAYMENTS_API_BASE_URL = os.getenv(
+    "PAYMENTS_API_BASE_URL",
+    DEFAULT_PAYMENTS_API_BASE_URL,
+).rstrip("/")
 PENDING_DOCX_ACTION_KEY = "pending_docx_action"
 DOCX_ACTION_CHECK = "check"
 DOCX_ACTION_FORMAT = "format"
@@ -781,6 +785,8 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 def register_handlers(app: Application) -> None:
+    logger.info("payments_api_base_url=%s", PAYMENTS_API_BASE_URL)
+
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("balance", balance_handler))
     app.add_handler(CommandHandler("referral", referral_handler))

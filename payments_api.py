@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 TRIBUTE_API_KEY = os.getenv("TRIBUTE_API_KEY")
 SUCCESS_URL = os.getenv("PAYMENT_SUCCESS_URL")
 FAIL_URL = os.getenv("PAYMENT_FAIL_URL")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 VK_SECRET = os.getenv("VK_SECRET")
 VK_CONFIRMATION_CODE = os.getenv("VK_CONFIRMATION_CODE")
@@ -32,6 +33,7 @@ BUY1_LINK = "https://t.me/tribute/app?startapp=psvI"
 BUY3_LINK = "https://t.me/tribute/app?startapp=psvJ"
 
 app = FastAPI()
+logger.info("public_base_url=%s", PUBLIC_BASE_URL or "<unset>")
 
 
 def _normalize_currency(currency: str | None) -> str:
@@ -105,6 +107,11 @@ def _apply_first_payment_referral_bonus(
     db.add(inviter_bonus)
 
     return referral.inviter_user_id
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.get("/payment-success")
