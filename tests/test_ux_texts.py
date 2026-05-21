@@ -14,8 +14,9 @@ import services
 def test_file_received_format_text() -> tuple[bool, str]:
     expected = (
         "Файл получен.\n\n"
-        "Начинаю оформление по методичке.\n"
-        "Готовый .docx-файл отправлю через минуту."
+        "📄 Начинаю оформление по методичке КФУ.\n\n"
+        "Готовый .docx-файл отправлю сюда автоматически.\n"
+        "После обработки документ будет удалён из системы"
     )
     actual = services.build_file_received_text("format")
     if actual != expected:
@@ -34,10 +35,29 @@ def test_file_received_check_text_unchanged() -> tuple[bool, str]:
     return True, "check file-received text unchanged"
 
 
+def test_start_text_mentions_file_deletion_and_informal_consent() -> tuple[bool, str]:
+    actual = services.build_start_text(
+        balance=1,
+        is_new=True,
+        active_guide_title="КФУ — курсовая 2025",
+        referral_progress=0,
+        referral_target=3,
+    )
+    expected_fragments = [
+        "Готовый файл вернётся сюда автоматически и удалится из нашей системы.",
+        "Продолжая использование бота, ты соглашаешься с",
+    ]
+    missing = [fragment for fragment in expected_fragments if fragment not in actual]
+    if missing:
+        return False, f"missing start text fragments: {missing!r}"
+    return True, "start text includes deletion notice and informal consent"
+
+
 def main() -> int:
     tests = [
         ("file received format text", test_file_received_format_text),
         ("file received check text", test_file_received_check_text_unchanged),
+        ("start text deletion notice", test_start_text_mentions_file_deletion_and_informal_consent),
     ]
     failed = 0
     for name, fn in tests:
