@@ -895,6 +895,57 @@ def _is_structurally_valid_student_chain(doc: Document, tbl1, marker_p, tbl2) ->
     return compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
 
 
+def _marker_has_enabled_page_break(marker_p) -> bool:
+    # True if marker paragraph has <w:pageBreakBefore/> enabled (no w:val
+    # attribute, or w:val in {"1", "true", "on"}). Used to keep enable
+    # operation idempotent across re-runs.
+    pPr = marker_p.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    pb = pPr.find(qn("w:pageBreakBefore"))
+    if pb is None:
+        return False
+    val = pb.get(qn("w:val"))
+    return val is None or val in {"1", "true", "True", "on"}
+
+
+def _enable_marker_page_break_for_student_chain(marker_p) -> None:
+    # P1-critical / DEFECT E: Phase 1 `hard_reset_paragraph_format` neutralizes
+    # `<w:pageBreakBefore/>` and `<w:keepNext/>` on the marker paragraph by
+    # setting w:val="0" (disabled). When the chain is preserved as a student
+    # chain (not formatter-authored), the marker renders at the bottom of the
+    # previous page instead of the top of the continuation page because both
+    # properties stay disabled.
+    #
+    # Formatter-authored markers (built by `_build_continuation_para`) keep
+    # these properties ENABLED with no w:val attribute and render correctly.
+    # Replicate that XML shape on preserved student markers: strip the
+    # disabling w:val from existing elements, or insert fresh enabled ones.
+    # Idempotent.
+    pPr = marker_p.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        marker_p.insert(0, pPr)
+
+    # Enable pageBreakBefore.
+    pbs = pPr.findall(qn("w:pageBreakBefore"))
+    if pbs:
+        for pb in pbs:
+            if qn("w:val") in pb.attrib:
+                del pb.attrib[qn("w:val")]
+    else:
+        pPr.insert(0, OxmlElement("w:pageBreakBefore"))
+
+    # Enable keepNext so the marker stays glued to the continuation table.
+    kns = pPr.findall(qn("w:keepNext"))
+    if kns:
+        for kn in kns:
+            if qn("w:val") in kn.attrib:
+                del kn.attrib[qn("w:val")]
+    else:
+        pPr.append(OxmlElement("w:keepNext"))
+
+
 def _row_matches_line(sig: RowSignature, line_text: str) -> bool:
     pos = 0
     for fragment in sig.fragments:
@@ -1646,6 +1697,16 @@ def apply_table_merging(doc: Document) -> int:
         keep_student_chain = _is_structurally_valid_student_chain(doc, tbl1, node, tbl2)
 
         if keep_manual_split or keep_student_chain:
+            # P1-critical / DEFECT E: preserved student chains have
+            # <w:pageBreakBefore w:val='0'/> + <w:keepNext w:val='0'/> applied
+            # by Phase 1 hard_reset, so LibreOffice renders the marker at the
+            # bottom of the previous page instead of at the top of the
+            # continuation page. Enable both properties to match formatter-
+            # authored markers (which render correctly). Formatter-authored
+            # chains (keep_manual_split) already pass the strict validator
+            # that requires keepNext enabled — they must NOT be touched.
+            if keep_student_chain and not keep_manual_split:
+                _enable_marker_page_break_for_student_chain(node)
             i += 1
             continue
 

@@ -815,6 +815,198 @@ def test_c_apply_table_merging_rebuilds_caption_mismatch() -> tuple[bool, str]:
     return _result(True, "caption-mismatched chain still rebuilt")
 
 
+# ── P1-critical / DEFECT E — enable pageBreakBefore on preserved student marker
+
+def _marker_page_break_before_enabled(marker_p_xml) -> bool:
+    """True if <w:pageBreakBefore/> exists in pPr AND w:val is absent or in
+    the enabled set. Mirrors the OOXML semantic of "enabled by default"."""
+    pPr = marker_p_xml.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    pb = pPr.find(qn("w:pageBreakBefore"))
+    if pb is None:
+        return False
+    val = pb.get(qn("w:val"))
+    return val is None or val in {"1", "true", "True", "on"}
+
+
+def _marker_keep_next_enabled(marker_p_xml) -> bool:
+    pPr = marker_p_xml.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    kn = pPr.find(qn("w:keepNext"))
+    if kn is None:
+        return False
+    val = kn.get(qn("w:val"))
+    return val is None or val in {"1", "true", "True", "on"}
+
+
+def _build_student_chain_doc():
+    """Synthetic doc that produces tbl1 → marker → tbl2 where chain is structurally
+    valid (matching headers, cols, ≥2 rows) but lacks keepNext on the marker —
+    i.e. the case routed through `_is_structurally_valid_student_chain`. We also
+    simulate Phase 1's hard_reset by explicitly disabling pageBreakBefore on the
+    marker paragraph (mirrors production state at the point apply_table_merging
+    runs)."""
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "a"
+    t1.rows[1].cells[1].text = "b"
+    marker = doc.add_paragraph("Продолжение таблицы 1.1.1")
+    marker.alignment = 2  # right; no keepNext on purpose → student-chain branch
+    # Simulate Phase 1 hard_reset: explicitly disable pageBreakBefore & keepNext.
+    marker.paragraph_format.page_break_before = False
+    marker.paragraph_format.keep_with_next = False
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.rows[0].cells[0].text = "H1"
+    t2.rows[0].cells[1].text = "H2"
+    t2.rows[1].cells[0].text = "c"
+    t2.rows[1].cells[1].text = "d"
+    return doc, marker
+
+
+def test_e_preserved_student_marker_enables_page_break_before() -> tuple[bool, str]:
+    """
+    P1-critical / DEFECT E positive: when apply_table_merging preserves a
+    student chain (matched by `_is_structurally_valid_student_chain` but NOT
+    by `_is_valid_manual_continuation_chain`), the marker paragraph must end
+    up with <w:pageBreakBefore/> enabled (no w:val='0'). Phase 1 disables it;
+    this fix re-enables it to match formatter-authored markers that render
+    at the top of the continuation page rather than at the bottom of the
+    previous page.
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc, marker = _build_student_chain_doc()
+    if _marker_page_break_before_enabled(marker._element):
+        return _result(False, "fixture invariant violated: pageBreakBefore already enabled pre-patch")
+
+    apply_table_merging(doc)
+
+    if not _marker_page_break_before_enabled(marker._element):
+        return _result(False, "expected <w:pageBreakBefore/> enabled on preserved student marker after apply_table_merging")
+    if not _marker_keep_next_enabled(marker._element):
+        return _result(False, "expected <w:keepNext/> enabled on preserved student marker")
+    if len(doc.tables) != 2:
+        return _result(False, f"chain should remain preserved; got {len(doc.tables)} tables")
+    return _result(True, "preserved student marker has pageBreakBefore + keepNext enabled")
+
+
+def test_e_page_break_enable_is_idempotent() -> tuple[bool, str]:
+    """
+    P1-critical / DEFECT E idempotency: running apply_table_merging twice on
+    the same chain must not duplicate <w:pageBreakBefore/> elements in pPr.
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc, marker = _build_student_chain_doc()
+    apply_table_merging(doc)
+    apply_table_merging(doc)
+
+    pPr = marker._element.find(qn("w:pPr"))
+    n_pb = len(pPr.findall(qn("w:pageBreakBefore"))) if pPr is not None else 0
+    n_kn = len(pPr.findall(qn("w:keepNext"))) if pPr is not None else 0
+    if n_pb != 1:
+        return _result(False, f"expected exactly 1 <w:pageBreakBefore/>, got {n_pb}")
+    if n_kn != 1:
+        return _result(False, f"expected exactly 1 <w:keepNext/>, got {n_kn}")
+    return _result(True, "pageBreakBefore/keepNext enable is idempotent")
+
+
+def test_e_formatter_authored_chain_with_keepnext_not_modified() -> tuple[bool, str]:
+    """
+    P1-critical / DEFECT E regression: a chain matched by the strict
+    `_is_valid_manual_continuation_chain` validator (i.e. already has
+    keepNext) is preserved via the manual-chain branch and the enable helper
+    must NOT touch it (no double work, no duplicate pPr children).
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.rows[0].cells[0].text = "H1"
+    t1.rows[0].cells[1].text = "H2"
+    t1.rows[1].cells[0].text = "a"
+    t1.rows[1].cells[1].text = "b"
+    marker = doc.add_paragraph("Продолжение таблицы 1.1.1")
+    marker.alignment = 2
+    marker.paragraph_format.keep_with_next = True  # formatter-authored → manual-chain path
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.rows[0].cells[0].text = "H1"
+    t2.rows[0].cells[1].text = "H2"
+    t2.rows[1].cells[0].text = "c"
+    t2.rows[1].cells[1].text = "d"
+
+    # Snapshot pPr children count before
+    pPr_before = marker._element.find(qn("w:pPr"))
+    n_pb_before = len(pPr_before.findall(qn("w:pageBreakBefore"))) if pPr_before is not None else 0
+    n_kn_before = len(pPr_before.findall(qn("w:keepNext"))) if pPr_before is not None else 0
+
+    apply_table_merging(doc)
+
+    pPr_after = marker._element.find(qn("w:pPr"))
+    n_pb_after = len(pPr_after.findall(qn("w:pageBreakBefore"))) if pPr_after is not None else 0
+    n_kn_after = len(pPr_after.findall(qn("w:keepNext"))) if pPr_after is not None else 0
+
+    if n_pb_after != n_pb_before:
+        return _result(False, f"formatter-authored chain pageBreakBefore count changed: {n_pb_before} -> {n_pb_after}")
+    if n_kn_after != n_kn_before:
+        return _result(False, f"formatter-authored chain keepNext count changed: {n_kn_before} -> {n_kn_after}")
+    if len(doc.tables) != 2:
+        return _result(False, f"formatter-authored chain preservation regressed: {len(doc.tables)} tables")
+    return _result(True, "formatter-authored chain untouched (manual-chain branch)")
+
+
+def test_e_preserved_marker_keeps_alignment_and_text() -> tuple[bool, str]:
+    """
+    P1-critical / DEFECT E regression: after enable helper runs, the marker
+    paragraph must still carry its original right alignment and text content.
+    The helper must not strip or rewrite other pPr children.
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc, marker = _build_student_chain_doc()
+    apply_table_merging(doc)
+
+    pPr = marker._element.find(qn("w:pPr"))
+    if pPr is None:
+        return _result(False, "marker lost <w:pPr> after enable")
+    jc = pPr.find(qn("w:jc"))
+    if jc is None or jc.get(qn("w:val")) != "right":
+        return _result(False, f"marker right-alignment lost: jc={jc!r}")
+    text = (marker.text or "").strip()
+    if text != "Продолжение таблицы 1.1.1":
+        return _result(False, f"marker text changed: {text!r}")
+    return _result(True, "preserved marker keeps right alignment + original text")
+
+
+def test_e_integration_tbl_marker_tbl_marker_has_enabled_break() -> tuple[bool, str]:
+    """
+    P1-critical / DEFECT E integration: tbl → marker → tbl topology, run
+    apply_table_merging, then verify marker XML has <w:pageBreakBefore/>
+    without w:val='0' (enabled by OOXML default).
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc, marker = _build_student_chain_doc()
+    apply_table_merging(doc)
+
+    pPr = marker._element.find(qn("w:pPr"))
+    if pPr is None:
+        return _result(False, "marker has no pPr after apply_table_merging")
+    pb = pPr.find(qn("w:pageBreakBefore"))
+    if pb is None:
+        return _result(False, "marker has no <w:pageBreakBefore/> element")
+    val = pb.get(qn("w:val"))
+    if val is not None and val not in {"1", "true", "True", "on"}:
+        return _result(False, f"<w:pageBreakBefore/> still disabled: w:val={val!r}")
+    return _result(True, f"integration: <w:pageBreakBefore/> enabled (w:val={val!r})")
+
+
 # ── DEFECT 3 — caption-like analytical prose under table must stay body_text ──
 
 def test_table_caption_reference_prose_with_svyazyvaet_demoted() -> tuple[bool, str]:
@@ -8812,6 +9004,11 @@ def run_all() -> None:
         ("C  | keep valid manual split",               test_c_apply_table_merging_keeps_valid_manual_split),
         ("C  | keep loose manual marker (no keepNext)", test_c_apply_table_merging_keeps_marker_without_keep_next),
         ("C  | rebuild caption-mismatch chain",         test_c_apply_table_merging_rebuilds_caption_mismatch),
+        ("E  | student marker enables pageBreakBefore", test_e_preserved_student_marker_enables_page_break_before),
+        ("E  | enable pageBreakBefore is idempotent",   test_e_page_break_enable_is_idempotent),
+        ("E  | formatter-authored chain not modified",  test_e_formatter_authored_chain_with_keepnext_not_modified),
+        ("E  | preserved marker keeps alignment+text",  test_e_preserved_marker_keeps_alignment_and_text),
+        ("E  | integration tbl→marker→tbl enabled pb",  test_e_integration_tbl_marker_tbl_marker_has_enabled_break),
         ("D3 | analytical prose svyazyvaet demoted",    test_table_caption_reference_prose_with_svyazyvaet_demoted),
         ("D3 | rule3 no keepNext on prose below table", test_pagination_rule3_does_not_set_keepnext_on_prose_below_table),
         ("D3 | genuine caption still keepNext",         test_genuine_table_caption_still_gets_keepnext),
