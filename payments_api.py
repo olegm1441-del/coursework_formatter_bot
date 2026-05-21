@@ -414,16 +414,25 @@ async def _apply_yookassa_payment(payment: dict) -> dict:
 
         try:
             bot = Bot(token=os.getenv("BOT_TOKEN"))
-            await bot.send_message(
-                chat_id=user.telegram_id,
-                text=(
-                    f"✅ Оплата получена!\n\n"
-                    f"Начислено: {credits} оформлений.\n"
-                    f"Ваш баланс: {balance} оформлений.\n\n"
-                    "Можно сразу отправить следующий .docx-файл в этот чат.\n"
-                    "Или пригласить друга по реферальной ссылке и получить ещё бонус."
-                ),
-            )
+            paid_user = db.query(User).filter(User.id == user_id).first()
+            paid_user_telegram_id = getattr(paid_user, "telegram_id", None)
+            if not paid_user or not paid_user_telegram_id:
+                logger.warning(
+                    "yookassa_payment_notification_skipped user_id=%s payment_id=%s reason=telegram_id_missing",
+                    user_id,
+                    payment_id,
+                )
+            else:
+                await bot.send_message(
+                    chat_id=paid_user_telegram_id,
+                    text=(
+                        f"✅ Оплата получена!\n\n"
+                        f"Начислено: {credits} оформлений.\n"
+                        f"Ваш баланс: {balance} оформлений.\n\n"
+                        "Можно сразу отправить следующий .docx-файл в этот чат.\n"
+                        "Или пригласить друга по реферальной ссылке и получить ещё бонус."
+                    ),
+                )
 
             if inviter_user_id:
                 inviter = db.query(User).filter(User.id == inviter_user_id).first()
