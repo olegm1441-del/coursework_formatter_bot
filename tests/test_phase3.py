@@ -1007,6 +1007,264 @@ def test_e_integration_tbl_marker_tbl_marker_has_enabled_break() -> tuple[bool, 
     return _result(True, f"integration: <w:pageBreakBefore/> enabled (w:val={val!r})")
 
 
+# ── P1-c / DEFECT B — detached source/note: fallback split last data row ─────
+
+def _build_p1c_doc(rows=4, include_source_note=True, include_caption=True, manual_marker_between=False):
+    """Synthetic doc with caption + table (rows × 2) + Источник: paragraph.
+
+    `manual_marker_between=True` produces tbl1 → manual marker → tbl2 chain so
+    `_valid_manual_continuation_table_ids` flags both tables as protected.
+    """
+    doc = Document()
+    if include_caption:
+        doc.add_paragraph("Таблица 2.1.2 — Тестовая")
+    tbl = doc.add_table(rows=rows, cols=2)
+    tbl.rows[0].cells[0].text = "Col1Header"
+    tbl.rows[0].cells[1].text = "Col2Header"
+    row_texts = []
+    for r in range(1, rows):
+        a = f"alpha{r}xxx"
+        b = f"beta{r}yyy"
+        tbl.rows[r].cells[0].text = a
+        tbl.rows[r].cells[1].text = b
+        row_texts.append((a, b))
+    if manual_marker_between:
+        marker = doc.add_paragraph("Продолжение таблицы 2.1.2")
+        marker.alignment = 2
+        marker.paragraph_format.keep_with_next = True
+        tbl2 = doc.add_table(rows=2, cols=2)
+        tbl2.rows[0].cells[0].text = "Col1Header"
+        tbl2.rows[0].cells[1].text = "Col2Header"
+        tbl2.rows[1].cells[0].text = "tailA"
+        tbl2.rows[1].cells[1].text = "tailB"
+    if include_source_note:
+        doc.add_paragraph("Источник: составлено автором по данным таблицы.")
+    return doc, row_texts
+
+
+def _build_p1c_pdf_lines(row_texts, source_note_text="Источник: составлено автором по данным таблицы.",
+                         last_row_page=5, source_note_page=6):
+    """Construct PdfLine objects: header + each data row on page `last_row_page`,
+    source/note on page `source_note_page` (default: detached one page later)."""
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+    lines = [PdfLine(text="Col1Header Col2Header", page_num=last_row_page, top=100, bottom=110)]
+    y = 120
+    for (a, b) in row_texts:
+        lines.append(PdfLine(text=f"{a} {b}", page_num=last_row_page, top=y, bottom=y + 10))
+        y += 20
+    lines.append(PdfLine(text=source_note_text, page_num=source_note_page, top=58, bottom=72))
+    return lines
+
+
+def test_p1c_detects_detached_source_note() -> tuple[bool, str]:
+    """
+    P1-c positive: synthetic table whose last data row renders on page 5 and
+    whose Источник: line renders on page 6 is reported as a detachment
+    candidate (no skips). Verifies the pure detection logic before any split
+    is applied. Render is mocked via PdfLine fixtures.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+
+    doc, row_texts = _build_p1c_doc(rows=4)
+    pdf_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if len(candidates) != 1:
+        return _result(False, f"expected 1 candidate, got {len(candidates)} (skips={skips!r})")
+    c = candidates[0]
+    if c.table_index != 0:
+        return _result(False, f"expected table_index=0, got {c.table_index}")
+    if c.caption_num != "2.1.2":
+        return _result(False, f"expected caption_num='2.1.2', got {c.caption_num!r}")
+    if c.last_data_row_page != 5 or c.source_note_first_page != 6:
+        return _result(False, f"page mapping wrong: last_row_page={c.last_data_row_page} sn_page={c.source_note_first_page}")
+    return _result(True, "detached source/note candidate detected")
+
+
+def test_p1c_skip_when_source_note_attached_same_page() -> tuple[bool, str]:
+    """
+    P1-c regression: when Источник: renders on the SAME page as the last row,
+    detector reports `not_detached` skip (no candidate).
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+    doc, row_texts = _build_p1c_doc(rows=4)
+    pdf_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=5)
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"unexpected candidate when source/note attached: {candidates!r}")
+    if not any(reason == "not_detached" for _, reason in skips):
+        return _result(False, f"expected 'not_detached' skip, got skips={skips!r}")
+    return _result(True, "attached source/note correctly skipped as not_detached")
+
+
+def test_p1c_skip_no_caption() -> tuple[bool, str]:
+    """P1-c eligibility: table without 'Таблица X.Y.Z' caption is skipped."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+    doc, row_texts = _build_p1c_doc(rows=4, include_caption=False)
+    pdf_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"caption-less table should not be candidate: {candidates!r}")
+    if not any(reason == "no_caption" for _, reason in skips):
+        return _result(False, f"expected 'no_caption' skip, got skips={skips!r}")
+    return _result(True, "no-caption skip correct")
+
+
+def test_p1c_skip_no_source_note() -> tuple[bool, str]:
+    """P1-c eligibility: table with no following Источник:/Примечание: is skipped."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+    doc, row_texts = _build_p1c_doc(rows=4, include_source_note=False)
+    pdf_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"table without source/note should not be candidate: {candidates!r}")
+    if not any(reason == "no_source_note" for _, reason in skips):
+        return _result(False, f"expected 'no_source_note' skip, got skips={skips!r}")
+    return _result(True, "no-source-note skip correct")
+
+
+def test_p1c_skip_small_table_no_safe_data_row() -> tuple[bool, str]:
+    """P1-c eligibility: table with < 3 rows (header + 1 data) is skipped — not safe to split off last row."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+    doc, row_texts = _build_p1c_doc(rows=2)
+    pdf_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"2-row table should not be candidate: {candidates!r}")
+    if not any(reason == "no_safe_data_row" for _, reason in skips):
+        return _result(False, f"expected 'no_safe_data_row' skip, got skips={skips!r}")
+    return _result(True, "small-table skip correct")
+
+
+def test_p1c_skip_already_in_manual_chain() -> tuple[bool, str]:
+    """P1-c regression: tables already in a manual continuation chain (preserved
+    by P0-α) must be skipped to avoid double-splitting."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+    doc, row_texts = _build_p1c_doc(rows=4)
+    pdf_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
+    # Synthetic manual_chain_ids: pretend the first table is in a chain.
+    fake_chain_ids = {id(doc.tables[0]._tbl)}
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines, manual_chain_ids=fake_chain_ids)
+    if candidates:
+        return _result(False, f"chain-protected table should not be candidate: {candidates!r}")
+    if not any(reason == "already_in_manual_chain" for _, reason in skips):
+        return _result(False, f"expected 'already_in_manual_chain' skip, got skips={skips!r}")
+    return _result(True, "manual-chain skip correct")
+
+
+def test_p1c_skip_render_probe_unreliable() -> tuple[bool, str]:
+    """P1-c eligibility: when PdfLine data cannot map rows to pages
+    (e.g. empty pdf_lines), detector reports `render_probe_unreliable`."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_source_note_detachment_candidates,
+    )
+    doc, _ = _build_p1c_doc(rows=4)
+    candidates, skips = _collect_source_note_detachment_candidates(doc, pdf_lines=[], manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"empty pdf_lines must not yield candidate: {candidates!r}")
+    if not any(reason == "render_probe_unreliable" for _, reason in skips):
+        return _result(False, f"expected 'render_probe_unreliable' skip, got skips={skips!r}")
+    return _result(True, "render-probe-unreliable skip correct")
+
+
+def test_p1c_apply_split_inserts_continuation_marker_and_numbered_row() -> tuple[bool, str]:
+    """P1-c apply: invoke split engine on a candidate's table, verify result —
+    continuation marker text matches caption, numbered row repeated in second
+    fragment, original source/note still in body after second fragment.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _build_continuation_para,
+    )
+    from guides.coursework_kfu_2025.table_split_prototype import (
+        apply_numbered_split_to_document,
+    )
+
+    doc, _ = _build_p1c_doc(rows=4)
+    # split_before_row = rows - 1 = 3 → first fragment keeps rows 0..2, second has row 3
+    result = apply_numbered_split_to_document(
+        doc, table_index=0, split_before_row=3,
+        header_rows=1, numbered_header=True, appendix_table=False,
+        continuation_paragraph_builder=_build_continuation_para,
+    )
+    # Validate continuation marker present
+    markers = [p for p in doc.paragraphs if (p.text or "").strip().startswith("Продолжение таблицы 2.1.2")]
+    if len(markers) != 1:
+        return _result(False, f"expected exactly 1 continuation marker, got {len(markers)}")
+    # Validate two tables now
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 tables after split, got {len(doc.tables)}")
+    # Second table must have numbered row at top (row 0) + at least 1 data row
+    tbl2 = doc.tables[1]
+    if len(tbl2.rows) < 2:
+        return _result(False, f"second fragment too small: rows={len(tbl2.rows)}")
+    # Source/note paragraph still exists in document after second fragment
+    if result.source_note_after_second is False:
+        return _result(False, "source_note_after_second=False (orphan would persist)")
+    sn_paras = [p for p in doc.paragraphs if (p.text or "").strip().startswith("Источник:")]
+    if len(sn_paras) != 1:
+        return _result(False, f"expected exactly 1 Источник: paragraph, got {len(sn_paras)}")
+    return _result(True, "split applied: marker + numbered row + source/note retained")
+
+
+def test_p1c_double_run_idempotent_via_natural_skips() -> tuple[bool, str]:
+    """P1-c idempotency: after split, a second detection pass produces no
+    candidates. tbl1 of the chain is skipped via `no_source_note` (it is now
+    followed by the continuation marker, not a source/note line). tbl2 is
+    skipped via `no_safe_data_row` (the formatter-built continuation fragment
+    has only numbered_row + 1 data row = 2 rows, below the 3-row threshold).
+    These two natural skips guarantee idempotency without relying on the
+    strict manual-chain validator.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _build_continuation_para,
+        _collect_source_note_detachment_candidates,
+        _valid_manual_continuation_table_ids,
+    )
+    from guides.coursework_kfu_2025.table_split_prototype import (
+        apply_numbered_split_to_document,
+    )
+
+    doc, row_texts = _build_p1c_doc(rows=4)
+    apply_numbered_split_to_document(
+        doc, table_index=0, split_before_row=3,
+        header_rows=1, numbered_header=True, appendix_table=False,
+        continuation_paragraph_builder=_build_continuation_para,
+    )
+    # Re-detect on the now-split doc; pass whatever manual_chain_ids the strict
+    # validator yields (likely empty due to numbered-row vs header mismatch).
+    chain_ids = _valid_manual_continuation_table_ids(doc)
+    fake_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
+    candidates, skips = _collect_source_note_detachment_candidates(
+        doc, fake_lines, manual_chain_ids=chain_ids,
+    )
+    if candidates:
+        return _result(False, f"second pass produced unexpected candidates: {candidates!r}")
+    # Verify natural skip reasons present for both fragments.
+    reasons = {ti: r for ti, r in skips}
+    if reasons.get(0) != "no_source_note":
+        return _result(False, f"expected tbl1 skip='no_source_note', got {reasons.get(0)!r}")
+    # tbl2 (the continuation fragment) is preceded by the right-aligned
+    # "Продолжение таблицы 2.1.2" marker, NOT by a standard "Таблица X.Y.Z"
+    # caption — so `_find_caption_number_before_table` returns None and the
+    # fragment is skipped via `no_caption`. Either skip is acceptable for
+    # idempotency, but no_caption is what `_find_caption_number_before_table`
+    # produces in this layout.
+    if reasons.get(1) not in {"no_caption", "no_safe_data_row"}:
+        return _result(False, f"expected tbl2 skip in {{no_caption, no_safe_data_row}}, got {reasons.get(1)!r}")
+    return _result(True, f"second pass idempotent (tbl1=no_source_note, tbl2={reasons.get(1)})")
+
+
 # ── DEFECT 3 — caption-like analytical prose under table must stay body_text ──
 
 def test_table_caption_reference_prose_with_svyazyvaet_demoted() -> tuple[bool, str]:
@@ -9009,6 +9267,15 @@ def run_all() -> None:
         ("E  | formatter-authored chain not modified",  test_e_formatter_authored_chain_with_keepnext_not_modified),
         ("E  | preserved marker keeps alignment+text",  test_e_preserved_marker_keeps_alignment_and_text),
         ("E  | integration tbl→marker→tbl enabled pb",  test_e_integration_tbl_marker_tbl_marker_has_enabled_break),
+        ("P1c | detached source/note detected",         test_p1c_detects_detached_source_note),
+        ("P1c | attached source/note → not_detached",   test_p1c_skip_when_source_note_attached_same_page),
+        ("P1c | no caption skipped",                    test_p1c_skip_no_caption),
+        ("P1c | no source/note skipped",                test_p1c_skip_no_source_note),
+        ("P1c | small table no_safe_data_row",          test_p1c_skip_small_table_no_safe_data_row),
+        ("P1c | already in manual chain skipped",       test_p1c_skip_already_in_manual_chain),
+        ("P1c | render probe unreliable skipped",       test_p1c_skip_render_probe_unreliable),
+        ("P1c | split inserts marker + numbered row",   test_p1c_apply_split_inserts_continuation_marker_and_numbered_row),
+        ("P1c | idempotent via natural skip reasons",   test_p1c_double_run_idempotent_via_natural_skips),
         ("D3 | analytical prose svyazyvaet demoted",    test_table_caption_reference_prose_with_svyazyvaet_demoted),
         ("D3 | rule3 no keepNext on prose below table", test_pagination_rule3_does_not_set_keepnext_on_prose_below_table),
         ("D3 | genuine caption still keepNext",         test_genuine_table_caption_still_gets_keepnext),

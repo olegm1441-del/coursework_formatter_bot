@@ -2572,6 +2572,261 @@ def _run_marker_split_for_candidates(
     return applied_count
 
 
+# ── P1-c / DEFECT B — fallback split-last-row for detached source/note ───────
+
+@dataclass(frozen=True)
+class _SourceNoteDetachmentCandidate:
+    table_index: int
+    caption_num: str
+    last_data_row_page: int
+    source_note_first_page: int
+    rows_count: int
+
+
+def _paragraph_text_for_match(p_xml) -> str:
+    return _norm_match_text(
+        "".join(t.text or "" for t in p_xml.findall(".//" + qn("w:t")))
+    )
+
+
+def _find_paragraph_pdf_page(p_xml, pdf_lines: list[PdfLine]) -> int | None:
+    """Best-effort page lookup: find which rendered PDF page contains the
+    paragraph's text. Uses substring match on normalized text. Returns None
+    if no reliable match (text too short, image-only, or absent)."""
+    norm = _paragraph_text_for_match(p_xml)
+    if not norm or len(norm) < 8:
+        return None
+    for line in pdf_lines:
+        if norm in _norm_match_text(line.text):
+            return line.page_num
+    # Fallback: try first 30 chars (tolerate line wrapping / truncation).
+    head = norm[:30]
+    if len(head) >= 8:
+        for line in pdf_lines:
+            ln = _norm_match_text(line.text)
+            if head in ln or ln.startswith(head):
+                return line.page_num
+    return None
+
+
+def _detect_table_following_source_note_paragraphs(
+    table_xml, para_by_xml: dict, body_children: list,
+) -> list:
+    """Return ordered list of <w:p> elements immediately following `table_xml`
+    that constitute one or more source/note paragraphs (Источник:/Примечание:
+    /Составлено по/Рассчитано по). At most one blank line is allowed between
+    the table and the first source/note paragraph — matches the structural
+    pattern recognized by `_apply_rule_source_note`."""
+    try:
+        tbl_idx = body_children.index(table_xml)
+    except ValueError:
+        return []
+    result: list = []
+    j = tbl_idx + 1
+    seen_nonempty = False
+    while j < len(body_children):
+        el = body_children[j]
+        if el.tag != qn("w:p"):
+            break
+        p_obj = para_by_xml.get(el)
+        if p_obj is None:
+            break
+        text = (p_obj.text or "").strip()
+        if not text:
+            if seen_nonempty:
+                break
+            j += 1
+            continue
+        if is_source_or_note_line(text):
+            result.append(el)
+            seen_nonempty = True
+            j += 1
+            continue
+        break
+    return result
+
+
+def _collect_source_note_detachment_candidates(
+    doc: Document,
+    pdf_lines: list[PdfLine],
+    manual_chain_ids: set[int],
+) -> tuple[list[_SourceNoteDetachmentCandidate], list[tuple[int, str]]]:
+    """Detect tables whose immediately-following source/note paragraphs render
+    on a strictly later PDF page than the table's last data row. Pure logic:
+    no document mutation, no rendering. Returns (candidates, skips) where
+    `skips` is a list of (table_index, skip_reason) for telemetry."""
+    body_children = list(doc.element.body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+    signatures = _collect_table_signatures(doc)
+    candidates: list[_SourceNoteDetachmentCandidate] = []
+    skips: list[tuple[int, str]] = []
+
+    for table_index, table in enumerate(doc.tables):
+        tbl_xml = table._tbl
+
+        if id(tbl_xml) in manual_chain_ids:
+            skips.append((table_index, "already_in_manual_chain"))
+            continue
+
+        sn_paras = _detect_table_following_source_note_paragraphs(
+            tbl_xml, para_by_xml, body_children,
+        )
+        if not sn_paras:
+            skips.append((table_index, "no_source_note"))
+            continue
+
+        caption_num = _find_caption_number_before_table(doc, tbl_xml)
+        if not caption_num:
+            skips.append((table_index, "no_caption"))
+            continue
+
+        rows_xml = tbl_xml.findall(qn("w:tr"))
+        # Need at least 3 rows: 1 header + 2 data rows. After split-last-row,
+        # fragment-1 has header + ≥1 data row, fragment-2 has header + 1 data.
+        if len(rows_xml) < 3:
+            skips.append((table_index, "no_safe_data_row"))
+            continue
+
+        if _ordinary_table_has_nested_header_row(doc, table_index):
+            skips.append((table_index, "body_contains_nested_table_header"))
+            continue
+
+        # Render probe: rows → pages.
+        sig = signatures[table_index] if table_index < len(signatures) else None
+        if sig is None:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        row_pages = _match_row_pages(sig, pdf_lines)
+        if not row_pages:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        data_row_pages = [p for idx, p in row_pages.items() if idx > 0]
+        if not data_row_pages:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        last_data_row_page = max(data_row_pages)
+
+        sn_pages = []
+        for sn_xml in sn_paras:
+            pg = _find_paragraph_pdf_page(sn_xml, pdf_lines)
+            if pg is not None:
+                sn_pages.append(pg)
+        if not sn_pages:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        sn_first_page = min(sn_pages)
+
+        if sn_first_page <= last_data_row_page:
+            skips.append((table_index, "not_detached"))
+            continue
+
+        candidates.append(
+            _SourceNoteDetachmentCandidate(
+                table_index=table_index,
+                caption_num=caption_num,
+                last_data_row_page=last_data_row_page,
+                source_note_first_page=sn_first_page,
+                rows_count=len(rows_xml),
+            )
+        )
+
+    return candidates, skips
+
+
+def _apply_source_note_detachment_split(
+    docx_path: Path,
+    report: FormattingReport | None = None,
+) -> int:
+    """P1-c: split off the last data row into a continuation fragment for
+    every table whose Источник:/Примечание: paragraphs would otherwise land
+    on a different page (detached). Reuses the existing split engine
+    (`apply_numbered_split_to_document`) with `_build_continuation_para`,
+    so the new fragment chain matches the formatter-authored continuation
+    invariants (right-aligned marker, pageBreakBefore, keepNext, numbered row
+    repeated).
+
+    Per-table try/except: a single failure does not abort the document.
+    Idempotent: tables already in a manual continuation chain are skipped via
+    `_valid_manual_continuation_table_ids`, so a second run is a no-op.
+    """
+    docx_path = Path(docx_path)
+    doc = Document(str(docx_path))
+    if not doc.tables:
+        return 0
+
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(docx_path)
+        pdf_lines = analyze_pdf_lines(pdf_path)
+    except LibreOfficeNotFoundError as exc:
+        logger.info(
+            "p1c_source_note_split_skip reason=libreoffice_unavailable error=%s", exc,
+        )
+        return 0
+    except Exception as exc:
+        logger.info(
+            "p1c_source_note_split_skip reason=render_failed error=%s", exc,
+        )
+        return 0
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    manual_chain_ids = _valid_manual_continuation_table_ids(doc)
+    candidates, skips = _collect_source_note_detachment_candidates(
+        doc, pdf_lines, manual_chain_ids,
+    )
+    for table_index, reason in skips:
+        logger.info(
+            "p1c_source_note_split_skip table_index=%s reason=%s",
+            table_index, reason,
+        )
+
+    if not candidates:
+        return 0
+
+    applied = 0
+    # Iterate from highest table_index to lowest so each split inserts a new
+    # tbl at table_index+1 without shifting any not-yet-processed candidate.
+    for cand in sorted(candidates, key=lambda c: -c.table_index):
+        split_before_row = cand.rows_count - 1  # split off last data row
+        try:
+            result = apply_numbered_split_to_document(
+                doc,
+                cand.table_index,
+                split_before_row,
+                header_rows=1,
+                numbered_header=True,
+                appendix_table=False,
+                continuation_paragraph_builder=_build_continuation_para,
+            )
+        except Exception as exc:
+            logger.info(
+                "p1c_source_note_split_skip table_index=%s reason=apply_split_failed error=%s",
+                cand.table_index, exc,
+            )
+            continue
+
+        if result.source_note_after_second is False:
+            logger.warning(
+                "p1c_source_note_split_warn table_index=%s caption=%s source_note_after_second=False",
+                cand.table_index, cand.caption_num,
+            )
+
+        _ensure_blank_between_marker_and_second_table(doc, cand.table_index)
+        applied += 1
+        logger.info(
+            "p1c_source_note_split_applied table_index=%s caption=%s split_before_row=%s last_row_page=%s sn_page=%s",
+            cand.table_index, cand.caption_num, split_before_row,
+            cand.last_data_row_page, cand.source_note_first_page,
+        )
+
+    if applied:
+        doc.save(str(docx_path))
+        logger.info("p1c_source_note_split_summary applied=%s", applied)
+    return applied
+
+
 def apply_rendered_table_continuation(
     docx_path: Path,
     report: FormattingReport | None = None,
@@ -2699,7 +2954,15 @@ def apply_rendered_table_continuation(
                         "rendered_final_decision action=marker_split_applied count=%s",
                         marker_total,
                     )
-                    return marker_total
+                    # P1-c: scan remaining tables for detached source/note even
+                    # after marker-split succeeded on some tables. Manual chains
+                    # produced by marker-split are protected (see
+                    # `_valid_manual_continuation_table_ids`), so we will not
+                    # re-split anything marker-split already touched.
+                    p1c_total = _apply_source_note_detachment_split(
+                        docx_path, report=report,
+                    )
+                    return marker_total + p1c_total
             except Exception:
                 emit_marker_summary()
                 raise
@@ -2707,6 +2970,21 @@ def apply_rendered_table_continuation(
             _ACTIVE_MARKER_STATS = previous_marker_stats
 
     emit_marker_summary()
+
+    # P1-c: detached source/note pass — runs even when marker-split did not
+    # apply (table fits on one page geometrically but Word/LO cannot keep
+    # source/note attached due to last-row overflow). Returns early if any
+    # splits were applied so the legacy rendered-split fallback below does
+    # not double-act on the now-restructured document.
+    p1c_total_pre_legacy = _apply_source_note_detachment_split(
+        docx_path, report=report,
+    )
+    if p1c_total_pre_legacy > 0:
+        logger.info(
+            "rendered_final_decision action=p1c_source_note_split count=%s",
+            p1c_total_pre_legacy,
+        )
+        return p1c_total_pre_legacy
 
     pdf_path: Path | None = None
     try:
