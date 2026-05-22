@@ -1265,6 +1265,608 @@ def test_p1c_double_run_idempotent_via_natural_skips() -> tuple[bool, str]:
     return _result(True, f"second pass idempotent (tbl1=no_source_note, tbl2={reasons.get(1)})")
 
 
+# ── P2-a — appendix continuation for table-based appendices ──────────────────
+
+def _build_p2a_appendix_doc(rows=4, include_appendix_heading=True, include_existing_marker=False):
+    """Synthetic doc with «ПРИЛОЖЕНИЕ N» heading + appendix table (rows × 2).
+    Optionally include an existing «ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ N» marker right
+    after the table to exercise idempotency.
+    """
+    doc = Document()
+    if include_appendix_heading:
+        doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    tbl = doc.add_table(rows=rows, cols=2)
+    tbl.rows[0].cells[0].text = "Col1Header"
+    tbl.rows[0].cells[1].text = "Col2Header"
+    row_texts = []
+    for r in range(1, rows):
+        a = f"appx{r}aaa"
+        b = f"appx{r}bbb"
+        tbl.rows[r].cells[0].text = a
+        tbl.rows[r].cells[1].text = b
+        row_texts.append((a, b))
+    if include_existing_marker:
+        m = doc.add_paragraph("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1")
+        m.alignment = 2
+    return doc, row_texts
+
+
+def _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=2, last_page=11):
+    """Construct PdfLine objects: header + first `page_break_after_row` data
+    rows on `header_page`, remaining rows on `last_page`."""
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+    lines = [PdfLine(text="Col1Header Col2Header", page_num=header_page, top=100, bottom=110)]
+    y = 120
+    for idx, (a, b) in enumerate(row_texts, start=1):
+        page = header_page if idx <= page_break_after_row else last_page
+        # reset y when moving to a new page so x-y looks plausible
+        if page == header_page:
+            lines.append(PdfLine(text=f"{a} {b}", page_num=page, top=y, bottom=y + 10))
+        else:
+            lines.append(PdfLine(text=f"{a} {b}", page_num=page, top=58 + (idx - page_break_after_row - 1) * 20, bottom=68 + (idx - page_break_after_row - 1) * 20))
+        y += 20
+    return lines
+
+
+def test_p2a_detects_multipage_appendix_table() -> tuple[bool, str]:
+    """
+    P2-a positive: appendix table whose last data row renders on a strictly
+    later page than the first data row is reported as a continuation
+    candidate. Verifies pure detection logic before split is applied.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=4)
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=2, last_page=11)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if len(candidates) != 1:
+        return _result(False, f"expected 1 candidate, got {len(candidates)} (skips={skips!r})")
+    c = candidates[0]
+    if c.appendix_num != "1":
+        return _result(False, f"expected appendix_num='1', got {c.appendix_num!r}")
+    if c.split_before_row != 3:
+        return _result(False, f"expected split_before_row=3 (first row on page 11), got {c.split_before_row}")
+    return _result(True, "multi-page appendix table candidate detected")
+
+
+def test_p2a_skip_non_appendix_table() -> tuple[bool, str]:
+    """P2-a regression: ordinary (non-appendix) table is NOT a candidate —
+    skipped with reason 'not_appendix'. Body tables stay in P1-c / marker-split
+    paths."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=4, include_appendix_heading=False)
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=2, last_page=11)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"ordinary table should not be candidate: {candidates!r}")
+    if not any(reason == "not_appendix" for _, reason in skips):
+        return _result(False, f"expected 'not_appendix' skip, got {skips!r}")
+    return _result(True, "ordinary table correctly skipped as not_appendix")
+
+
+def test_p2a_skip_existing_continuation_label() -> tuple[bool, str]:
+    """P2-a idempotency: an appendix table already followed by «ПРОДОЛЖЕНИЕ
+    ПРИЛОЖЕНИЯ N» must be skipped to avoid duplicating the label."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=4, include_existing_marker=True)
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=2, last_page=11)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"existing-marker chain should not be candidate: {candidates!r}")
+    if not any(reason == "already_followed_by_continuation" for _, reason in skips):
+        return _result(False, f"expected 'already_followed_by_continuation' skip, got {skips!r}")
+    return _result(True, "existing continuation label correctly skipped")
+
+
+def test_p2a_skip_manual_chain() -> tuple[bool, str]:
+    """P2-a regression: appendix table whose id is in the manual_chain_ids
+    set (i.e. already preserved by P0-α) must be skipped."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=4)
+    fake_chain_ids = {id(doc.tables[0]._tbl)}
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=2, last_page=11)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=fake_chain_ids)
+    if candidates:
+        return _result(False, f"manual-chain table should not be candidate: {candidates!r}")
+    if not any(reason == "already_in_manual_chain" for _, reason in skips):
+        return _result(False, f"expected 'already_in_manual_chain' skip, got {skips!r}")
+    return _result(True, "manual chain correctly skipped")
+
+
+def test_p2a_skip_single_page_appendix() -> tuple[bool, str]:
+    """P2-a eligibility: appendix table fitting on a single page (no
+    cross-page row span) is skipped with reason 'single_page'."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=4)
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=99, last_page=10)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"single-page table should not be candidate: {candidates!r}")
+    if not any(reason == "single_page" for _, reason in skips):
+        return _result(False, f"expected 'single_page' skip, got {skips!r}")
+    return _result(True, "single-page appendix correctly skipped")
+
+
+def test_p2a_skip_small_appendix_table() -> tuple[bool, str]:
+    """P2-a eligibility: appendix table with < 3 rows is too small to split."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=2)
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=0, last_page=11)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"2-row appendix should not be candidate: {candidates!r}")
+    if not any(reason == "no_safe_data_row" for _, reason in skips):
+        return _result(False, f"expected 'no_safe_data_row' skip, got {skips!r}")
+    return _result(True, "small appendix correctly skipped")
+
+
+def test_p2a_apply_split_inserts_uppercase_continuation_marker() -> tuple[bool, str]:
+    """P2-a apply: invoke split engine on a candidate via
+    `apply_numbered_split_to_document(..., appendix_table=True, ...)`. Verify
+    the marker text is exactly «ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ N» (uppercase) and
+    the marker paragraph is right-aligned with pageBreakBefore + keepNext.
+    """
+    from guides.coursework_kfu_2025.table_split_prototype import (
+        apply_numbered_split_to_document,
+        _build_appendix_continuation_paragraph,
+    )
+    doc, _ = _build_p2a_appendix_doc(rows=4)
+    apply_numbered_split_to_document(
+        doc, table_index=0, split_before_row=3,
+        header_rows=1, numbered_header=True, appendix_table=True,
+        continuation_paragraph_builder=_build_appendix_continuation_paragraph,
+    )
+    markers = [p for p in doc.paragraphs if (p.text or "").strip().startswith("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ")]
+    if len(markers) != 1:
+        return _result(False, f"expected exactly 1 continuation marker, got {len(markers)}")
+    text = (markers[0].text or "").strip()
+    if text != "ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1":
+        return _result(False, f"expected exact uppercase marker text, got {text!r}")
+    pPr = markers[0]._element.find(qn("w:pPr"))
+    if pPr is None:
+        return _result(False, "marker missing pPr")
+    jc = pPr.find(qn("w:jc"))
+    if jc is None or jc.get(qn("w:val")) != "right":
+        return _result(False, f"marker not right-aligned: jc={jc!r}")
+    pb = pPr.find(qn("w:pageBreakBefore"))
+    if pb is None:
+        return _result(False, "marker missing pageBreakBefore")
+    pb_val = pb.get(qn("w:val"))
+    if pb_val is not None and pb_val in {"0", "false", "False"}:
+        return _result(False, f"marker pageBreakBefore disabled: w:val={pb_val!r}")
+    kn = pPr.find(qn("w:keepNext"))
+    if kn is None:
+        return _result(False, "marker missing keepNext")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 tables after split, got {len(doc.tables)}")
+    return _result(True, "split applied: uppercase marker right-aligned with pageBreakBefore+keepNext")
+
+
+def test_p2a_idempotent_after_apply() -> tuple[bool, str]:
+    """P2-a idempotency: after `apply_numbered_split_to_document(...)` creates
+    the continuation marker, a second detection pass produces zero candidates
+    (fragment 1 is followed by the marker → `already_followed_by_continuation`;
+    fragment 2 is a generated appendix continuation table → skipped via
+    `generated_appendix_continuation`)."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+        _valid_manual_continuation_table_ids,
+    )
+    from guides.coursework_kfu_2025.table_split_prototype import (
+        apply_numbered_split_to_document,
+        _build_appendix_continuation_paragraph,
+    )
+    doc, row_texts = _build_p2a_appendix_doc(rows=4)
+    apply_numbered_split_to_document(
+        doc, table_index=0, split_before_row=3,
+        header_rows=1, numbered_header=True, appendix_table=True,
+        continuation_paragraph_builder=_build_appendix_continuation_paragraph,
+    )
+    # Re-detect on the now-split doc.
+    chain_ids = _valid_manual_continuation_table_ids(doc)
+    fake_lines = _build_p2a_pdf_lines(row_texts, header_page=10, page_break_after_row=2, last_page=11)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, fake_lines, manual_chain_ids=chain_ids)
+    if candidates:
+        return _result(False, f"second pass produced unexpected candidates: {candidates!r}")
+    reasons = {ti: r for ti, r in skips}
+    if reasons.get(0) != "already_followed_by_continuation":
+        return _result(False, f"expected tbl1 skip='already_followed_by_continuation', got {reasons.get(0)!r}")
+    if reasons.get(1) != "generated_appendix_continuation":
+        return _result(False, f"expected tbl2 skip='generated_appendix_continuation', got {reasons.get(1)!r}")
+    return _result(True, f"second pass idempotent (tbl1={reasons.get(0)}, tbl2={reasons.get(1)})")
+
+
+def test_p2a_no_regression_on_p1c_source_note_fixture() -> tuple[bool, str]:
+    """P2-a regression: a P1-c-style synthetic doc (ordinary body table +
+    Источник: paragraph, no appendix) must NOT yield any P2-a candidate —
+    P1-c stays the only owner of this case."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc = Document()
+    doc.add_paragraph("Таблица 2.1.2 — Тестовая")
+    tbl = doc.add_table(rows=4, cols=2)
+    tbl.rows[0].cells[0].text = "Col1Header"
+    tbl.rows[0].cells[1].text = "Col2Header"
+    row_texts = []
+    for r in range(1, 4):
+        a, b = f"alpha{r}", f"beta{r}"
+        tbl.rows[r].cells[0].text = a
+        tbl.rows[r].cells[1].text = b
+        row_texts.append((a, b))
+    doc.add_paragraph("Источник: составлено автором.")
+    pdf_lines = _build_p2a_pdf_lines(row_texts, header_page=5, page_break_after_row=99, last_page=6)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if candidates:
+        return _result(False, f"P1-c case must not be P2-a candidate: {candidates!r}")
+    if not any(reason == "not_appendix" for _, reason in skips):
+        return _result(False, f"expected 'not_appendix' skip on P1-c case, got {skips!r}")
+    return _result(True, "P1-c source/note case untouched by P2-a")
+
+
+# ── P2-a′ — relaxed row/page matcher for appendix tables (fallback) ──────────
+
+
+def _make_table_signature(rows_data: list[tuple[str, ...]]):
+    """Build a TableSignature directly from cell-text tuples for unit testing
+    the relaxed matcher without instantiating a full Document. Row 0 is the
+    header (skipped by data-row probes), rows 1..N are data rows."""
+    from guides.coursework_kfu_2025.table_continuation import (
+        RowSignature, TableSignature, _norm_match_text,
+    )
+    row_sigs = []
+    for row_idx, cells in enumerate(rows_data):
+        fragments = tuple(_norm_match_text(c) for c in cells if c)
+        if not fragments:
+            continue
+        key = " || ".join(fragments)
+        row_sigs.append(RowSignature(row_idx=row_idx, key=key, fragments=fragments))
+    return TableSignature(table_idx=0, tbl_xml=None, rows=tuple(row_sigs))
+
+
+def _make_pdf_lines(entries: list[tuple[str, int]]):
+    """Construct PdfLine objects from (text, page_num) tuples."""
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+    return [PdfLine(text=t, page_num=p, top=100, bottom=110) for t, p in entries]
+
+
+def test_p2a_relaxed_accepts_duplicate_row_signatures() -> tuple[bool, str]:
+    """
+    P2-a′ positive: a table with triplicate (A,B,A,B,A,B) data rows produces
+    duplicate row signatures, which strict `_match_row_pages` rejects up-front.
+    The relaxed matcher must accept these via sequential positional matching
+    and return a row→page map.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _match_row_pages,
+        _match_row_pages_relaxed_for_appendix,
+    )
+    sig = _make_table_signature([
+        ("Header1", "Header2"),
+        ("aaa", "bbb"),  # row 1
+        ("ccc", "ddd"),  # row 2
+        ("aaa", "bbb"),  # row 3 (duplicate)
+        ("ccc", "ddd"),  # row 4 (duplicate)
+        ("aaa", "bbb"),  # row 5 (duplicate)
+        ("ccc", "ddd"),  # row 6 (duplicate)
+    ])
+    pdf_lines = _make_pdf_lines([
+        ("Header1 Header2", 10),
+        ("aaa bbb", 10),  # row 1
+        ("ccc ddd", 10),  # row 2
+        ("aaa bbb", 11),  # row 3 (page break here)
+        ("ccc ddd", 11),  # row 4
+        ("aaa bbb", 11),  # row 5
+        ("ccc ddd", 11),  # row 6
+    ])
+    if _match_row_pages(sig, pdf_lines) is not None:
+        return _result(False, "fixture broken: strict matcher accepted duplicates")
+    row_pages = _match_row_pages_relaxed_for_appendix(sig, pdf_lines)
+    if row_pages is None:
+        return _result(False, "relaxed matcher should accept duplicate signatures")
+    if row_pages.get(1) != 10 or row_pages.get(2) != 10:
+        return _result(False, f"row 1/2 page mapping wrong: {row_pages!r}")
+    if row_pages.get(3) != 11 or row_pages.get(6) != 11:
+        return _result(False, f"row 3/6 page mapping wrong: {row_pages!r}")
+    return _result(True, f"relaxed matcher returned {row_pages!r}")
+
+
+def test_p2a_relaxed_matches_wrapped_cells_via_window() -> tuple[bool, str]:
+    """
+    P2-a′: when a cell's text is split across multiple PdfLines (rendering
+    wrap), the relaxed matcher must reconstruct it via window aggregation
+    (concatenating 2–3 adjacent lines) and still produce a row→page map.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _match_row_pages_relaxed_for_appendix,
+    )
+    # Long second cell wraps across two PDF lines per row.
+    sig = _make_table_signature([
+        ("Hdr1", "Hdr2"),
+        ("alpha-uniqueK1", "long-tail-K1-detail-token-K1"),
+        ("beta-uniqueK2", "long-tail-K2-detail-token-K2"),
+        ("gamma-uniqueK3", "long-tail-K3-detail-token-K3"),
+        ("delta-uniqueK4", "long-tail-K4-detail-token-K4"),
+    ])
+    # Each row spans 2 wrapped PDF lines.
+    pdf_lines = _make_pdf_lines([
+        ("Hdr1 Hdr2", 10),
+        ("alpha-uniqueK1 long-tail-K1-detail-", 10),
+        ("token-K1", 10),
+        ("beta-uniqueK2 long-tail-K2-detail-", 10),
+        ("token-K2", 10),
+        ("gamma-uniqueK3 long-tail-K3-detail-", 11),
+        ("token-K3", 11),
+        ("delta-uniqueK4 long-tail-K4-detail-", 11),
+        ("token-K4", 11),
+    ])
+    row_pages = _match_row_pages_relaxed_for_appendix(sig, pdf_lines)
+    if row_pages is None:
+        return _result(False, "relaxed matcher failed to handle wrapped cells")
+    if row_pages.get(1) != 10 or row_pages.get(4) != 11:
+        return _result(False, f"window-aggregated page mapping wrong: {row_pages!r}")
+    return _result(True, f"window aggregation: {row_pages!r}")
+
+
+def test_p2a_relaxed_returns_none_on_low_confidence() -> tuple[bool, str]:
+    """
+    P2-a′: when fewer than `min_matched_data_rows` (=4) data rows can be
+    matched, the relaxed matcher returns None — fail-open, do not split.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _match_row_pages_relaxed_for_appendix,
+    )
+    sig = _make_table_signature([
+        ("H1", "H2"),
+        ("only-this", "row-matches"),
+        ("missing-A", "missing-B"),
+        ("missing-C", "missing-D"),
+        ("missing-E", "missing-F"),
+    ])
+    pdf_lines = _make_pdf_lines([
+        ("H1 H2", 10),
+        ("only-this row-matches", 10),
+        ("unrelated junk", 11),
+    ])
+    result = _match_row_pages_relaxed_for_appendix(sig, pdf_lines)
+    if result is not None:
+        return _result(False, f"expected None for low confidence, got {result!r}")
+    return _result(True, "low-confidence input correctly rejected")
+
+
+def test_p2a_relaxed_rejects_non_monotonic_pages() -> tuple[bool, str]:
+    """
+    P2-a′: relaxed matcher rejects mappings where pages are not non-decreasing
+    in row order (signals matching went backwards — unreliable).
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _match_row_pages_relaxed_for_appendix,
+    )
+    sig = _make_table_signature([
+        ("H1", "H2"),
+        ("aaa", "bbb"),
+        ("ccc", "ddd"),
+        ("eee", "fff"),
+        ("ggg", "hhh"),
+    ])
+    # PDF has rows in WRONG order — first match would be on later page,
+    # then earlier page. Relaxed must reject non-monotonic.
+    pdf_lines = _make_pdf_lines([
+        ("aaa bbb", 11),
+        ("ccc ddd", 10),  # backwards page
+        ("eee fff", 11),
+        ("ggg hhh", 11),
+    ])
+    result = _match_row_pages_relaxed_for_appendix(sig, pdf_lines)
+    if result is not None:
+        return _result(False, f"expected None for non-monotonic, got {result!r}")
+    return _result(True, "non-monotonic mapping correctly rejected")
+
+
+def test_p2a_relaxed_rejects_single_page_mapping() -> tuple[bool, str]:
+    """
+    P2-a′: if all matched rows live on a single page (no multi-page span),
+    the relaxed matcher returns None — no split is needed.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _match_row_pages_relaxed_for_appendix,
+    )
+    sig = _make_table_signature([
+        ("H1", "H2"),
+        ("rowA1", "rowA2"),
+        ("rowB1", "rowB2"),
+        ("rowC1", "rowC2"),
+        ("rowD1", "rowD2"),
+    ])
+    pdf_lines = _make_pdf_lines([
+        ("H1 H2", 10),
+        ("rowA1 rowA2", 10),
+        ("rowB1 rowB2", 10),
+        ("rowC1 rowC2", 10),
+        ("rowD1 rowD2", 10),
+    ])
+    result = _match_row_pages_relaxed_for_appendix(sig, pdf_lines)
+    if result is not None:
+        return _result(False, f"expected None for single-page, got {result!r}")
+    return _result(True, "single-page mapping correctly rejected")
+
+
+def test_p2a_strict_matcher_behavior_unchanged() -> tuple[bool, str]:
+    """
+    P2-a′ regression: strict `_match_row_pages` must remain bit-identical
+    on existing inputs. The relaxed matcher is additive and must not affect
+    strict semantics elsewhere (marker-split, P1-c, legacy split).
+    """
+    from guides.coursework_kfu_2025.table_continuation import _match_row_pages
+    sig = _make_table_signature([
+        ("Hdr1", "Hdr2"),
+        ("alpha", "beta"),
+        ("gamma", "delta"),
+        ("epsilon", "zeta"),
+    ])
+    pdf_lines = _make_pdf_lines([
+        ("Hdr1 Hdr2", 5),
+        ("alpha beta", 5),
+        ("gamma delta", 5),
+        ("epsilon zeta", 6),
+    ])
+    result = _match_row_pages(sig, pdf_lines)
+    if result is None:
+        return _result(False, "strict matcher regressed on valid input")
+    if result.get(1) != 5 or result.get(3) != 6:
+        return _result(False, f"strict matcher mapping changed: {result!r}")
+    # Strict still rejects duplicates.
+    dup_sig = _make_table_signature([
+        ("Hdr1", "Hdr2"),
+        ("x", "y"),
+        ("x", "y"),
+        ("x", "y"),
+    ])
+    if _match_row_pages(dup_sig, pdf_lines) is not None:
+        return _result(False, "strict matcher regressed: now accepts duplicates")
+    return _result(True, "strict matcher behavior preserved")
+
+
+def test_p2a_collector_uses_relaxed_when_strict_fails() -> tuple[bool, str]:
+    """
+    P2-a′ integration: when an appendix table has duplicate row signatures
+    (strict fails) but the relaxed matcher succeeds, the P2-a collector
+    must produce a candidate (not skip with `render_probe_unreliable`).
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    # 7-row appendix table with triplicate-style duplicate signatures (rows 1,3,5 share key A; rows 2,4,6 share key B).
+    tbl = doc.add_table(rows=7, cols=2)
+    tbl.rows[0].cells[0].text = "Hdr1"
+    tbl.rows[0].cells[1].text = "Hdr2"
+    pattern = [("dupA1", "dupA2"), ("dupB1", "dupB2")]
+    for r in range(1, 7):
+        a, b = pattern[(r - 1) % 2]
+        tbl.rows[r].cells[0].text = a
+        tbl.rows[r].cells[1].text = b
+    pdf_lines = _make_pdf_lines([
+        ("Hdr1 Hdr2", 10),
+        ("dupA1 dupA2", 10),
+        ("dupB1 dupB2", 10),
+        ("dupA1 dupA2", 11),
+        ("dupB1 dupB2", 11),
+        ("dupA1 dupA2", 11),
+        ("dupB1 dupB2", 11),
+    ])
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if not candidates:
+        return _result(False, f"expected ≥1 candidate via relaxed matcher; got skips={skips!r}")
+    c = candidates[0]
+    if c.appendix_num != "1":
+        return _result(False, f"appendix_num wrong: {c.appendix_num!r}")
+    if c.split_before_row is None or c.split_before_row < 2:
+        return _result(False, f"split_before_row invalid: {c.split_before_row}")
+    return _result(True, f"collector used relaxed matcher: candidate split_before_row={c.split_before_row}")
+
+
+def test_p2a_strict_path_takes_priority_when_strict_succeeds() -> tuple[bool, str]:
+    """
+    P2-a′: when strict `_match_row_pages` succeeds (unique data rows mapping
+    cleanly to PDF pages), the collector uses that mapping and does NOT
+    invoke the relaxed fallback. Verifies strict path priority.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+        _match_row_pages,
+    )
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    tbl = doc.add_table(rows=5, cols=2)
+    tbl.rows[0].cells[0].text = "Hdr1"
+    tbl.rows[0].cells[1].text = "Hdr2"
+    unique_rows = [("uniA1", "uniA2"), ("uniB1", "uniB2"), ("uniC1", "uniC2"), ("uniD1", "uniD2")]
+    for r, (a, b) in enumerate(unique_rows, start=1):
+        tbl.rows[r].cells[0].text = a
+        tbl.rows[r].cells[1].text = b
+    pdf_lines = _make_pdf_lines([
+        ("Hdr1 Hdr2", 10),
+        ("uniA1 uniA2", 10),
+        ("uniB1 uniB2", 10),
+        ("uniC1 uniC2", 11),
+        ("uniD1 uniD2", 11),
+    ])
+    # Strict matcher MUST succeed on this fixture.
+    from guides.coursework_kfu_2025.table_continuation import _collect_table_signatures
+    sigs = _collect_table_signatures(doc)
+    if _match_row_pages(sigs[0], pdf_lines) is None:
+        return _result(False, "fixture broken: strict matcher failed on unique data")
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if not candidates:
+        return _result(False, f"expected candidate via strict; got skips={skips!r}")
+    c = candidates[0]
+    # Strict says rows 1,2 on page 10; rows 3,4 on page 11 → split_before_row = 3.
+    if c.split_before_row != 3:
+        return _result(False, f"strict path should give split_before_row=3, got {c.split_before_row}")
+    return _result(True, "strict matcher path took priority (split_before_row=3)")
+
+
+def test_p2a_bondarev_style_triplicate_appendix_creates_candidate() -> tuple[bool, str]:
+    """
+    P2-a′ end-to-end fixture: Bondarev-style appendix table with 18 rows
+    (header + 6 unique × 3 copies) where strict matcher rejects but relaxed
+    accepts and produces a P2-a candidate with a valid split point.
+    """
+    from guides.coursework_kfu_2025.table_continuation import (
+        _collect_appendix_table_continuation_candidates,
+    )
+    doc = Document()
+    doc.add_paragraph("ПРИЛОЖЕНИЕ А")
+    tbl = doc.add_table(rows=19, cols=2)  # header + 18 data rows
+    tbl.rows[0].cells[0].text = "Этап"
+    tbl.rows[0].cells[1].text = "Описание"
+    unique = [
+        ("Подготовка", "Формирование повестки"),
+        ("Обсуждение", "Дебаты по вопросам"),
+        ("Голосование", "Электронное голосование"),
+        ("Анализ", "Систематизация оценки"),
+        ("Отчётность", "Публикация итогов"),
+        ("Архивация", "Сохранение материалов"),
+    ]
+    for r in range(1, 19):
+        a, b = unique[(r - 1) % 6]
+        tbl.rows[r].cells[0].text = a
+        tbl.rows[r].cells[1].text = b
+    # PDF: 9 rows on page 10, 9 rows on page 11 (mid-table page break).
+    pdf_entries = [("Этап Описание", 10)]
+    for r in range(1, 10):
+        a, b = unique[(r - 1) % 6]
+        pdf_entries.append((f"{a} {b}", 10))
+    for r in range(10, 19):
+        a, b = unique[(r - 1) % 6]
+        pdf_entries.append((f"{a} {b}", 11))
+    pdf_lines = _make_pdf_lines(pdf_entries)
+    candidates, skips = _collect_appendix_table_continuation_candidates(doc, pdf_lines, manual_chain_ids=set())
+    if not candidates:
+        return _result(False, f"Bondarev-style triplicate didn't produce candidate; skips={skips!r}")
+    c = candidates[0]
+    if c.appendix_num != "А":
+        return _result(False, f"appendix_num wrong: {c.appendix_num!r}")
+    if c.split_before_row is None or c.split_before_row < 2:
+        return _result(False, f"split_before_row invalid: {c.split_before_row}")
+    if c.first_data_row_page != 10 or c.last_data_row_page != 11:
+        return _result(False, f"page mapping wrong: first={c.first_data_row_page} last={c.last_data_row_page}")
+    return _result(True, f"Bondarev-style candidate: split_before_row={c.split_before_row}")
+
+
 # ── DEFECT 3 — caption-like analytical prose under table must stay body_text ──
 
 def test_table_caption_reference_prose_with_svyazyvaet_demoted() -> tuple[bool, str]:
@@ -9276,6 +9878,19 @@ def run_all() -> None:
         ("P1c | render probe unreliable skipped",       test_p1c_skip_render_probe_unreliable),
         ("P1c | split inserts marker + numbered row",   test_p1c_apply_split_inserts_continuation_marker_and_numbered_row),
         ("P1c | idempotent via natural skip reasons",   test_p1c_double_run_idempotent_via_natural_skips),
+        ("P2a | multi-page appendix table detected",    test_p2a_detects_multipage_appendix_table),
+        ("P2a | non-appendix table skipped",            test_p2a_skip_non_appendix_table),
+        ("P2a | existing continuation label skipped",   test_p2a_skip_existing_continuation_label),
+        ("P2a | manual chain skipped",                  test_p2a_skip_manual_chain),
+        ("P2a | single-page appendix skipped",          test_p2a_skip_single_page_appendix),
+        ("P2a | small appendix skipped",                test_p2a_skip_small_appendix_table),
+        ("P2a | split inserts uppercase marker",        test_p2a_apply_split_inserts_uppercase_continuation_marker),
+        ("P2a | idempotent after apply",                test_p2a_idempotent_after_apply),
+        ("P2a | no regression on P1-c fixture",         test_p2a_no_regression_on_p1c_source_note_fixture),
+        # P2-a' (relaxed row/page matcher) tests are registered at the END
+        # of this list — see bottom — so they do not shift the ordinal
+        # position of any pre-existing test. (Placing them here surfaced a
+        # latent order-sensitive interaction with E2 manual-chain tests.)
         ("D3 | analytical prose svyazyvaet demoted",    test_table_caption_reference_prose_with_svyazyvaet_demoted),
         ("D3 | rule3 no keepNext on prose below table", test_pagination_rule3_does_not_set_keepnext_on_prose_below_table),
         ("D3 | genuine caption still keepNext",         test_genuine_table_caption_still_gets_keepnext),
@@ -9473,6 +10088,20 @@ def run_all() -> None:
         ("E3 | compensation skipped when fragment 1 would be empty", test_e3_compensation_skipped_when_fragment1_would_be_empty),
         ("E3 | feature flag off disables compensation", test_e3_feature_flag_off_disables_compensation),
         ("E3 | integration: K-1 propagates through apply", test_e3_integration_apply_marker_split_passes_compensated_k),
+        # ── P2-a' relaxed row/page matcher tests — registered at tail to
+        # avoid shifting the ordinal position of pre-existing E2 tests, which
+        # exposed a latent order-sensitive failure in the suite. The matcher
+        # itself is independent of all earlier paths; running these last has
+        # no functional implication.
+        ("P2a' | relaxed accepts duplicate rows",        test_p2a_relaxed_accepts_duplicate_row_signatures),
+        ("P2a' | relaxed handles wrapped cells",         test_p2a_relaxed_matches_wrapped_cells_via_window),
+        ("P2a' | relaxed low-confidence → None",         test_p2a_relaxed_returns_none_on_low_confidence),
+        ("P2a' | relaxed rejects non-monotonic",         test_p2a_relaxed_rejects_non_monotonic_pages),
+        ("P2a' | relaxed rejects single-page",           test_p2a_relaxed_rejects_single_page_mapping),
+        ("P2a' | strict matcher unchanged",              test_p2a_strict_matcher_behavior_unchanged),
+        ("P2a' | collector uses relaxed on strict fail", test_p2a_collector_uses_relaxed_when_strict_fails),
+        ("P2a' | strict path takes priority",            test_p2a_strict_path_takes_priority_when_strict_succeeds),
+        ("P2a' | Bondarev-style triplicate candidate",   test_p2a_bondarev_style_triplicate_appendix_creates_candidate),
     ]
 
     if os.environ.get("KPFU_RUN_LONG_PHASE3_TESTS") == "1":

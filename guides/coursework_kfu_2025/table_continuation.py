@@ -66,7 +66,11 @@ from docx.oxml.ns import qn
 from .docx_utils import xml_has_image, is_source_or_note_line, FormattingReport
 from .layout_render import LibreOfficeNotFoundError, render_docx_to_pdf
 from .pdf_layout_analyzer import PdfLine, analyze_pdf_lines
-from .table_split_prototype import apply_numbered_split_to_document
+from .table_split_prototype import (
+    apply_numbered_split_to_document,
+    _build_appendix_continuation_paragraph,
+    _find_preceding_appendix_number,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -979,6 +983,106 @@ def _match_row_pages(table_sig: TableSignature, pdf_lines: list[PdfLine]) -> dic
             return None
         last_match_idx, page_num = matches[0]
         row_pages[sig.row_idx] = page_num
+
+    return row_pages
+
+
+def _match_row_pages_relaxed_for_appendix(
+    table_sig: TableSignature,
+    pdf_lines: list[PdfLine],
+    *,
+    min_matched_data_rows: int = 4,
+    max_window_size: int = 3,
+) -> dict[int, int] | None:
+    """P2-a' fallback: appendix-only row→page matcher that is tolerant of
+    (a) duplicate row signatures — uses sequential positional matching;
+    (b) wrapped cell text — concatenates a small window of adjacent PDF
+    lines before fragment matching.
+
+    Returns the row_idx → page_num mapping only when:
+    - at least `min_matched_data_rows` data rows mapped successfully;
+    - mapped pages are non-decreasing in row order (monotonic);
+    - at least 2 distinct pages observed (otherwise no multi-page span).
+
+    Fail-open: returns None when confidence is low. This matcher is only
+    used inside the P2-a appendix continuation collector — strict
+    `_match_row_pages` is untouched and remains the primary path.
+    """
+    data_rows = [sig for sig in table_sig.rows if sig.row_idx > 0]
+    if len(data_rows) < min_matched_data_rows:
+        return None
+
+    line_texts = [(_norm_match_text(line.text), line.page_num) for line in pdf_lines]
+    if not line_texts:
+        return None
+
+    row_pages: dict[int, int] = {}
+    last_match_idx = -1
+    last_page = -1
+
+    for sig in data_rows:
+        match_idx = -1
+        match_page: int | None = None
+        # Sequential scan AFTER previous match — no global uniqueness needed.
+        for idx in range(last_match_idx + 1, len(line_texts)):
+            line_text, page_num = line_texts[idx]
+            # Skip lines that would create a non-monotonic page jump.
+            if last_page >= 0 and page_num < last_page:
+                continue
+            # 1) try single-line match
+            if _row_matches_line(sig, line_text):
+                match_idx, match_page = idx, page_num
+                break
+            # 2) try window aggregation (2..max_window_size adjacent lines)
+            #    — concatenate normalized texts. PDF line-wrap may either
+            #    insert a space at the boundary ("foo" + "bar") or break
+            #    inside a hyphenated token ("foo-" + "bar"), so try both
+            #    " " and "" separators.
+            found_in_window = False
+            for win in range(2, max_window_size + 1):
+                if idx + win > len(line_texts):
+                    break
+                chunks = [t for t, _ in line_texts[idx : idx + win]]
+                for sep in (" ", ""):
+                    combined_text = sep.join(chunks)
+                    if _row_matches_line(sig, combined_text):
+                        match_idx = idx + win - 1
+                        match_page = line_texts[match_idx][1]
+                        found_in_window = True
+                        break
+                if found_in_window:
+                    break
+            if found_in_window:
+                break
+            # 3) tables with many narrow columns (e.g. Bondarev 5-col appendix)
+            #    render with cell texts on SEPARATE PDF lines — no window of
+            #    N adjacent lines can contain all N fragments in order.
+            #    Fall back to a strict first-fragment match: each row is
+            #    identified by its leftmost cell text only. Require the
+            #    fragment to be ≥ 6 chars to stay distinctive.
+            first_frag = sig.fragments[0] if sig.fragments else ""
+            if len(first_frag) >= 6 and line_text.strip() == first_frag:
+                match_idx, match_page = idx, page_num
+                break
+
+        if match_idx < 0:
+            # Cannot find this row; continue (fail-open per-row).
+            continue
+        row_pages[sig.row_idx] = match_page  # type: ignore[assignment]
+        last_match_idx = match_idx
+        last_page = match_page  # type: ignore[assignment]
+
+    if len(row_pages) < min_matched_data_rows:
+        return None
+
+    # Monotonic page check (sequential in row order).
+    pages_in_row_order = [row_pages[r] for r in sorted(row_pages.keys())]
+    if pages_in_row_order != sorted(pages_in_row_order):
+        return None
+
+    # Require at least 2 distinct pages for "multi-page span" verdict.
+    if len(set(pages_in_row_order)) < 2:
+        return None
 
     return row_pages
 
@@ -2827,6 +2931,258 @@ def _apply_source_note_detachment_split(
     return applied
 
 
+# ── P2-a — appendix continuation for table-based appendices ──────────────────
+
+@dataclass(frozen=True)
+class _AppendixTableContinuationCandidate:
+    table_index: int
+    appendix_num: str
+    first_data_row_page: int
+    last_data_row_page: int
+    rows_count: int
+    split_before_row: int
+
+
+def _next_nonempty_body_paragraph_after(
+    body_children: list, table_xml, para_by_xml: dict,
+):
+    """Walk forward from `table_xml`, skip at most one empty paragraph, and
+    return the next non-empty `<w:p>` element (or None). Used to detect a
+    pre-existing «ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ N» marker directly after the table."""
+    try:
+        tbl_idx = body_children.index(table_xml)
+    except ValueError:
+        return None
+    j = tbl_idx + 1
+    seen_blank = False
+    while j < len(body_children):
+        el = body_children[j]
+        if el.tag != qn("w:p"):
+            return None
+        p_obj = para_by_xml.get(el)
+        text = (p_obj.text or "").strip() if p_obj is not None else ""
+        if not text:
+            if seen_blank:
+                return None
+            seen_blank = True
+            j += 1
+            continue
+        return el
+    return None
+
+
+def _collect_appendix_table_continuation_candidates(
+    doc: Document,
+    pdf_lines: list[PdfLine],
+    manual_chain_ids: set[int],
+) -> tuple[list[_AppendixTableContinuationCandidate], list[tuple[int, str]]]:
+    """Detect appendix tables whose data rows render across > 1 PDF page.
+    Pure logic — no document mutation, no rendering. Returns
+    (candidates, skips) where `skips` is a list of (table_index, skip_reason).
+
+    Eligibility (all must hold):
+    - Table is flagged `appendix_table=True` by
+      `_iter_body_tables_with_context` (i.e. preceded by `ПРИЛОЖЕНИЕ …`
+      heading somewhere upstream).
+    - `_find_preceding_appendix_number` returns a non-None number (required
+      by `apply_numbered_split_to_document` with `appendix_table=True`).
+    - Table has ≥ 3 rows (1 header + ≥ 2 data rows; split-last-row leaves
+      ≥ 1 data row on each fragment).
+    - Header row is not a nested-table header.
+    - Table is NOT in a manual continuation chain protected by P0-α.
+    - Table is NOT itself a generated appendix continuation fragment
+      (`_is_generated_appendix_continuation_table`).
+    - Table is NOT already followed by a «ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ N» marker
+      (idempotency: skip if some prior pass / source authoring already
+      inserted one).
+    - Render probe maps rows to pages reliably AND the data rows actually
+      span ≥ 2 pages.
+    """
+    from .table_markers import _iter_body_tables_with_context
+    contexts = _iter_body_tables_with_context(doc)
+    signatures = _collect_table_signatures(doc)
+    body_children = list(doc.element.body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+    candidates: list[_AppendixTableContinuationCandidate] = []
+    skips: list[tuple[int, str]] = []
+
+    for table_index, ctx in enumerate(contexts):
+        table_obj = ctx.get("table_obj")
+        if table_obj is None:
+            skips.append((table_index, "table_not_in_body"))
+            continue
+        tbl_xml = table_obj._tbl
+
+        if not ctx.get("appendix_table"):
+            skips.append((table_index, "not_appendix"))
+            continue
+
+        if id(tbl_xml) in manual_chain_ids:
+            skips.append((table_index, "already_in_manual_chain"))
+            continue
+
+        if _is_generated_appendix_continuation_table(doc, table_index):
+            skips.append((table_index, "generated_appendix_continuation"))
+            continue
+
+        next_para = _next_nonempty_body_paragraph_after(
+            body_children, tbl_xml, para_by_xml,
+        )
+        if next_para is not None and _is_appendix_continuation_paragraph(next_para):
+            skips.append((table_index, "already_followed_by_continuation"))
+            continue
+
+        try:
+            tbl_body_idx = body_children.index(tbl_xml)
+        except ValueError:
+            skips.append((table_index, "table_not_in_body"))
+            continue
+        appendix_num = _find_preceding_appendix_number(body_children, tbl_body_idx)
+        if appendix_num is None:
+            skips.append((table_index, "no_appendix_number"))
+            continue
+
+        rows_xml = tbl_xml.findall(qn("w:tr"))
+        if len(rows_xml) < 3:
+            skips.append((table_index, "no_safe_data_row"))
+            continue
+
+        if _ordinary_table_has_nested_header_row(doc, table_index):
+            skips.append((table_index, "body_contains_nested_table_header"))
+            continue
+
+        sig = signatures[table_index] if table_index < len(signatures) else None
+        if sig is None:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        row_pages = _match_row_pages(sig, pdf_lines)
+        if not row_pages:
+            # P2-a' relaxed fallback — appendix tables only. Tolerates
+            # duplicate row signatures and wrapped cell text via window
+            # aggregation. Strict matcher remains untouched.
+            row_pages = _match_row_pages_relaxed_for_appendix(sig, pdf_lines)
+        if not row_pages:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        data_row_pages = {idx: p for idx, p in row_pages.items() if idx > 0}
+        if not data_row_pages:
+            skips.append((table_index, "render_probe_unreliable"))
+            continue
+        first_data_row_page = min(data_row_pages.values())
+        last_data_row_page = max(data_row_pages.values())
+        if last_data_row_page <= first_data_row_page:
+            skips.append((table_index, "single_page"))
+            continue
+
+        # split_before_row = first row index whose page is strictly later
+        # than the first data row page.
+        split_before_row = None
+        for idx, page in sorted(data_row_pages.items()):
+            if page > first_data_row_page:
+                split_before_row = idx
+                break
+        if split_before_row is None or split_before_row <= 1:
+            skips.append((table_index, "no_safe_split_boundary"))
+            continue
+
+        candidates.append(
+            _AppendixTableContinuationCandidate(
+                table_index=table_index,
+                appendix_num=appendix_num,
+                first_data_row_page=first_data_row_page,
+                last_data_row_page=last_data_row_page,
+                rows_count=len(rows_xml),
+                split_before_row=split_before_row,
+            )
+        )
+
+    return candidates, skips
+
+
+def _apply_appendix_table_continuation_split(
+    docx_path: Path,
+    report: FormattingReport | None = None,
+) -> int:
+    """P2-a: insert «ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ N» on the continuation page of
+    every appendix table whose data rows span > 1 PDF page. Reuses the
+    existing split engine (`apply_numbered_split_to_document` with
+    `appendix_table=True`) and the existing
+    `_build_appendix_continuation_paragraph` marker builder.
+
+    Per-table try/except: a single failure does not abort the document.
+    Idempotent: tables already followed by a continuation marker, generated
+    appendix continuation fragments, and manually-chained tables are
+    skipped — so a second run is a no-op.
+    """
+    docx_path = Path(docx_path)
+    doc = Document(str(docx_path))
+    if not doc.tables:
+        return 0
+
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(docx_path)
+        pdf_lines = analyze_pdf_lines(pdf_path)
+    except LibreOfficeNotFoundError as exc:
+        logger.info(
+            "p2a_appendix_continuation_skip reason=libreoffice_unavailable error=%s", exc,
+        )
+        return 0
+    except Exception as exc:
+        logger.info(
+            "p2a_appendix_continuation_skip reason=render_failed error=%s", exc,
+        )
+        return 0
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    manual_chain_ids = _valid_manual_continuation_table_ids(doc)
+    candidates, skips = _collect_appendix_table_continuation_candidates(
+        doc, pdf_lines, manual_chain_ids,
+    )
+    for table_index, reason in skips:
+        logger.info(
+            "p2a_appendix_continuation_skip table_index=%s reason=%s",
+            table_index, reason,
+        )
+
+    if not candidates:
+        return 0
+
+    applied = 0
+    # Reverse table_index order — each split inserts a new <w:tbl> at
+    # `table_index + 1` and would shift any not-yet-processed candidate.
+    for cand in sorted(candidates, key=lambda c: -c.table_index):
+        try:
+            apply_numbered_split_to_document(
+                doc,
+                cand.table_index,
+                cand.split_before_row,
+                header_rows=1,
+                numbered_header=True,
+                appendix_table=True,
+                continuation_paragraph_builder=_build_appendix_continuation_paragraph,
+            )
+        except Exception as exc:
+            logger.info(
+                "p2a_appendix_continuation_skip table_index=%s reason=apply_split_failed error=%s",
+                cand.table_index, exc,
+            )
+            continue
+        applied += 1
+        logger.info(
+            "p2a_appendix_continuation_applied table_index=%s appendix_num=%s split_before_row=%s first_row_page=%s last_row_page=%s",
+            cand.table_index, cand.appendix_num, cand.split_before_row,
+            cand.first_data_row_page, cand.last_data_row_page,
+        )
+
+    if applied:
+        doc.save(str(docx_path))
+        logger.info("p2a_appendix_continuation_summary applied=%s", applied)
+    return applied
+
+
 def apply_rendered_table_continuation(
     docx_path: Path,
     report: FormattingReport | None = None,
@@ -2962,7 +3318,14 @@ def apply_rendered_table_continuation(
                     p1c_total = _apply_source_note_detachment_split(
                         docx_path, report=report,
                     )
-                    return marker_total + p1c_total
+                    # P2-a: appendix continuation for table-based appendices.
+                    # Runs AFTER P1-c so any P1-c-created chains are already
+                    # protected by `_valid_manual_continuation_table_ids` or
+                    # the `already_followed_by_continuation` skip.
+                    p2a_total = _apply_appendix_table_continuation_split(
+                        docx_path, report=report,
+                    )
+                    return marker_total + p1c_total + p2a_total
             except Exception:
                 emit_marker_summary()
                 raise
@@ -2979,12 +3342,18 @@ def apply_rendered_table_continuation(
     p1c_total_pre_legacy = _apply_source_note_detachment_split(
         docx_path, report=report,
     )
-    if p1c_total_pre_legacy > 0:
+    # P2-a: appendix continuation for table-based appendices. Runs after P1-c
+    # so its detection sees the doc shape that P1-c left.
+    p2a_total_pre_legacy = _apply_appendix_table_continuation_split(
+        docx_path, report=report,
+    )
+    combined_pre_legacy = p1c_total_pre_legacy + p2a_total_pre_legacy
+    if combined_pre_legacy > 0:
         logger.info(
-            "rendered_final_decision action=p1c_source_note_split count=%s",
-            p1c_total_pre_legacy,
+            "rendered_final_decision action=p1c_p2a_split p1c=%s p2a=%s",
+            p1c_total_pre_legacy, p2a_total_pre_legacy,
         )
-        return p1c_total_pre_legacy
+        return combined_pre_legacy
 
     pdf_path: Path | None = None
     try:
