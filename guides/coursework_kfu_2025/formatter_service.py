@@ -15,6 +15,7 @@ from .table_continuation import (
     apply_rule6_figure_orphan,
     remove_empty_before_figure_captions,
 )
+from .contents_builder import rebuild_static_contents_page
 from .docx_utils import FormattingReport
 
 logger = logging.getLogger(__name__)
@@ -89,5 +90,11 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             logger.info("format_docx: rendered table continuation splits=%d", n_rendered)
     except Exception:
         logger.exception("format_docx: phase3 failed, skipping (phase2 result preserved)")
+
+    try:
+        if rebuild_static_contents_page(output_path):
+            logger.info("format_docx: static contents page rebuilt")
+    except Exception:
+        logger.exception("format_docx: contents rebuild failed, preserving phase3 result")
 
     return str(output_path), report.warnings

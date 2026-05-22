@@ -445,6 +445,199 @@ def test_b2_contents_entries_have_stable_tab_leaders() -> tuple[bool, str]:
     return _result(True, "TOC/front matter text is frozen before real intro")
 
 
+def _run_static_contents_rebuild(doc: Document, rendered_lines: list[tuple[str, int]]) -> Document:
+    import guides.coursework_kfu_2025.contents_builder as cb
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "toc.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "toc.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = cb.render_docx_to_pdf
+        old_analyze = cb.analyze_pdf_lines
+        try:
+            cb.render_docx_to_pdf = lambda _path: pdf_path
+            cb.analyze_pdf_lines = lambda _path: [
+                PdfLine(text=text, page_num=page, top=100.0, bottom=112.0)
+                for text, page in rendered_lines
+            ]
+            changed = cb.rebuild_static_contents_page(path)
+        finally:
+            cb.render_docx_to_pdf = old_render
+            cb.analyze_pdf_lines = old_analyze
+
+        if not changed:
+            raise AssertionError("rebuild_static_contents_page returned False")
+        return Document(str(path))
+
+
+def _make_autotoc_doc(*, old_heading: str | None = "Содержание", title: bool = True, appendices: bool = False) -> Document:
+    doc = Document()
+    if title:
+        doc.add_paragraph("Титульная строка")
+    if old_heading:
+        doc.add_paragraph(old_heading)
+        doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+        doc.add_paragraph("1. Старый раздел................................................4")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. Теоретические основы")
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек")
+    doc.add_paragraph("Текст подраздела.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+    if appendices:
+        doc.add_paragraph("ПРИЛОЖЕНИЯ")
+        doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+        doc.add_paragraph("1.1. Локальный заголовок приложения")
+        doc.add_paragraph("Текст приложения.")
+    return doc
+
+
+def _default_autotoc_lines(*, appendices: bool = False) -> list[tuple[str, int]]:
+    lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек", 5),
+        ("ЗАКЛЮЧЕНИЕ", 8),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 9),
+    ]
+    if appendices:
+        lines.append(("ПРИЛОЖЕНИЯ", 10))
+    return lines
+
+
+def _toc_texts_before_intro(doc: Document) -> list[str]:
+    texts = [p.text for p in doc.paragraphs]
+    intro_idx = texts.index("ВВЕДЕНИЕ")
+    return texts[:intro_idx]
+
+
+def _toc_entry_paragraph(doc: Document, prefix: str):
+    for p in doc.paragraphs:
+        if (p.text or "").startswith(prefix):
+            return p
+    return None
+
+
+def _paragraph_left_indent_twips(paragraph) -> str | None:
+    p_pr = paragraph._element.pPr
+    if p_pr is None:
+        return None
+    ind = p_pr.find(qn("w:ind"))
+    if ind is None:
+        return None
+    return ind.get(qn("w:left"))
+
+
+def _paragraph_has_right_dot_tab(paragraph) -> bool:
+    p_pr = paragraph._element.pPr
+    if p_pr is None:
+        return False
+    for tabs in p_pr.findall(qn("w:tabs")):
+        for tab in tabs.findall(qn("w:tab")):
+            if tab.get(qn("w:val")) == "right" and tab.get(qn("w:leader")) == "dot":
+                return True
+    return False
+
+
+def test_autotoc_existing_soderzhanie_replaced_by_canonical() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"canonical heading missing or duplicated: {front!r}")
+    if any("Содержание" in text for text in front):
+        return _result(False, f"old mixed-case heading survived: {front!r}")
+    if any("Старый раздел" in text for text in front):
+        return _result(False, f"old TOC entry survived: {front!r}")
+    return _result(True, "old Содержание block replaced by canonical СОДЕРЖАНИЕ")
+
+
+def test_autotoc_existing_oglavlenie_replaced_by_canonical() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Оглавление"), _default_autotoc_lines())
+    front = _toc_texts_before_intro(out)
+    if "СОДЕРЖАНИЕ" not in front:
+        return _result(False, f"canonical heading missing: {front!r}")
+    if any("Оглавление" in text for text in front):
+        return _result(False, f"old Оглавление survived: {front!r}")
+    return _result(True, "old Оглавление block replaced by canonical СОДЕРЖАНИЕ")
+
+
+def test_autotoc_missing_contents_inserted_before_real_intro() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading=None, title=True), _default_autotoc_lines())
+    texts = [p.text for p in out.paragraphs]
+    if texts.index("СОДЕРЖАНИЕ") >= texts.index("ВВЕДЕНИЕ"):
+        return _result(False, f"TOC not inserted before intro: {texts[:8]!r}")
+    if texts[0] != "Титульная строка":
+        return _result(False, f"title/front matter was not preserved before TOC: {texts[:5]!r}")
+    return _result(True, "missing TOC inserted after title and before real intro")
+
+
+def test_autotoc_no_title_page_inserted_at_document_start() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading=None, title=False), _default_autotoc_lines())
+    texts = [p.text for p in out.paragraphs]
+    if texts[0] != "СОДЕРЖАНИЕ":
+        return _result(False, f"TOC should start document when no title page exists: {texts[:5]!r}")
+    if texts.index("СОДЕРЖАНИЕ") >= texts.index("ВВЕДЕНИЕ"):
+        return _result(False, f"TOC not before intro: {texts[:6]!r}")
+    return _result(True, "no-title document gets TOC at document start")
+
+
+def test_autotoc_appendices_include_general_heading_only() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(
+        _make_autotoc_doc(old_heading="Содержание", appendices=True),
+        _default_autotoc_lines(appendices=True),
+    )
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "ПРИЛОЖЕНИЯ\t10" not in front:
+        return _result(False, f"general appendices heading missing from TOC: {front!r}")
+    if "ПРИЛОЖЕНИЕ 1" in joined or "Локальный заголовок приложения" in joined:
+        return _result(False, f"appendix-local entries leaked into TOC: {front!r}")
+    return _result(True, "TOC includes only general ПРИЛОЖЕНИЯ entry")
+
+
+def test_autotoc_heading2_has_no_left_indent() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    p = _toc_entry_paragraph(out, "1.1. Длинный подраздел")
+    if p is None:
+        return _result(False, "heading2 TOC entry missing")
+    if _paragraph_left_indent_twips(p) not in (None, "0"):
+        return _result(False, f"heading2 TOC entry has left indent: {_paragraph_left_indent_twips(p)!r}")
+    return _result(True, "heading2 TOC entry has no left indent")
+
+
+def test_autotoc_entries_use_dot_leader_tab_not_manual_dots() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    for p in out.paragraphs:
+        if "\t" not in (p.text or ""):
+            continue
+        if re.search(r"\.{2,}|…", p.text):
+            return _result(False, f"manual dot run survived in TOC entry: {p.text!r}")
+        if not _paragraph_has_right_dot_tab(p):
+            return _result(False, f"TOC entry lacks right dot tab stop: {p.text!r}")
+    return _result(True, "TOC entries use tab-stop dot leaders, not manual dots")
+
+
+def test_autotoc_long_heading_uses_same_tab_leader_layout() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    p = _toc_entry_paragraph(out, "1.1. Длинный подраздел")
+    if p is None:
+        return _result(False, "long heading TOC entry missing")
+    if not p.text.endswith("\t5"):
+        return _result(False, f"long heading page number is not right-tab text: {p.text!r}")
+    if not _paragraph_has_right_dot_tab(p):
+        return _result(False, "long heading entry lacks right dot tab stop")
+    return _result(True, "long heading uses tab leader layout with page number at right tab")
+
+
 def _paragraph_has_texts_in_order(doc: Document, expected: list[str]) -> bool:
     texts = [paragraph.text for paragraph in doc.paragraphs]
     pos = 0
@@ -10088,6 +10281,16 @@ def run_all() -> None:
         ("E3 | compensation skipped when fragment 1 would be empty", test_e3_compensation_skipped_when_fragment1_would_be_empty),
         ("E3 | feature flag off disables compensation", test_e3_feature_flag_off_disables_compensation),
         ("E3 | integration: K-1 propagates through apply", test_e3_integration_apply_marker_split_passes_compensated_k),
+        # Static TOC rebuild tests are registered at the tail so existing
+        # Phase 3 ordering-sensitive regression cases keep their baseline order.
+        ("TOC | existing Содержание replaced",         test_autotoc_existing_soderzhanie_replaced_by_canonical),
+        ("TOC | existing Оглавление replaced",         test_autotoc_existing_oglavlenie_replaced_by_canonical),
+        ("TOC | missing contents inserted",            test_autotoc_missing_contents_inserted_before_real_intro),
+        ("TOC | no title page inserts at start",       test_autotoc_no_title_page_inserted_at_document_start),
+        ("TOC | appendices general heading only",      test_autotoc_appendices_include_general_heading_only),
+        ("TOC | heading2 has no left indent",          test_autotoc_heading2_has_no_left_indent),
+        ("TOC | entries use dot leader tab",           test_autotoc_entries_use_dot_leader_tab_not_manual_dots),
+        ("TOC | long heading tab leader layout",       test_autotoc_long_heading_uses_same_tab_leader_layout),
         # ── P2-a' relaxed row/page matcher tests — registered at tail to
         # avoid shifting the ordinal position of pre-existing E2 tests, which
         # exposed a latent order-sensitive failure in the suite. The matcher
