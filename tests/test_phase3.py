@@ -475,6 +475,34 @@ def _run_static_contents_rebuild(doc: Document, rendered_lines: list[tuple[str, 
         return Document(str(path))
 
 
+def _run_static_contents_rebuild_result(doc: Document, rendered_lines: list[tuple[str, int]]) -> tuple[bool, Document]:
+    import guides.coursework_kfu_2025.contents_builder as cb
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "toc.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "toc.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = cb.render_docx_to_pdf
+        old_analyze = cb.analyze_pdf_lines
+        try:
+            cb.render_docx_to_pdf = lambda _path: pdf_path
+            cb.analyze_pdf_lines = lambda _path: [
+                PdfLine(text=text, page_num=page, top=100.0, bottom=112.0)
+                for text, page in rendered_lines
+            ]
+            changed = cb.rebuild_static_contents_page(path)
+        finally:
+            cb.render_docx_to_pdf = old_render
+            cb.analyze_pdf_lines = old_analyze
+
+        return changed, Document(str(path))
+
+
 def _make_autotoc_doc(*, old_heading: str | None = "Содержание", title: bool = True, appendices: bool = False) -> Document:
     doc = Document()
     if title:
@@ -485,9 +513,9 @@ def _make_autotoc_doc(*, old_heading: str | None = "Содержание", title
         doc.add_paragraph("1. Старый раздел................................................4")
     doc.add_paragraph("ВВЕДЕНИЕ")
     doc.add_paragraph("Текст введения.")
-    doc.add_paragraph("1. Теоретические основы")
+    doc.add_paragraph("1. Теоретические основы").style = "Heading 1"
     doc.add_paragraph("Текст главы.")
-    doc.add_paragraph("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек")
+    doc.add_paragraph("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек").style = "Heading 2"
     doc.add_paragraph("Текст подраздела.")
     doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
     doc.add_paragraph("Итоги.")
@@ -548,6 +576,22 @@ def _paragraph_has_right_dot_tab(paragraph) -> bool:
     return False
 
 
+def _paragraph_has_internal_hyperlink(paragraph) -> bool:
+    p = paragraph._element
+    for hyperlink in p.findall(qn("w:hyperlink")):
+        if hyperlink.get(qn("w:anchor")):
+            return True
+    return False
+
+
+def _document_has_bookmark(document: Document, prefix: str = "kpfu_toc_") -> bool:
+    for elem in document._element.iter(qn("w:bookmarkStart")):
+        name = elem.get(qn("w:name")) or ""
+        if name.startswith(prefix):
+            return True
+    return False
+
+
 def test_autotoc_existing_soderzhanie_replaced_by_canonical() -> tuple[bool, str]:
     out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
     front = _toc_texts_before_intro(out)
@@ -568,6 +612,43 @@ def test_autotoc_existing_oglavlenie_replaced_by_canonical() -> tuple[bool, str]
     if any("Оглавление" in text for text in front):
         return _result(False, f"old Оглавление survived: {front!r}")
     return _result(True, "old Оглавление block replaced by canonical СОДЕРЖАНИЕ")
+
+
+def test_autotoc_exact_intro_entry_inside_old_toc_is_removed() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("Содержание")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Старый раздел без номера страницы")
+    doc.add_paragraph("Оглавление")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Еще один старый раздел")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. АКТУАЛЬНЫЙ РАЗДЕЛ").style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+
+    out = _run_static_contents_rebuild(
+        doc,
+        [
+            ("ВВЕДЕНИЕ", 3),
+            ("1. АКТУАЛЬНЫЙ РАЗДЕЛ", 4),
+            ("ЗАКЛЮЧЕНИЕ", 5),
+            ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+        ],
+    )
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected one new TOC heading before real intro: {front!r}")
+    joined = "\n".join(front)
+    if "Оглавление" in joined or "Старый раздел" in joined or "Еще один старый раздел" in joined:
+        return _result(False, f"old TOC blocks were not fully removed: {front!r}")
+    if "1. АКТУАЛЬНЫЙ РАЗДЕЛ\t4" not in front:
+        return _result(False, f"actual uppercase body chapter missing from TOC: {front!r}")
+    return _result(True, "exact intro entries and double old TOC blocks are removed")
 
 
 def test_autotoc_missing_contents_inserted_before_real_intro() -> tuple[bool, str]:
@@ -611,7 +692,27 @@ def test_autotoc_heading2_has_no_left_indent() -> tuple[bool, str]:
         return _result(False, "heading2 TOC entry missing")
     if _paragraph_left_indent_twips(p) not in (None, "0"):
         return _result(False, f"heading2 TOC entry has left indent: {_paragraph_left_indent_twips(p)!r}")
+    h1 = _toc_entry_paragraph(out, "1. Теоретические основы")
+    if h1 is None:
+        return _result(False, "heading1 TOC entry missing")
+    if _paragraph_left_indent_twips(h1) != _paragraph_left_indent_twips(p):
+        return _result(False, "heading1 and heading2 TOC entries have different left indents")
     return _result(True, "heading2 TOC entry has no left indent")
+
+
+def test_autotoc_entries_have_zero_indent_and_one_point_five_spacing() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    for p in out.paragraphs:
+        if "\t" not in (p.text or ""):
+            continue
+        fmt = p.paragraph_format
+        if fmt.left_indent is not None and fmt.left_indent.twips != 0:
+            return _result(False, f"left indent is not zero for {p.text!r}: {fmt.left_indent.twips}")
+        if fmt.first_line_indent is not None and fmt.first_line_indent.twips != 0:
+            return _result(False, f"first line indent is not zero for {p.text!r}: {fmt.first_line_indent.twips}")
+        if fmt.line_spacing != 1.5:
+            return _result(False, f"line spacing is not 1.5 for {p.text!r}: {fmt.line_spacing!r}")
+    return _result(True, "TOC entries have zero paragraph indent and 1.5 line spacing")
 
 
 def test_autotoc_entries_use_dot_leader_tab_not_manual_dots() -> tuple[bool, str]:
@@ -624,6 +725,126 @@ def test_autotoc_entries_use_dot_leader_tab_not_manual_dots() -> tuple[bool, str
         if not _paragraph_has_right_dot_tab(p):
             return _result(False, f"TOC entry lacks right dot tab stop: {p.text!r}")
     return _result(True, "TOC entries use tab-stop dot leaders, not manual dots")
+
+
+def test_autotoc_uses_body_heading_register() -> tuple[bool, str]:
+    doc = _make_autotoc_doc(old_heading="Содержание")
+    for p in doc.paragraphs:
+        if p.text == "1. Теоретические основы":
+            p.text = "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ"
+            break
+    out = _run_static_contents_rebuild(
+        doc,
+        [
+            ("ВВЕДЕНИЕ", 3),
+            ("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ", 4),
+            ("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек", 5),
+            ("ЗАКЛЮЧЕНИЕ", 8),
+            ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 9),
+        ],
+    )
+    front = _toc_texts_before_intro(out)
+    if "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ\t4" not in front:
+        return _result(False, f"chapter heading register was not copied from body: {front!r}")
+    return _result(True, "TOC chapter entry keeps formatted body heading register")
+
+
+def test_autotoc_normal_numbered_body_paragraph_is_excluded() -> tuple[bool, str]:
+    doc = _make_autotoc_doc(old_heading="Содержание")
+    for idx, p in enumerate(doc.paragraphs):
+        if p.text == "Текст подраздела.":
+            doc.paragraphs[idx]._element.addnext(doc.add_paragraph("1. Маркетинговый подход. Данный подход применяется в анализе.")._element)
+            break
+    out = _run_static_contents_rebuild(doc, _default_autotoc_lines())
+    front = _toc_texts_before_intro(out)
+    if any("Маркетинговый подход" in text for text in front):
+        return _result(False, f"normal numbered body paragraph leaked into TOC: {front!r}")
+    return _result(True, "normal numbered body paragraph is excluded from TOC")
+
+
+def test_autotoc_page_resolver_ignores_toc_page_heading_echoes() -> tuple[bool, str]:
+    rendered_lines = [
+        ("СОДЕРЖАНИЕ", 2),
+        ("ВВЕДЕНИЕ", 2),
+        ("1. Теоретические основы", 2),
+        ("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек", 2),
+        ("ЗАКЛЮЧЕНИЕ", 2),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 2),
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек", 5),
+        ("ЗАКЛЮЧЕНИЕ", 8),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 9),
+    ]
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), rendered_lines)
+    front = _toc_texts_before_intro(out)
+    expected = {
+        "ВВЕДЕНИЕ\t3",
+        "1. Теоретические основы\t4",
+        "1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек\t5",
+        "ЗАКЛЮЧЕНИЕ\t8",
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\t9",
+    }
+    missing = sorted(expected - set(front))
+    if missing:
+        return _result(False, f"TOC page echoes were used instead of body pages; missing={missing!r}, front={front!r}")
+    return _result(True, "page resolver ignores TOC page heading echoes")
+
+
+def test_autotoc_page_resolver_matches_wrapped_rendered_headings() -> tuple[bool, str]:
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ ИССЛЕДОВАНИЯ", 4),
+        ("ОРГАНИЗАЦИОННОГО ПОКУПАТЕЛЬСКОГО ПОВЕДЕНИЯ", 4),
+        ("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек", 5),
+        ("ЗАКЛЮЧЕНИЕ", 8),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 9),
+    ]
+    doc = _make_autotoc_doc(old_heading="Содержание")
+    for p in doc.paragraphs:
+        if p.text == "1. Теоретические основы":
+            p.text = "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ ИССЛЕДОВАНИЯ ОРГАНИЗАЦИОННОГО ПОКУПАТЕЛЬСКОГО ПОВЕДЕНИЯ"
+            break
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    expected = "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ ИССЛЕДОВАНИЯ ОРГАНИЗАЦИОННОГО ПОКУПАТЕЛЬСКОГО ПОВЕДЕНИЯ\t4"
+    if expected not in front:
+        return _result(False, f"wrapped rendered heading was not resolved: {front!r}")
+    return _result(True, "page resolver matches wrapped rendered headings")
+
+
+def test_autotoc_degenerate_page_mapping_fails_safe() -> tuple[bool, str]:
+    source = _make_autotoc_doc(old_heading="Содержание")
+    changed, out = _run_static_contents_rebuild_result(
+        source,
+        [
+            ("СОДЕРЖАНИЕ", 2),
+            ("ВВЕДЕНИЕ", 2),
+            ("1. Теоретические основы", 2),
+            ("1.1. Длинный подраздел с названием, которое должно переноситься естественно без ручных точек", 2),
+            ("ЗАКЛЮЧЕНИЕ", 2),
+            ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 2),
+        ],
+    )
+    if changed:
+        return _result(False, "degenerate all-TOC-page mapping should fail safe, got changed=True")
+    texts = [p.text for p in out.paragraphs[:6]]
+    if texts[1] != "Содержание":
+        return _result(False, f"original document was not preserved after failed mapping: {texts!r}")
+    return _result(True, "degenerate page mapping fails safe without mutating source")
+
+
+def test_autotoc_entries_are_internal_hyperlinks_to_bookmarks() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    if not _document_has_bookmark(out):
+        return _result(False, "body heading bookmarks were not created")
+    for prefix in ("ВВЕДЕНИЕ", "1. Теоретические основы", "1.1. Длинный подраздел"):
+        p = _toc_entry_paragraph(out, prefix)
+        if p is None:
+            return _result(False, f"TOC entry missing: {prefix}")
+        if not _paragraph_has_internal_hyperlink(p):
+            return _result(False, f"TOC entry is not an internal hyperlink: {p.text!r}")
+    return _result(True, "TOC entries have internal hyperlinks to body heading bookmarks")
 
 
 def test_autotoc_long_heading_uses_same_tab_leader_layout() -> tuple[bool, str]:
@@ -10285,11 +10506,19 @@ def run_all() -> None:
         # Phase 3 ordering-sensitive regression cases keep their baseline order.
         ("TOC | existing Содержание replaced",         test_autotoc_existing_soderzhanie_replaced_by_canonical),
         ("TOC | existing Оглавление replaced",         test_autotoc_existing_oglavlenie_replaced_by_canonical),
+        ("TOC | exact intro old entries removed",      test_autotoc_exact_intro_entry_inside_old_toc_is_removed),
         ("TOC | missing contents inserted",            test_autotoc_missing_contents_inserted_before_real_intro),
         ("TOC | no title page inserts at start",       test_autotoc_no_title_page_inserted_at_document_start),
         ("TOC | appendices general heading only",      test_autotoc_appendices_include_general_heading_only),
         ("TOC | heading2 has no left indent",          test_autotoc_heading2_has_no_left_indent),
+        ("TOC | zero indent and 1.5 spacing",          test_autotoc_entries_have_zero_indent_and_one_point_five_spacing),
         ("TOC | entries use dot leader tab",           test_autotoc_entries_use_dot_leader_tab_not_manual_dots),
+        ("TOC | body heading register",                test_autotoc_uses_body_heading_register),
+        ("TOC | normal numbered body excluded",        test_autotoc_normal_numbered_body_paragraph_is_excluded),
+        ("TOC | resolver ignores TOC echoes",          test_autotoc_page_resolver_ignores_toc_page_heading_echoes),
+        ("TOC | resolver wrapped headings",            test_autotoc_page_resolver_matches_wrapped_rendered_headings),
+        ("TOC | degenerate mapping fails safe",        test_autotoc_degenerate_page_mapping_fails_safe),
+        ("TOC | internal hyperlinks",                  test_autotoc_entries_are_internal_hyperlinks_to_bookmarks),
         ("TOC | long heading tab leader layout",       test_autotoc_long_heading_uses_same_tab_leader_layout),
         # ── P2-a' relaxed row/page matcher tests — registered at tail to
         # avoid shifting the ordinal position of pre-existing E2 tests, which
