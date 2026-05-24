@@ -1229,6 +1229,171 @@ def test_c_apply_table_merging_rebuilds_caption_mismatch() -> tuple[bool, str]:
     return _result(True, "caption-mismatched chain still rebuilt")
 
 
+def test_p0_manual_continuation_numeric_row_only_fragment_is_valid() -> tuple[bool, str]:
+    """P0: valid manual continuations may repeat only the numeric row in the
+    continuation fragment. Do not merge these chains into a malformed table."""
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.1")
+    t1 = doc.add_table(rows=3, cols=4)
+    for c, text in enumerate(["Раздел сайта", "Основная функция", "Значение", "Последствие"]):
+        t1.rows[0].cells[c].text = text
+    for c in range(4):
+        t1.rows[1].cells[c].text = str(c + 1)
+    for c, text in enumerate(["Главная", "Вход", "Представление", "База"]):
+        t1.rows[2].cells[c].text = text
+
+    marker = doc.add_paragraph("Продолжение таблицы 2.2.1")
+    marker.alignment = 2
+
+    t2 = doc.add_table(rows=2, cols=4)
+    for c in range(4):
+        t2.rows[0].cells[c].text = str(c + 1)
+    for c, text in enumerate(["Оферта", "Порядок", "Прозрачность", "Доверие"]):
+        t2.rows[1].cells[c].text = text
+
+    n = apply_table_merging(doc)
+    if n != 0:
+        return _result(False, f"numeric-row-only continuation chain was merged: merges={n}")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 preserved fragments, got {len(doc.tables)}")
+    if [cell.text for cell in doc.tables[1].rows[0].cells] != ["1", "2", "3", "4"]:
+        return _result(False, "continuation numeric row was not preserved as first row")
+    return _result(True, "numeric-row-only continuation fragment is preserved")
+
+
+def test_p0_preserved_manual_chain_synthesizes_missing_numeric_rows() -> tuple[bool, str]:
+    """P0: when a preserved manual chain lacks numeric rows, synthesize them
+    inside both table fragments, directly below each semantic header."""
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation, apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1")
+    t1 = doc.add_table(rows=2, cols=3)
+    for c, text in enumerate(["Страна", "Роль государства", "Вывод"]):
+        t1.rows[0].cells[c].text = text
+    for c, text in enumerate(["Россия", "Регулирует", "Выбор оператора"]):
+        t1.rows[1].cells[c].text = text
+
+    marker = doc.add_paragraph("Продолжение таблицы 1.3.1")
+    marker.alignment = 2
+
+    t2 = doc.add_table(rows=2, cols=3)
+    for c, text in enumerate(["Страна", "Роль государства", "Вывод"]):
+        t2.rows[0].cells[c].text = text
+    for c, text in enumerate(["ЕС", "Задает стандарт", "Совместимость"]):
+        t2.rows[1].cells[c].text = text
+
+    merges = apply_table_merging(doc)
+    repairs = apply_table_continuation(doc)
+    if merges != 0:
+        return _result(False, f"manual chain should be preserved, got merges={merges}")
+    if repairs < 2:
+        return _result(False, f"expected numeric-row repairs in both fragments, got {repairs}")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 preserved fragments, got {len(doc.tables)}")
+    if [cell.text for cell in doc.tables[0].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numeric row missing from first fragment")
+    if [cell.text for cell in doc.tables[1].rows[1].cells] != ["1", "2", "3"]:
+        return _result(False, "numeric row missing from continuation fragment")
+    return _result(True, "missing numeric rows synthesized in both fragments")
+
+
+def test_p0_unsplit_ordinary_table_does_not_get_synthetic_numeric_row() -> tuple[bool, str]:
+    """P0: numeric-row synthesis is scoped to continuation chains only."""
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation, apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    table = doc.add_table(rows=2, cols=3)
+    for c, text in enumerate(["Показатель", "Влияние", "Последствие"]):
+        table.rows[0].cells[c].text = text
+    for c, text in enumerate(["Срок", "Скорость", "Риск"]):
+        table.rows[1].cells[c].text = text
+
+    merges = apply_table_merging(doc)
+    repairs = apply_table_continuation(doc)
+    if merges != 0:
+        return _result(False, f"unsplit table should not be merged, got {merges}")
+    if repairs != 0:
+        return _result(False, f"unsplit table should not be repaired, got {repairs}")
+    if len(doc.tables[0].rows) != 2:
+        return _result(False, f"unsplit table got synthetic row: rows={len(doc.tables[0].rows)}")
+    return _result(True, "unsplit table unchanged")
+
+
+def test_p0_existing_correct_numeric_rows_are_not_duplicated() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation, apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    t1 = doc.add_table(rows=3, cols=3)
+    for c, text in enumerate(["Показатель", "Влияние", "Итог"]):
+        t1.rows[0].cells[c].text = text
+    for c in range(3):
+        t1.rows[1].cells[c].text = str(c + 1)
+    for c, text in enumerate(["A", "B", "C"]):
+        t1.rows[2].cells[c].text = text
+
+    marker = doc.add_paragraph("Продолжение таблицы 1.1.1")
+    marker.alignment = 2
+
+    t2 = doc.add_table(rows=3, cols=3)
+    for c, text in enumerate(["Показатель", "Влияние", "Итог"]):
+        t2.rows[0].cells[c].text = text
+    for c in range(3):
+        t2.rows[1].cells[c].text = str(c + 1)
+    for c, text in enumerate(["D", "E", "F"]):
+        t2.rows[2].cells[c].text = text
+
+    apply_table_merging(doc)
+    apply_table_continuation(doc)
+    numeric = ["1", "2", "3"]
+    if _count_table_rows_with_texts(doc.tables[0], numeric) != 1:
+        return _result(False, "first fragment numeric row was duplicated")
+    if _count_table_rows_with_texts(doc.tables[1], numeric) != 1:
+        return _result(False, "continuation fragment numeric row was duplicated")
+    return _result(True, "existing numeric rows are not duplicated")
+
+
+def test_p0_rybakov_style_221_chain_does_not_merge_into_malformed_table() -> tuple[bool, str]:
+    """P0: Rybakov-style chain has semantic header + numeric row in fragment 1
+    and numeric-row-only continuation. It must remain two tables."""
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.1")
+    t1 = doc.add_table(rows=7, cols=4)
+    for c, text in enumerate(["Раздел сайта", "Основная функция", "Значение для клиента", "Последствие"]):
+        t1.rows[0].cells[c].text = text
+    for c in range(4):
+        t1.rows[1].cells[c].text = str(c + 1)
+    for r in range(2, 7):
+        for c in range(4):
+            t1.rows[r].cells[c].text = f"r{r}c{c}"
+
+    marker = doc.add_paragraph("Продолжение таблицы 2.2.1")
+    marker.alignment = 2
+
+    t2 = doc.add_table(rows=2, cols=4)
+    for c in range(4):
+        t2.rows[0].cells[c].text = str(c + 1)
+    for c, text in enumerate(["Договор-оферта", "Разъяснение порядка", "Снижает неопределенность", "Прозрачность"]):
+        t2.rows[1].cells[c].text = text
+
+    n = apply_table_merging(doc)
+    if n != 0:
+        return _result(False, f"Rybakov-style chain was merged: merges={n}")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected 2 fragments, got {len(doc.tables)}")
+    if _count_table_rows_with_texts(doc.tables[0], ["1", "2", "3", "4"]) != 1:
+        return _result(False, "first fragment numeric row count changed")
+    if _count_table_rows_with_texts(doc.tables[1], ["1", "2", "3", "4"]) != 1:
+        return _result(False, "continuation numeric row count changed")
+    return _result(True, "Rybakov-style numeric-row-only continuation preserved")
+
+
 # ── P1-critical / DEFECT E — enable pageBreakBefore on preserved student marker
 
 def _marker_page_break_before_enabled(marker_p_xml) -> bool:
@@ -1419,6 +1584,184 @@ def test_e_integration_tbl_marker_tbl_marker_has_enabled_break() -> tuple[bool, 
     if val is not None and val not in {"1", "true", "True", "on"}:
         return _result(False, f"<w:pageBreakBefore/> still disabled: w:val={val!r}")
     return _result(True, f"integration: <w:pageBreakBefore/> enabled (w:val={val!r})")
+
+
+# ── P1a — ordinary continuation marker/blank/table anchoring ────────────────
+
+def _body_children(doc: Document) -> list:
+    return list(doc.element.body)
+
+
+def _insert_blank_after_paragraph(p_xml):
+    blank = OxmlElement("w:p")
+    p_xml.addnext(blank)
+    return blank
+
+
+def _build_p1a_blank_chain_doc() -> tuple[Document, object, object]:
+    """Build tbl -> marker -> blank -> tbl with disabled marker anchoring."""
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.2")
+    t1 = doc.add_table(rows=3, cols=3)
+    for c, text in enumerate(["H1", "H2", "H3"]):
+        t1.rows[0].cells[c].text = text
+    for c in range(3):
+        t1.rows[1].cells[c].text = str(c + 1)
+    for c, text in enumerate(["a", "b", "c"]):
+        t1.rows[2].cells[c].text = text
+
+    marker = doc.add_paragraph("Продолжение таблицы 1.2.2")
+    marker.alignment = 2
+    marker.paragraph_format.page_break_before = False
+    marker.paragraph_format.keep_with_next = False
+    blank = _insert_blank_after_paragraph(marker._element)
+
+    t2 = doc.add_table(rows=2, cols=3)
+    for c in range(3):
+        t2.rows[0].cells[c].text = str(c + 1)
+    for c, text in enumerate(["d", "e", "f"]):
+        t2.rows[1].cells[c].text = text
+    return doc, marker._element, blank
+
+
+def test_p1a_marker_blank_table_chain_is_anchored() -> tuple[bool, str]:
+    """P1a: marker + optional blank + continuation table must be one keep chain."""
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc, marker, blank = _build_p1a_blank_chain_doc()
+    apply_table_continuation(doc)
+
+    if not _marker_page_break_before_enabled(marker):
+        return _result(False, "marker pageBreakBefore was not activated")
+    if not _marker_keep_next_enabled(marker):
+        return _result(False, "marker keepNext was not activated")
+    if not _marker_keep_next_enabled(blank):
+        return _result(False, "blank paragraph keepNext was not activated")
+    if _marker_page_break_before_enabled(blank):
+        return _result(False, "blank paragraph should not get active pageBreakBefore")
+    children = _body_children(doc)
+    gap = children.index(doc.tables[1]._tbl) - children.index(doc.tables[0]._tbl)
+    if gap != 3:
+        return _result(False, f"normalizer moved or inserted body nodes; gap={gap}")
+    return _result(True, "tbl -> marker -> blank -> tbl chain is anchored")
+
+
+def test_p1a_disabled_marker_page_break_becomes_active() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc, marker, _blank = _build_p1a_blank_chain_doc()
+    if _marker_page_break_before_enabled(marker):
+        return _result(False, "fixture invariant violated: marker pageBreakBefore already active")
+    apply_table_continuation(doc)
+    if not _marker_page_break_before_enabled(marker):
+        return _result(False, "disabled marker pageBreakBefore remained inactive")
+    return _result(True, "disabled marker pageBreakBefore becomes active")
+
+
+def test_p1a_preserved_manual_chain_normalized_without_merging() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation, apply_table_merging
+
+    doc, marker, blank = _build_p1a_blank_chain_doc()
+    merges = apply_table_merging(doc)
+    repairs = apply_table_continuation(doc)
+
+    if merges != 0:
+        return _result(False, f"manual chain was merged: merges={merges}")
+    if len(doc.tables) != 2:
+        return _result(False, f"expected preserved two-table chain, got {len(doc.tables)} tables")
+    if not _marker_page_break_before_enabled(marker) or not _marker_keep_next_enabled(marker):
+        return _result(False, "preserved marker was not anchored")
+    if not _marker_keep_next_enabled(blank):
+        return _result(False, "preserved chain blank was not chained")
+    if repairs < 1:
+        return _result(False, f"expected at least one anchoring repair, got {repairs}")
+    return _result(True, "preserved manual chain normalized without merging")
+
+
+def test_p1a_appendix_continuation_label_not_modified() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    first = doc.add_table(rows=2, cols=2)
+    first.rows[0].cells[0].text = "H1"
+    first.rows[0].cells[1].text = "H2"
+    first.rows[1].cells[0].text = "a"
+    first.rows[1].cells[1].text = "b"
+    label = doc.add_paragraph("ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ 1")
+    label.alignment = 2
+    label.paragraph_format.page_break_before = False
+    label.paragraph_format.keep_with_next = False
+    second = doc.add_table(rows=2, cols=2)
+    second.rows[0].cells[0].text = "1"
+    second.rows[0].cells[1].text = "2"
+    second.rows[1].cells[0].text = "c"
+    second.rows[1].cells[1].text = "d"
+
+    before = label._element.find(qn("w:pPr")).xml
+    apply_table_continuation(doc)
+    after = label._element.find(qn("w:pPr")).xml
+    if before != after:
+        return _result(False, "appendix continuation label XML was modified by ordinary normalizer")
+    return _result(True, "appendix continuation label is not modified")
+
+
+def test_p1a_numeric_rows_stay_unchanged_after_anchoring() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc, _marker, _blank = _build_p1a_blank_chain_doc()
+    before_first = _count_table_rows_with_texts(doc.tables[0], ["1", "2", "3"])
+    before_second = _count_table_rows_with_texts(doc.tables[1], ["1", "2", "3"])
+    apply_table_continuation(doc)
+    after_first = _count_table_rows_with_texts(doc.tables[0], ["1", "2", "3"])
+    after_second = _count_table_rows_with_texts(doc.tables[1], ["1", "2", "3"])
+    if (before_first, before_second) != (1, 1):
+        return _result(False, "fixture invariant violated: numeric rows missing before normalizer")
+    if (after_first, after_second) != (1, 1):
+        return _result(False, f"numeric rows changed: first={after_first}, second={after_second}")
+    return _result(True, "numeric rows unchanged after anchoring normalizer")
+
+
+def _p1a_rendered_chain_nodes(doc: Document, marker_text: str):
+    children = _body_children(doc)
+    for idx, child in enumerate(children):
+        if child.tag != qn("w:p"):
+            continue
+        text = "".join(t.text or "" for t in child.findall(".//" + qn("w:t"))).strip()
+        if text != marker_text:
+            continue
+        prev_node = children[idx - 1] if idx > 0 else None
+        next_node = children[idx + 1] if idx + 1 < len(children) else None
+        blank_node = None
+        table_node = next_node
+        if next_node is not None and next_node.tag == qn("w:p") and not _paragraph_text(next_node):
+            blank_node = next_node
+            table_node = children[idx + 2] if idx + 2 < len(children) else None
+        return prev_node, child, blank_node, table_node
+    return None, None, None, None
+
+
+def _p1a_assert_rendered_chain_anchored(
+    doc: Document,
+    marker_text: str,
+    *,
+    require_blank: bool,
+) -> tuple[bool, str]:
+    prev_node, marker_node, blank_node, table_node = _p1a_rendered_chain_nodes(doc, marker_text)
+    if marker_node is None:
+        return _result(False, f"marker not found: {marker_text!r}")
+    if prev_node is None or prev_node.tag != qn("w:tbl"):
+        return _result(False, "marker is not immediately after the first table")
+    if table_node is None or table_node.tag != qn("w:tbl"):
+        return _result(False, "continuation table is not after marker/blank")
+    if require_blank and blank_node is None:
+        return _result(False, "required blank paragraph is missing")
+    if not _marker_page_break_before_enabled(marker_node):
+        return _result(False, "rendered marker pageBreakBefore is not active")
+    if not _marker_keep_next_enabled(marker_node):
+        return _result(False, "rendered marker keepNext is not active")
+    if blank_node is not None and not _marker_keep_next_enabled(blank_node):
+        return _result(False, "rendered blank paragraph keepNext is not active")
+    return _result(True, "rendered continuation chain is anchored")
 
 
 # ── P1-c / DEFECT B — detached source/note: fallback split last data row ─────
@@ -1631,14 +1974,70 @@ def test_p1c_apply_split_inserts_continuation_marker_and_numbered_row() -> tuple
     return _result(True, "split applied: marker + numbered row + source/note retained")
 
 
+def test_p1a_p1c_rendered_split_anchors_marker_blank_chain() -> tuple[bool, str]:
+    """P1a: P1-c rendered source/note split must persist marker+blank anchoring."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc, row_texts = _build_p1c_doc(rows=4)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "p1c_rendered_anchor.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "p1c_rendered_anchor.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
+        old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode = os.environ.get("KPFU_MARKER_SPLIT_MODE")
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        try:
+            os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: _build_p1c_pdf_lines(
+                row_texts, last_row_page=5, source_note_page=6,
+            )
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            if old_enable is None:
+                os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_ENABLE_MARKER_SPLIT"] = old_enable
+            if old_apply is None:
+                os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
+            else:
+                os.environ["KPFU_APPLY_MARKER_SPLIT"] = old_apply
+            if old_mode is None:
+                os.environ.pop("KPFU_MARKER_SPLIT_MODE", None)
+            else:
+                os.environ["KPFU_MARKER_SPLIT_MODE"] = old_mode
+
+        out = Document(str(path))
+
+    if n != 1:
+        return _result(False, f"expected one P1-c rendered split, got {n}")
+    ok, msg = _p1a_assert_rendered_chain_anchored(
+        out, "Продолжение таблицы 2.1.2", require_blank=True,
+    )
+    if not ok:
+        return _result(False, msg)
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2"]) != 1:
+        return _result(False, "first P1-c fragment numeric row changed or duplicated")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2"]) != 1:
+        return _result(False, "second P1-c fragment numeric row changed or duplicated")
+    return _result(True, "P1-c rendered split chain is anchored")
+
+
 def test_p1c_double_run_idempotent_via_natural_skips() -> tuple[bool, str]:
     """P1-c idempotency: after split, a second detection pass produces no
-    candidates. tbl1 of the chain is skipped via `no_source_note` (it is now
-    followed by the continuation marker, not a source/note line). tbl2 is
-    skipped via `no_safe_data_row` (the formatter-built continuation fragment
-    has only numbered_row + 1 data row = 2 rows, below the 3-row threshold).
-    These two natural skips guarantee idempotency without relying on the
-    strict manual-chain validator.
+    candidates. The chain may be protected by the manual-chain detector after
+    P0 numeric-row validation, or by the natural no-source/no-caption/small
+    continuation-fragment skips. Either path is idempotent.
     """
     from guides.coursework_kfu_2025.table_continuation import (
         _build_continuation_para,
@@ -1655,8 +2054,8 @@ def test_p1c_double_run_idempotent_via_natural_skips() -> tuple[bool, str]:
         header_rows=1, numbered_header=True, appendix_table=False,
         continuation_paragraph_builder=_build_continuation_para,
     )
-    # Re-detect on the now-split doc; pass whatever manual_chain_ids the strict
-    # validator yields (likely empty due to numbered-row vs header mismatch).
+    # Re-detect on the now-split doc; P0 recognizes numeric-row-only
+    # continuation fragments as protected manual chains.
     chain_ids = _valid_manual_continuation_table_ids(doc)
     fake_lines = _build_p1c_pdf_lines(row_texts, last_row_page=5, source_note_page=6)
     candidates, skips = _collect_source_note_detachment_candidates(
@@ -1664,19 +2063,18 @@ def test_p1c_double_run_idempotent_via_natural_skips() -> tuple[bool, str]:
     )
     if candidates:
         return _result(False, f"second pass produced unexpected candidates: {candidates!r}")
-    # Verify natural skip reasons present for both fragments.
     reasons = {ti: r for ti, r in skips}
-    if reasons.get(0) != "no_source_note":
-        return _result(False, f"expected tbl1 skip='no_source_note', got {reasons.get(0)!r}")
+    if reasons.get(0) not in {"already_in_manual_chain", "no_source_note"}:
+        return _result(False, f"expected tbl1 idempotent skip, got {reasons.get(0)!r}")
     # tbl2 (the continuation fragment) is preceded by the right-aligned
     # "Продолжение таблицы 2.1.2" marker, NOT by a standard "Таблица X.Y.Z"
     # caption — so `_find_caption_number_before_table` returns None and the
     # fragment is skipped via `no_caption`. Either skip is acceptable for
     # idempotency, but no_caption is what `_find_caption_number_before_table`
     # produces in this layout.
-    if reasons.get(1) not in {"no_caption", "no_safe_data_row"}:
-        return _result(False, f"expected tbl2 skip in {{no_caption, no_safe_data_row}}, got {reasons.get(1)!r}")
-    return _result(True, f"second pass idempotent (tbl1=no_source_note, tbl2={reasons.get(1)})")
+    if reasons.get(1) not in {"already_in_manual_chain", "no_caption", "no_safe_data_row"}:
+        return _result(False, f"expected tbl2 idempotent skip, got {reasons.get(1)!r}")
+    return _result(True, f"second pass idempotent (tbl1={reasons.get(0)}, tbl2={reasons.get(1)})")
 
 
 # ── P2-a — appendix continuation for table-based appendices ──────────────────
@@ -2936,6 +3334,80 @@ def test_c_rendered_split_marker_is_right_aligned() -> tuple[bool, str]:
     if sz is None or sz.get(qn("w:val")) != "28":
         return _result(False, "marker font size is not 14pt")
     return _result(True, "generated marker formatting is correct")
+
+
+def test_p1a_legacy_rendered_split_runs_post_normalizer() -> tuple[bool, str]:
+    """P1a: legacy rendered split must normalize the generated marker before save."""
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    doc = Document()
+    inline = doc.add_paragraph(
+        "Обычная фраза с Продолжение таблицы 9.9.9 внутри текста."
+    )
+    inline.paragraph_format.page_break_before = False
+    inline.paragraph_format.keep_with_next = False
+    doc.add_paragraph("Таблица 2.6")
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "H1"
+    tbl.rows[0].cells[1].text = "H2"
+    tbl.rows[1].cells[0].text = "alpha"
+    tbl.rows[1].cells[1].text = "beta"
+    tbl.rows[2].cells[0].text = "gamma"
+    tbl.rows[2].cells[1].text = "delta"
+
+    def disabled_marker_builder(text: str):
+        p = old_builder(text)
+        p_pr = p.find(qn("w:pPr"))
+        for prop_name in ("pageBreakBefore", "keepNext"):
+            prop = p_pr.find(qn(f"w:{prop_name}"))
+            if prop is not None:
+                prop.set(qn("w:val"), "0")
+        return p
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "legacy_anchor.docx"
+        pdf_dir = Path(tmp) / "pdf"
+        pdf_dir.mkdir()
+        pdf_path = pdf_dir / "legacy_anchor.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        doc.save(path)
+
+        old_render = tc.render_docx_to_pdf
+        old_analyze = tc.analyze_pdf_lines
+        old_builder = tc._build_continuation_para
+        try:
+            tc.render_docx_to_pdf = lambda _path: pdf_path
+            tc.analyze_pdf_lines = lambda _path: [
+                PdfLine("H1 H2", 1, 100.0, 112.0),
+                PdfLine("alpha beta", 1, 120.0, 132.0),
+                PdfLine("gamma delta", 2, 80.0, 92.0),
+            ]
+            tc._build_continuation_para = disabled_marker_builder
+            n = tc.apply_rendered_table_continuation(path)
+        finally:
+            tc.render_docx_to_pdf = old_render
+            tc.analyze_pdf_lines = old_analyze
+            tc._build_continuation_para = old_builder
+
+        reread = Document(str(path))
+
+    if n != 1:
+        return _result(False, f"expected one legacy rendered split, got {n}")
+    ok, msg = _p1a_assert_rendered_chain_anchored(
+        reread, "Продолжение таблицы 2.6", require_blank=False,
+    )
+    if not ok:
+        return _result(False, msg)
+    inline_after = next(
+        p for p in reread.paragraphs
+        if "Продолжение таблицы 9.9.9 внутри текста" in (p.text or "")
+    )
+    if _marker_page_break_before_enabled(inline_after._element):
+        return _result(False, "inline prose received active pageBreakBefore")
+    if _marker_keep_next_enabled(inline_after._element):
+        return _result(False, "inline prose received active keepNext")
+    return _result(True, "legacy rendered split normalized marker without touching inline prose")
 
 
 def test_c_rendered_split_caption_number_and_fallback() -> tuple[bool, str]:
@@ -9982,6 +10454,15 @@ def test_e2_continuation_label_has_blank_after_before_table() -> tuple[bool, str
         return _result(False, f"marker text not as expected: {marker_text!r}")
     if blank_text:
         return _result(False, f"blank paragraph is not empty: {blank_text!r}")
+    ok, msg = _p1a_assert_rendered_chain_anchored(
+        out, "Продолжение таблицы 1.2.3", require_blank=True,
+    )
+    if not ok:
+        return _result(False, msg)
+    if _count_table_rows_with_texts(out.tables[0], ["1", "2", "3"]) != 1:
+        return _result(False, "first marker-split fragment numeric row changed or duplicated")
+    if _count_table_rows_with_texts(out.tables[1], ["1", "2", "3"]) != 1:
+        return _result(False, "second marker-split fragment numeric row changed or duplicated")
     return _result(True, "ordinary continuation has tbl → marker → blank → tbl")
 
 
@@ -10278,11 +10759,21 @@ def run_all() -> None:
         ("C  | keep valid manual split",               test_c_apply_table_merging_keeps_valid_manual_split),
         ("C  | keep loose manual marker (no keepNext)", test_c_apply_table_merging_keeps_marker_without_keep_next),
         ("C  | rebuild caption-mismatch chain",         test_c_apply_table_merging_rebuilds_caption_mismatch),
+        ("P0 | numeric-row-only continuation valid",     test_p0_manual_continuation_numeric_row_only_fragment_is_valid),
+        ("P0 | synthesize missing manual NUM rows",      test_p0_preserved_manual_chain_synthesizes_missing_numeric_rows),
+        ("P0 | unsplit table unchanged",                 test_p0_unsplit_ordinary_table_does_not_get_synthetic_numeric_row),
+        ("P0 | existing NUM rows not duplicated",        test_p0_existing_correct_numeric_rows_are_not_duplicated),
+        ("P0 | Rybakov 2.2.1 chain not merged",          test_p0_rybakov_style_221_chain_does_not_merge_into_malformed_table),
         ("E  | student marker enables pageBreakBefore", test_e_preserved_student_marker_enables_page_break_before),
         ("E  | enable pageBreakBefore is idempotent",   test_e_page_break_enable_is_idempotent),
         ("E  | formatter-authored chain not modified",  test_e_formatter_authored_chain_with_keepnext_not_modified),
         ("E  | preserved marker keeps alignment+text",  test_e_preserved_marker_keeps_alignment_and_text),
         ("E  | integration tbl→marker→tbl enabled pb",  test_e_integration_tbl_marker_tbl_marker_has_enabled_break),
+        ("P1a | marker blank table anchored",           test_p1a_marker_blank_table_chain_is_anchored),
+        ("P1a | disabled marker page break active",     test_p1a_disabled_marker_page_break_becomes_active),
+        ("P1a | preserved manual chain normalized",     test_p1a_preserved_manual_chain_normalized_without_merging),
+        ("P1a | appendix label not modified",           test_p1a_appendix_continuation_label_not_modified),
+        ("P1a | numeric rows unchanged",                test_p1a_numeric_rows_stay_unchanged_after_anchoring),
         ("P1c | detached source/note detected",         test_p1c_detects_detached_source_note),
         ("P1c | attached source/note → not_detached",   test_p1c_skip_when_source_note_attached_same_page),
         ("P1c | no caption skipped",                    test_p1c_skip_no_caption),
@@ -10291,6 +10782,7 @@ def run_all() -> None:
         ("P1c | already in manual chain skipped",       test_p1c_skip_already_in_manual_chain),
         ("P1c | render probe unreliable skipped",       test_p1c_skip_render_probe_unreliable),
         ("P1c | split inserts marker + numbered row",   test_p1c_apply_split_inserts_continuation_marker_and_numbered_row),
+        ("P1a | P1c rendered split anchored",           test_p1a_p1c_rendered_split_anchors_marker_blank_chain),
         ("P1c | idempotent via natural skip reasons",   test_p1c_double_run_idempotent_via_natural_skips),
         ("P2a | multi-page appendix table detected",    test_p2a_detects_multipage_appendix_table),
         ("P2a | non-appendix table skipped",            test_p2a_skip_non_appendix_table),
@@ -10322,6 +10814,7 @@ def run_all() -> None:
         ("C  | rendered ambiguity skip",               test_c_rendered_split_skips_ambiguous_repeated_rows),
         ("C  | rendered merged-boundary skip",         test_c_rendered_split_skips_merged_boundary_conflict),
         ("C  | rendered marker formatting",            test_c_rendered_split_marker_is_right_aligned),
+        ("P1a | legacy rendered split post-normalized", test_p1a_legacy_rendered_split_runs_post_normalizer),
         ("C  | rendered caption number/fallback",      test_c_rendered_split_caption_number_and_fallback),
         ("C  | rendered whole-table move",             test_c_rendered_start_page_moves_whole_table_without_complete_data_row),
         ("C  | rendered first-row spill move",         test_c_rendered_start_page_first_row_spill_moves_whole_table),

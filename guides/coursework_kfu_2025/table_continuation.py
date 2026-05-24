@@ -518,6 +518,139 @@ def _row_cell_texts(tr_xml) -> list[str]:
     return vals
 
 
+def _row_is_simple_full_width(tr_xml, col_count: int) -> bool:
+    if col_count <= 0:
+        return False
+    cells = tr_xml.findall(qn("w:tc"))
+    if len(cells) != col_count:
+        return False
+    for tc in cells:
+        tc_pr = tc.find(qn("w:tcPr"))
+        if tc_pr is not None and (
+            tc_pr.find(qn("w:gridSpan")) is not None
+            or tc_pr.find(qn("w:vMerge")) is not None
+        ):
+            return False
+    return True
+
+
+def _row_is_exact_numeric_row(tr_xml, col_count: int) -> bool:
+    if not _row_is_simple_full_width(tr_xml, col_count):
+        return False
+    return _row_cell_texts(tr_xml) == [str(i) for i in range(1, col_count + 1)]
+
+
+def _row_looks_numeric_but_malformed(tr_xml, col_count: int) -> bool:
+    if not _row_is_simple_full_width(tr_xml, col_count):
+        return False
+    values = _row_cell_texts(tr_xml)
+    if not values:
+        return False
+    if not all(re.fullmatch(r"\d+", value or "") for value in values):
+        return False
+    return values != [str(i) for i in range(1, col_count + 1)]
+
+
+def _manual_chain_rows_compatible(tbl1, tbl2) -> bool:
+    col_count = _table_col_count(tbl1)
+    if col_count <= 0 or _table_col_count(tbl2) != col_count:
+        return False
+
+    rows1 = tbl1.findall(qn("w:tr"))
+    rows2 = tbl2.findall(qn("w:tr"))
+    if not rows1 or not rows2 or not _tbl_has_at_least_two_rows(tbl2):
+        return False
+
+    if _rows_match(rows1[0], rows2[0]):
+        return True
+
+    # Manual KFU continuations often omit the semantic header in continuation
+    # fragments and repeat only the numeric column row before continuation data.
+    return (
+        len(rows1) > 1
+        and _row_is_exact_numeric_row(rows1[1], col_count)
+        and _row_is_exact_numeric_row(rows2[0], col_count)
+    )
+
+
+def _clear_cell_content_preserving_properties(tc_xml) -> None:
+    tc_pr = tc_xml.find(qn("w:tcPr"))
+    for child in list(tc_xml):
+        tc_xml.remove(child)
+    if tc_pr is not None:
+        tc_xml.append(tc_pr)
+
+
+def _build_numeric_row_from_header(header_row_xml, col_count: int):
+    if not _row_is_simple_full_width(header_row_xml, col_count):
+        raise ValueError("numeric row synthesis requires simple full-width header")
+    numeric_row = deepcopy(header_row_xml)
+    for idx, tc in enumerate(numeric_row.findall(qn("w:tc")), start=1):
+        _clear_cell_content_preserving_properties(tc)
+        p = OxmlElement("w:p")
+        p_pr = OxmlElement("w:pPr")
+        jc = OxmlElement("w:jc")
+        jc.set(qn("w:val"), "center")
+        p_pr.append(jc)
+        p.append(p_pr)
+
+        r = OxmlElement("w:r")
+        r_pr = OxmlElement("w:rPr")
+        fonts = OxmlElement("w:rFonts")
+        fonts.set(qn("w:ascii"), "Times New Roman")
+        fonts.set(qn("w:hAnsi"), "Times New Roman")
+        fonts.set(qn("w:cs"), "Times New Roman")
+        r_pr.append(fonts)
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), "24")
+        r_pr.append(sz)
+        sz_cs = OxmlElement("w:szCs")
+        sz_cs.set(qn("w:val"), "24")
+        r_pr.append(sz_cs)
+        r.append(r_pr)
+
+        t = OxmlElement("w:t")
+        t.text = str(idx)
+        r.append(t)
+        p.append(r)
+        tc.append(p)
+    return numeric_row
+
+
+def _ensure_fragment_numeric_row(tbl_xml) -> tuple[int, str | None]:
+    col_count = _table_col_count(tbl_xml)
+    if col_count <= 0:
+        return 0, "no_columns"
+    rows = tbl_xml.findall(qn("w:tr"))
+    if len(rows) < 2:
+        return 0, "no_data_row"
+
+    if _row_is_exact_numeric_row(rows[0], col_count):
+        return 0, None
+    if _row_looks_numeric_but_malformed(rows[0], col_count):
+        return 0, "malformed_numeric_row"
+    if _row_is_exact_numeric_row(rows[1], col_count):
+        return 0, None
+    if _row_looks_numeric_but_malformed(rows[1], col_count):
+        return 0, "malformed_numeric_row"
+    if not _row_is_simple_full_width(rows[0], col_count):
+        return 0, "complex_header"
+
+    rows[0].addnext(_build_numeric_row_from_header(rows[0], col_count))
+    return 1, None
+
+
+def _ensure_manual_chain_numeric_rows(tbl1, tbl2) -> tuple[int, list[str]]:
+    repairs = 0
+    reasons: list[str] = []
+    for label, tbl_xml in (("first", tbl1), ("continuation", tbl2)):
+        changed, reason = _ensure_fragment_numeric_row(tbl_xml)
+        repairs += changed
+        if reason:
+            reasons.append(f"{label}:{reason}")
+    return repairs, reasons
+
+
 _NESTED_TABLE_HEADER_PREFIXES = (
     ("уровень", "формальные органы", "неформальные практики", "основные функции"),
 )
@@ -762,13 +895,86 @@ def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
             i += 1
             continue
 
-        if _is_valid_manual_continuation_chain(doc, prev_node, node, next_node):
+        if (
+            _is_valid_manual_continuation_chain(doc, prev_node, node, next_node)
+            or _is_structurally_valid_student_chain(doc, prev_node, node, next_node)
+        ):
             skip.add(id(prev_node))
             skip.add(id(next_node))
 
         i += 1
 
     return skip
+
+
+def _repair_manual_continuation_numeric_rows(doc: Document) -> int:
+    """Ensure numeric column rows inside already-recognized continuation chains.
+
+    Conservative scope: this scans only `tbl -> Продолжение таблицы -> tbl`
+    chains (with the existing optional one blank paragraph before table 2).
+    Ordinary unsplit tables are not considered.
+    """
+    body = doc.element.body
+    children = list(body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+
+    def _is_empty_p(elem) -> bool:
+        if elem.tag != qn("w:p"):
+            return False
+        p_obj = para_by_xml.get(elem)
+        return p_obj is not None and not _norm_text(p_obj.text or "")
+
+    repaired = 0
+    i = 1
+    while i < len(children) - 1:
+        prev_node = children[i - 1]
+        node = children[i]
+
+        if prev_node.tag != qn("w:tbl") or node.tag != qn("w:p"):
+            i += 1
+            continue
+
+        p_obj = para_by_xml.get(node)
+        marker_text = _norm_text(p_obj.text if p_obj is not None else "")
+        if not _is_any_continuation_marker(marker_text):
+            i += 1
+            continue
+
+        next_idx = i + 1
+        if next_idx < len(children) and _is_empty_p(children[next_idx]):
+            next_idx += 1
+        if next_idx >= len(children):
+            i += 1
+            continue
+        next_node = children[next_idx]
+        if next_node.tag != qn("w:tbl"):
+            i += 1
+            continue
+
+        if not (
+            _is_valid_manual_continuation_chain(doc, prev_node, node, next_node)
+            or _is_structurally_valid_student_chain(doc, prev_node, node, next_node)
+        ):
+            i += 1
+            continue
+
+        changed, reasons = _ensure_manual_chain_numeric_rows(prev_node, next_node)
+        if changed:
+            repaired += changed
+            logger.info(
+                "manual_continuation_numeric_rows_repaired marker=%s rows=%s",
+                marker_text,
+                changed,
+            )
+        for reason in reasons:
+            logger.info(
+                "manual_continuation_numeric_rows_skipped marker=%s reason=%s",
+                marker_text,
+                reason,
+            )
+        i += 1
+
+    return repaired
 
 
 def _paragraph_text_from_xml(p_xml) -> str:
@@ -870,11 +1076,7 @@ def _is_valid_manual_continuation_chain(doc: Document, tbl1, marker_p, tbl2) -> 
     if not _paragraph_has_keep_next(marker_p):
         return False
 
-    compatible = _table_col_count(tbl1) == _table_col_count(tbl2) and _table_col_count(tbl1) > 0
-    rows1 = tbl1.findall(qn("w:tr"))
-    rows2 = tbl2.findall(qn("w:tr"))
-    headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
-    return compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
+    return _manual_chain_rows_compatible(tbl1, tbl2)
 
 
 def _is_structurally_valid_student_chain(doc: Document, tbl1, marker_p, tbl2) -> bool:
@@ -892,11 +1094,7 @@ def _is_structurally_valid_student_chain(doc: Document, tbl1, marker_p, tbl2) ->
     if not _paragraph_is_right_aligned(marker_p):
         return False
 
-    compatible = _table_col_count(tbl1) == _table_col_count(tbl2) and _table_col_count(tbl1) > 0
-    rows1 = tbl1.findall(qn("w:tr"))
-    rows2 = tbl2.findall(qn("w:tr"))
-    headers_match = bool(rows1 and rows2 and _rows_match(rows1[0], rows2[0]))
-    return compatible and headers_match and _tbl_has_at_least_two_rows(tbl2)
+    return _manual_chain_rows_compatible(tbl1, tbl2)
 
 
 def _marker_has_enabled_page_break(marker_p) -> bool:
@@ -913,6 +1111,29 @@ def _marker_has_enabled_page_break(marker_p) -> bool:
     return val is None or val in {"1", "true", "True", "on"}
 
 
+def _ensure_paragraph_bool_property_active(p_xml, prop_name: str, *, prepend: bool = False) -> bool:
+    pPr = p_xml.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        p_xml.insert(0, pPr)
+
+    props = pPr.findall(qn(prop_name))
+    changed = False
+    if props:
+        for prop in props:
+            if qn("w:val") in prop.attrib:
+                del prop.attrib[qn("w:val")]
+                changed = True
+        return changed
+
+    new_prop = OxmlElement(prop_name)
+    if prepend:
+        pPr.insert(0, new_prop)
+    else:
+        pPr.append(new_prop)
+    return True
+
+
 def _enable_marker_page_break_for_student_chain(marker_p) -> None:
     # P1-critical / DEFECT E: Phase 1 `hard_reset_paragraph_format` neutralizes
     # `<w:pageBreakBefore/>` and `<w:keepNext/>` on the marker paragraph by
@@ -926,28 +1147,78 @@ def _enable_marker_page_break_for_student_chain(marker_p) -> None:
     # Replicate that XML shape on preserved student markers: strip the
     # disabling w:val from existing elements, or insert fresh enabled ones.
     # Idempotent.
-    pPr = marker_p.find(qn("w:pPr"))
-    if pPr is None:
-        pPr = OxmlElement("w:pPr")
-        marker_p.insert(0, pPr)
+    _ensure_paragraph_bool_property_active(marker_p, "w:pageBreakBefore", prepend=True)
+    _ensure_paragraph_bool_property_active(marker_p, "w:keepNext")
 
-    # Enable pageBreakBefore.
-    pbs = pPr.findall(qn("w:pageBreakBefore"))
-    if pbs:
-        for pb in pbs:
-            if qn("w:val") in pb.attrib:
-                del pb.attrib[qn("w:val")]
-    else:
-        pPr.insert(0, OxmlElement("w:pageBreakBefore"))
 
-    # Enable keepNext so the marker stays glued to the continuation table.
-    kns = pPr.findall(qn("w:keepNext"))
-    if kns:
-        for kn in kns:
-            if qn("w:val") in kn.attrib:
-                del kn.attrib[qn("w:val")]
-    else:
-        pPr.append(OxmlElement("w:keepNext"))
+def _normalise_ordinary_continuation_anchors(doc: Document) -> int:
+    """Anchor ordinary table continuation marker chains.
+
+    Scope is intentionally narrow: only body-level
+    tbl -> "Продолжение таблицы N" -> [optional blank] -> tbl chains are
+    normalized. Appendix continuation labels are not matched by
+    `_is_any_continuation_marker` and are left untouched.
+    """
+    body = doc.element.body
+    children = list(body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+    changed = 0
+
+    def _is_empty_p(elem) -> bool:
+        if elem.tag != qn("w:p"):
+            return False
+        p_obj = para_by_xml.get(elem)
+        return p_obj is not None and not _norm_text(p_obj.text or "")
+
+    i = 0
+    while i < len(children):
+        marker_node = children[i]
+        if marker_node.tag != qn("w:p"):
+            i += 1
+            continue
+
+        marker_text = _paragraph_text_from_xml(marker_node)
+        if not _is_any_continuation_marker(marker_text):
+            i += 1
+            continue
+
+        prev_is_table = i > 0 and children[i - 1].tag == qn("w:tbl")
+        next_idx = i + 1
+        blank_node = None
+        if next_idx < len(children) and _is_empty_p(children[next_idx]):
+            blank_node = children[next_idx]
+            next_idx += 1
+        if next_idx >= len(children) or children[next_idx].tag != qn("w:tbl"):
+            i += 1
+            continue
+        if not prev_is_table:
+            i += 1
+            continue
+
+        marker_changed = 0
+        if _ensure_paragraph_bool_property_active(marker_node, "w:pageBreakBefore", prepend=True):
+            marker_changed += 1
+        if _ensure_paragraph_bool_property_active(marker_node, "w:keepNext"):
+            marker_changed += 1
+        if marker_changed:
+            changed += marker_changed
+            logger.info(
+                "ordinary_continuation_anchor_marker_normalized marker=%s changes=%s",
+                marker_text,
+                marker_changed,
+            )
+
+        if blank_node is not None:
+            if _ensure_paragraph_bool_property_active(blank_node, "w:keepNext"):
+                changed += 1
+                logger.info(
+                    "ordinary_continuation_anchor_blank_normalized marker=%s",
+                    marker_text,
+                )
+
+        i += 1
+
+    return changed
 
 
 def _row_matches_line(sig: RowSignature, line_text: str) -> bool:
@@ -1850,9 +2121,13 @@ def apply_table_continuation(
     The splitting part is disabled because reliable page-break detection
     requires a rendering engine.  See module docstring for the FUTURE plan.
 
-    Returns the number of tables whose widths were normalised.
-    Does not split tables or insert continuation markers.
+    Returns the number of width normalisations plus manual-chain numeric-row
+    repairs and continuation-anchor normalisations. Does not split tables or
+    insert continuation markers.
     """
+    anchor_repairs = _normalise_ordinary_continuation_anchors(doc)
+    numeric_repairs = _repair_manual_continuation_numeric_rows(doc)
+
     # ── Column-width optimisation (always active) ──────────────────────────
     body_w = _body_width_pt(doc)
     n_col_fixed = 0
@@ -1864,7 +2139,7 @@ def apply_table_continuation(
     if n_col_fixed:
         logger.info("table_continuation: col-width optimised %d table(s)", n_col_fixed)
 
-    return n_col_fixed
+    return n_col_fixed + numeric_repairs + anchor_repairs
 
 
 def _warn_rendered_split_unavailable(
@@ -2352,6 +2627,7 @@ def _ensure_blank_between_marker_and_second_table(doc, first_idx: int) -> bool:
     if marker_node.tag != qn("w:p"):
         return False
     blank = OxmlElement("w:p")
+    _ensure_paragraph_bool_property_active(blank, "w:keepNext")
     marker_node.addnext(blank)
     return True
 
@@ -2409,6 +2685,7 @@ def _apply_marker_split_candidate(
     if not diagnostic.appendix_table:
         _ensure_blank_between_marker_and_second_table(doc, diagnostic.table_index)
 
+    _normalise_ordinary_continuation_anchors(doc)
     doc.save(str(docx_path))
     return result, None
 
@@ -2926,6 +3203,7 @@ def _apply_source_note_detachment_split(
         )
 
     if applied:
+        _normalise_ordinary_continuation_anchors(doc)
         doc.save(str(docx_path))
         logger.info("p1c_source_note_split_summary applied=%s", applied)
     return applied
@@ -3412,6 +3690,7 @@ def apply_rendered_table_continuation(
         )
         return 0
 
+    _normalise_ordinary_continuation_anchors(doc)
     doc.save(str(docx_path))
     logger.info(
         "rendered_final_decision action=rendered_split table_idx=%s split_after=%s",
