@@ -21,10 +21,27 @@ from .pdf_layout_analyzer import analyze_pdf_lines
 
 logger = logging.getLogger(__name__)
 
-_CONTENTS_HEADING_RE = re.compile(r"^\s*(содержание|оглавление)\s*$", re.IGNORECASE)
+_CONTENTS_HEADING_STRICT_RE = re.compile(
+    r"^\s*(содержание|оглавление)\s*$", re.IGNORECASE
+)
+# Accepts trailing punctuation (`.`, `:`, `;`), dot leaders, ellipses, mid-dots
+# and an optional page number — typical malformed TOC heading variants such as
+# "Содержание.", "СОДЕРЖАНИЕ ……… 1", "Оглавление........... 2".
+_CONTENTS_HEADING_LOOSE_RE = re.compile(
+    r"^\s*(содержание|оглавление)"
+    r"\s*[.:;]?"
+    r"[.․‥…·•\s]*"
+    r"\d{0,4}\s*$",
+    re.IGNORECASE,
+)
 _SOURCE_NOTE_RE = re.compile(r"^\s*(источник|составлено по|рассчитано по|примечание)\s*:", re.IGNORECASE)
 _TABLE_RE = re.compile(r"^\s*таблица\s+\d+(?:\.\d+){0,2}\b", re.IGNORECASE)
 _FIGURE_RE = re.compile(r"^\s*(рис\.|рисунок)\s*\d+(?:\.\d+){0,2}\b", re.IGNORECASE)
+
+_TOC_PAGE_TAIL_RE = re.compile(r"[\s.․‥…·•]+\d{1,4}\s*$")
+_APPENDIX_LOCAL_RE = re.compile(r"^приложение\s+(?:\d{1,3}|[a-zа-яё])\b")
+_H1_TOC_ENTRY_RE = re.compile(r"^\d+\.\s+\S")
+_H2_TOC_ENTRY_RE = re.compile(r"^\d+\.\d+\.?\s+\S")
 
 _STRUCTURAL_HEADINGS = {
     "введение": "ВВЕДЕНИЕ",
@@ -48,12 +65,127 @@ def _norm(text: str) -> str:
     return clean_spaces(text).lower().rstrip(".")
 
 
+def _first_paragraph_segment(text: str) -> str:
+    """
+    Return the first non-empty soft-break segment of a paragraph. Old TOC
+    blocks sometimes survive as one paragraph with line-break-separated
+    entries; the first segment is the heading we want to recognize.
+    """
+    cleaned = clean_spaces(text or "")
+    if not cleaned:
+        return ""
+    return re.split(r"[\n\v]+", cleaned, maxsplit=1)[0].strip()
+
+
+def _paragraph_segments(text: str) -> list[str]:
+    cleaned = clean_spaces(text or "")
+    return [s.strip() for s in re.split(r"[\n\v]+", cleaned) if s.strip()]
+
+
 def _is_contents_heading(text: str) -> bool:
-    return bool(_CONTENTS_HEADING_RE.match(clean_spaces(text)))
+    """
+    Pure-text Содержание/Оглавление detector. Tolerant of trailing punctuation,
+    dot leaders, and a trailing page number, and of soft-break-joined input
+    where the heading is the first line. Pure text check only — callers must
+    apply `_paragraph_has_following_toc_evidence` to reject false positives
+    (standalone Содержание-like text that does not lead a real TOC block).
+    """
+    if not text:
+        return False
+    first = _first_paragraph_segment(text)
+    if not first:
+        return False
+    return bool(_CONTENTS_HEADING_LOOSE_RE.match(first))
 
 
 def _is_intro_heading(text: str) -> bool:
     return _norm(text) == "введение"
+
+
+def _is_toc_like_entry(text: str) -> bool:
+    """
+    True when *text* (a single non-empty line) reads like a TOC entry:
+    a structural heading (ВВЕДЕНИЕ/ЗАКЛЮЧЕНИЕ/СПИСОК.../ПРИЛОЖЕНИЯ),
+    a numbered chapter or sub-chapter (`1. ...`, `1.1. ...`), or a specific
+    appendix label (`ПРИЛОЖЕНИЕ 1/2/3`). Trailing dot leaders and a trailing
+    page number are tolerated.
+    """
+    t = clean_spaces(text or "").strip()
+    if not t:
+        return False
+    t = _TOC_PAGE_TAIL_RE.sub("", t).strip()
+    if not t:
+        return False
+    low = t.lower().rstrip(".").strip()
+    if low in {"введение", "заключение", "приложения"}:
+        return True
+    if low.startswith("список использованных") or low.startswith("список использованной"):
+        return True
+    if _APPENDIX_LOCAL_RE.match(low):
+        return True
+    if _H2_TOC_ENTRY_RE.match(t):
+        return True
+    if _H1_TOC_ENTRY_RE.match(t):
+        return True
+    return False
+
+
+def _paragraph_has_following_toc_evidence(
+    document: Document, paragraph_text: str, idx: int, upper_bound: int
+) -> bool:
+    """
+    Confirm that a Содержание-like heading paragraph leads a real TOC block by
+    requiring at least one TOC-like entry either inside the same paragraph
+    (soft-break segments) or in one of the subsequent paragraphs up to
+    *upper_bound* exclusive. The scan stops at the next Содержание/Оглавление
+    paragraph so a stray loose-only heading cannot borrow evidence from a
+    later canonical TOC block. Used by body_start computation where the upper
+    bound spans the whole document.
+    """
+    segments = _paragraph_segments(paragraph_text)
+    for seg in segments[1:]:
+        if _is_toc_like_entry(seg):
+            return True
+    paragraphs = document.paragraphs
+    end = min(upper_bound, len(paragraphs))
+    for j in range(idx + 1, end):
+        next_text = paragraphs[j].text or ""
+        if _is_contents_heading(next_text):
+            break
+        for seg in _paragraph_segments(next_text):
+            if _is_toc_like_entry(seg):
+                return True
+    return False
+
+
+def _is_safe_to_remove_pre_body_block(
+    document: Document, paragraph_text: str, idx: int, body_start: int
+) -> bool:
+    """
+    Removal-safety check for a Содержание-like paragraph at *idx*: every
+    paragraph between *idx* (exclusive) and *body_start* (exclusive) must be
+    either blank or TOC-like. This blocks aggressive deletion of unrelated
+    front-matter body text while still allowing removal of an old TOC block
+    that has been emptied of its entries (e.g. побитая Роман — heading +
+    trailing blanks).
+    """
+    segments = _paragraph_segments(paragraph_text)
+    for seg in segments[1:]:
+        if not _is_toc_like_entry(seg):
+            return False
+    paragraphs = document.paragraphs
+    end = min(body_start, len(paragraphs))
+    for j in range(idx + 1, end):
+        next_text = paragraphs[j].text or ""
+        if _is_contents_heading(next_text):
+            break
+        cleaned = clean_spaces(next_text).strip()
+        if not cleaned:
+            continue
+        for seg in _paragraph_segments(next_text):
+            if not _is_toc_like_entry(seg):
+                return False
+    return True
 
 
 def _find_body_start_index_for_contents(document: Document) -> int | None:
@@ -67,11 +199,16 @@ def _find_body_start_index_for_contents(document: Document) -> int | None:
     standalone intro after it.
     """
     paragraphs = document.paragraphs
-    contents_indices = [
-        idx
-        for idx, paragraph in enumerate(paragraphs)
-        if _is_contents_heading(paragraph.text)
-    ]
+    upper = len(paragraphs)
+    contents_indices: list[int] = []
+    for idx, paragraph in enumerate(paragraphs):
+        text = paragraph.text or ""
+        if not _is_contents_heading(text):
+            continue
+        if not _paragraph_has_following_toc_evidence(document, text, idx, upper):
+            continue
+        contents_indices.append(idx)
+
     if contents_indices:
         last_contents_idx = max(contents_indices)
         intro_candidates = [
@@ -270,9 +407,14 @@ def _collect_body_entries(document: Document, body_start: int) -> list[TocEntry]
 
 
 def _find_existing_contents_start(document: Document, body_start: int) -> int | None:
-    for idx, paragraph in enumerate(document.paragraphs[:body_start]):
-        if _is_contents_heading(paragraph.text):
-            return idx
+    paragraphs = document.paragraphs[:body_start]
+    for idx, paragraph in enumerate(paragraphs):
+        text = paragraph.text or ""
+        if not _is_contents_heading(text):
+            continue
+        if not _is_safe_to_remove_pre_body_block(document, text, idx, body_start):
+            continue
+        return idx
     return None
 
 

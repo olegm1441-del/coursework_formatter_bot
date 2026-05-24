@@ -1224,6 +1224,153 @@ def test_autotoc_blank_paragraph_carries_no_tab_or_hyperlink() -> tuple[bool, st
     return _result(True, "blank paragraph has no tab, no hyperlink, no tab stop")
 
 
+# ── Old simple TOC removal (loose detection + validation) ─────────────────
+
+
+def _make_old_simple_toc_doc(
+    *,
+    heading: str = "Содержание",
+    extra_entries: list[str] | None = None,
+    extra_front_paragraphs: list[str] | None = None,
+) -> Document:
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    if extra_front_paragraphs:
+        for text in extra_front_paragraphs:
+            doc.add_paragraph(text)
+    doc.add_paragraph(heading)
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Теоретические основы")
+    doc.add_paragraph("1.1. Подпункт теоретической части")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    if extra_entries:
+        for text in extra_entries:
+            doc.add_paragraph(text)
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    h2 = doc.add_paragraph("1.1. Подпункт теоретической части")
+    h2.style = "Heading 2"
+    doc.add_paragraph("Текст подпункта.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+    return doc
+
+
+_OLD_TOC_RENDERED_LINES: list[tuple[str, int]] = [
+    ("ВВЕДЕНИЕ", 3),
+    ("1. Теоретические основы", 4),
+    ("1.1. Подпункт теоретической части", 5),
+    ("ЗАКЛЮЧЕНИЕ", 7),
+    ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 8),
+]
+
+
+def test_autotoc_old_simple_toc_without_page_numbers_removed() -> tuple[bool, str]:
+    doc = _make_old_simple_toc_doc(heading="Содержание")
+    out = _run_static_contents_rebuild(doc, _OLD_TOC_RENDERED_LINES)
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single СОДЕРЖАНИЕ, front={front!r}")
+    if "Содержание" in front:
+        return _result(False, f"mixed-case old heading survived: {front!r}")
+    canonical_idx = front.index("СОДЕРЖАНИЕ")
+    for above in front[:canonical_idx]:
+        if above in (
+            "ВВЕДЕНИЕ",
+            "1. Теоретические основы",
+            "1.1. Подпункт теоретической части",
+            "ЗАКЛЮЧЕНИЕ",
+            "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+        ):
+            return _result(False, f"old TOC entry survived above canonical: {front!r}")
+    return _result(True, "old plain-text TOC removed; canonical single block")
+
+
+def test_autotoc_old_toc_heading_with_trailing_dot_removed() -> tuple[bool, str]:
+    doc = _make_old_simple_toc_doc(heading="Содержание.")
+    out = _run_static_contents_rebuild(doc, _OLD_TOC_RENDERED_LINES)
+    front = _toc_texts_before_intro(out)
+    if "Содержание." in front:
+        return _result(False, f"trailing-dot TOC heading survived: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ: {front!r}")
+    canonical_idx = front.index("СОДЕРЖАНИЕ")
+    if any(p.startswith("1. Теоретические") for p in front[:canonical_idx]):
+        return _result(False, f"old TOC entries above canonical: {front!r}")
+    return _result(True, "trailing-dot old TOC heading and entries removed")
+
+
+def test_autotoc_old_toc_with_appendix_entries_removed() -> tuple[bool, str]:
+    doc = _make_old_simple_toc_doc(
+        heading="СОДЕРЖАНИЕ",
+        extra_entries=["ПРИЛОЖЕНИЕ 1", "ПРИЛОЖЕНИЕ 2", "ПРИЛОЖЕНИЕ 3"],
+    )
+    out = _run_static_contents_rebuild(doc, _OLD_TOC_RENDERED_LINES)
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single СОДЕРЖАНИЕ: {front!r}")
+    canonical_idx = front.index("СОДЕРЖАНИЕ")
+    for above in front[:canonical_idx]:
+        if above.startswith("ПРИЛОЖЕНИЕ "):
+            return _result(False, f"old appendix entries leaked into front: {front!r}")
+    return _result(True, "old TOC with appendix entries removed cleanly")
+
+
+def test_autotoc_old_toc_heading_with_page_number_removed() -> tuple[bool, str]:
+    doc = _make_old_simple_toc_doc(heading="СОДЕРЖАНИЕ ……………… 1")
+    out = _run_static_contents_rebuild(doc, _OLD_TOC_RENDERED_LINES)
+    front = _toc_texts_before_intro(out)
+    if any(p == "СОДЕРЖАНИЕ ……………… 1" for p in front):
+        return _result(False, f"leader-style old TOC heading survived: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ: {front!r}")
+    return _result(True, "old TOC heading with leaders + page number removed")
+
+
+def test_autotoc_standalone_loose_contents_paragraph_does_not_delete_body() -> tuple[bool, str]:
+    """
+    A loose Содержание-like paragraph that does NOT lead a real TOC block must
+    not cause aggressive deletion of unrelated front-matter body text.
+    """
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("Содержание.")  # loose-only; no TOC entries follow before real intro
+    doc.add_paragraph("Просто пояснительный абзац, не относящийся к содержанию.")
+    doc.add_paragraph("Ещё один обычный абзац без структуры TOC.")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("ЗАКЛЮЧЕНИЕ", 5),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "Просто пояснительный абзац" not in joined:
+        return _result(False, f"front-matter body text deleted: {front!r}")
+    if "Ещё один обычный абзац" not in joined:
+        return _result(False, f"front-matter body text deleted: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected exactly one canonical СОДЕРЖАНИЕ: {front!r}")
+    return _result(True, "standalone loose contents paragraph does not delete body text")
+
+
 def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
     out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
     entry_paragraphs = [p for p in out.paragraphs if "\t" in (p.text or "")]
@@ -11688,6 +11835,11 @@ def run_all() -> None:
         ("TOC | zero hanging/firstLine indent",        test_autotoc_entries_have_zero_hanging_and_firstline_xml),
         ("TOC | blank paragraph has no tab/hyperlink", test_autotoc_blank_paragraph_carries_no_tab_or_hyperlink),
         ("TOC | dot leader preserved with blank",      test_autotoc_dot_leader_and_pages_preserved_with_blank),
+        ("TOC | old simple TOC removed",               test_autotoc_old_simple_toc_without_page_numbers_removed),
+        ("TOC | old trailing-dot heading removed",     test_autotoc_old_toc_heading_with_trailing_dot_removed),
+        ("TOC | old TOC with appendix entries removed", test_autotoc_old_toc_with_appendix_entries_removed),
+        ("TOC | old TOC heading with page number removed", test_autotoc_old_toc_heading_with_page_number_removed),
+        ("TOC | standalone loose heading keeps body",  test_autotoc_standalone_loose_contents_paragraph_does_not_delete_body),
         # ── P2-a' relaxed row/page matcher tests — registered at tail to
         # avoid shifting the ordinal position of pre-existing E2 tests, which
         # exposed a latent order-sensitive failure in the suite. The matcher
