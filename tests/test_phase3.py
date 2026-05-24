@@ -859,6 +859,221 @@ def test_autotoc_long_heading_uses_same_tab_leader_layout() -> tuple[bool, str]:
     return _result(True, "long heading uses tab leader layout with page number at right tab")
 
 
+# ── Fallback heading collection (Roman/побитая coverage) ────────────────────
+
+
+def _make_fallback_doc(
+    *,
+    h1_style_normal: bool = True,
+    h2_style_normal: bool = True,
+    include_intro_task_list: bool = False,
+    include_sentence_like_h2: bool = False,
+    include_inside_table_h2: bool = False,
+    include_non_monotonic_h2: bool = False,
+    include_after_appendices: bool = False,
+    include_source_lines_with_numbers: bool = False,
+) -> Document:
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("Содержание")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("1. Старый раздел")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    if include_intro_task_list:
+        doc.add_paragraph("Задачи курсовой работы:")
+        doc.add_paragraph("1. Изучить теорию")
+        doc.add_paragraph("2. Проанализировать практику")
+
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    if not h1_style_normal:
+        h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+
+    h2 = doc.add_paragraph("1.1. Сущность подхода")
+    if not h2_style_normal:
+        h2.style = "Heading 2"
+    doc.add_paragraph("Текст подраздела.")
+
+    if include_sentence_like_h2:
+        doc.add_paragraph(
+            "1.2. Маркетинговый подход. Данный подход применяется в анализе."
+        )
+        doc.add_paragraph("Дополнительный абзац.")
+
+    if include_non_monotonic_h2:
+        doc.add_paragraph("1.5. Раздел не по порядку")
+        doc.add_paragraph("Текст.")
+
+    if include_source_lines_with_numbers:
+        doc.add_paragraph("Источник: 1. Иванов, 2025.")
+        doc.add_paragraph("Примечание: 1.3. условный показатель.")
+
+    if include_inside_table_h2:
+        table = doc.add_table(rows=1, cols=1)
+        table.rows[0].cells[0].paragraphs[0].text = "1.4. Не настоящий подраздел в ячейке"
+
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    if include_after_appendices:
+        doc.add_paragraph("ПРИЛОЖЕНИЯ")
+        doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+        doc.add_paragraph("1.1. Локальный псевдо-подраздел приложения")
+        doc.add_paragraph("Текст приложения.")
+
+    return doc
+
+
+_FALLBACK_DEFAULT_LINES: list[tuple[str, int]] = [
+    ("ВВЕДЕНИЕ", 3),
+    ("1. Теоретические основы", 4),
+    ("1.1. Сущность подхода", 5),
+    ("ЗАКЛЮЧЕНИЕ", 8),
+    ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 9),
+]
+
+
+def test_autotoc_fallback_normal_styled_heading2_included() -> tuple[bool, str]:
+    doc = _make_fallback_doc(h1_style_normal=True, h2_style_normal=True)
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    if "1. Теоретические основы\t4" not in front:
+        return _result(False, f"normal-styled H1 not in TOC: {front!r}")
+    if "1.1. Сущность подхода\t5" not in front:
+        return _result(False, f"normal-styled H2 not in TOC: {front!r}")
+    return _result(True, "normal-styled real headings included via fallback")
+
+
+def test_autotoc_fallback_normal_styled_heading1_included() -> tuple[bool, str]:
+    doc = _make_fallback_doc(h1_style_normal=True, h2_style_normal=False)
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    if "1. Теоретические основы\t4" not in front:
+        return _result(False, f"normal-styled H1 not in TOC: {front!r}")
+    if "1.1. Сущность подхода\t5" not in front:
+        return _result(False, f"styled H2 missing alongside fallback H1: {front!r}")
+    return _result(True, "fallback H1 + styled H2 both included")
+
+
+def test_autotoc_fallback_intro_task_list_excluded() -> tuple[bool, str]:
+    doc = _make_fallback_doc(
+        h1_style_normal=True,
+        h2_style_normal=True,
+        include_intro_task_list=True,
+    )
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "Изучить теорию" in joined or "Проанализировать практику" in joined:
+        return _result(False, f"intro task list leaked into TOC: {front!r}")
+    if "1. Теоретические основы\t4" not in front:
+        return _result(False, f"real heading after task list missing from TOC: {front!r}")
+    return _result(True, "intro task list excluded; real heading still included")
+
+
+def test_autotoc_fallback_numbered_sentence_excluded() -> tuple[bool, str]:
+    doc = _make_fallback_doc(
+        h1_style_normal=False,
+        h2_style_normal=True,
+        include_sentence_like_h2=True,
+    )
+    rendered_lines = list(_FALLBACK_DEFAULT_LINES)
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "Маркетинговый подход" in joined:
+        return _result(False, f"sentence-like numbered paragraph leaked into TOC: {front!r}")
+    if "1.1. Сущность подхода\t5" not in front:
+        return _result(False, f"valid fallback H2 missing: {front!r}")
+    return _result(True, "sentence-like numbered paragraph rejected by fallback")
+
+
+def test_autotoc_fallback_paragraph_inside_table_excluded() -> tuple[bool, str]:
+    doc = _make_fallback_doc(
+        h1_style_normal=False,
+        h2_style_normal=False,
+        include_inside_table_h2=True,
+    )
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "Не настоящий" in joined or "1.4." in joined:
+        return _result(False, f"H2 inside table cell leaked into TOC: {front!r}")
+    return _result(True, "H2 inside table cell excluded")
+
+
+def test_autotoc_fallback_non_monotonic_rejected() -> tuple[bool, str]:
+    doc = _make_fallback_doc(
+        h1_style_normal=False,
+        h2_style_normal=False,
+        include_non_monotonic_h2=True,
+    )
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "1.5." in joined or "Раздел не по порядку" in joined:
+        return _result(False, f"non-monotonic H2 leaked into TOC: {front!r}")
+    if "1.1. Сущность подхода\t5" not in front:
+        return _result(False, f"strict-style H2 missing alongside rejected fallback: {front!r}")
+    return _result(True, "non-monotonic fallback H2 rejected")
+
+
+def test_autotoc_fallback_after_appendices_excluded() -> tuple[bool, str]:
+    doc = _make_fallback_doc(
+        h1_style_normal=False,
+        h2_style_normal=False,
+        include_after_appendices=True,
+    )
+    rendered_lines = _FALLBACK_DEFAULT_LINES + [("ПРИЛОЖЕНИЯ", 10)]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "Локальный псевдо-подраздел" in joined or "ПРИЛОЖЕНИЕ 1" in joined:
+        return _result(False, f"appendix-local heading leaked into TOC: {front!r}")
+    if "ПРИЛОЖЕНИЯ\t10" not in front:
+        return _result(False, f"general ПРИЛОЖЕНИЯ entry missing: {front!r}")
+    return _result(True, "fallback heading after general ПРИЛОЖЕНИЯ excluded")
+
+
+def test_autotoc_fallback_source_or_note_excluded() -> tuple[bool, str]:
+    doc = _make_fallback_doc(
+        h1_style_normal=False,
+        h2_style_normal=False,
+        include_source_lines_with_numbers=True,
+    )
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "Иванов" in joined or "условный показатель" in joined:
+        return _result(False, f"source/note service line leaked into TOC: {front!r}")
+    return _result(True, "source/note lines excluded by fallback")
+
+
+def test_autotoc_fallback_strict_style_path_unchanged() -> tuple[bool, str]:
+    """
+    Regression guard: the strict-style path keeps producing the same TOC for
+    fully styled inputs.
+    """
+    doc = _make_fallback_doc(h1_style_normal=False, h2_style_normal=False)
+    out = _run_static_contents_rebuild(doc, _FALLBACK_DEFAULT_LINES)
+    front = _toc_texts_before_intro(out)
+    expected = {
+        "СОДЕРЖАНИЕ",
+        "ВВЕДЕНИЕ\t3",
+        "1. Теоретические основы\t4",
+        "1.1. Сущность подхода\t5",
+        "ЗАКЛЮЧЕНИЕ\t8",
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\t9",
+    }
+    missing = sorted(expected - set(front))
+    if missing:
+        return _result(False, f"strict-style path output changed; missing={missing!r}, front={front!r}")
+    return _result(True, "strict-style path output unchanged")
+
+
 def _paragraph_has_texts_in_order(doc: Document, expected: list[str]) -> bool:
     texts = [paragraph.text for paragraph in doc.paragraphs]
     pos = 0
@@ -11013,6 +11228,15 @@ def run_all() -> None:
         ("TOC | degenerate mapping fails safe",        test_autotoc_degenerate_page_mapping_fails_safe),
         ("TOC | internal hyperlinks",                  test_autotoc_entries_are_internal_hyperlinks_to_bookmarks),
         ("TOC | long heading tab leader layout",       test_autotoc_long_heading_uses_same_tab_leader_layout),
+        ("TOC | fallback normal H2 included",          test_autotoc_fallback_normal_styled_heading2_included),
+        ("TOC | fallback normal H1 included",          test_autotoc_fallback_normal_styled_heading1_included),
+        ("TOC | fallback intro task list excluded",    test_autotoc_fallback_intro_task_list_excluded),
+        ("TOC | fallback numbered sentence excluded",  test_autotoc_fallback_numbered_sentence_excluded),
+        ("TOC | fallback inside table excluded",       test_autotoc_fallback_paragraph_inside_table_excluded),
+        ("TOC | fallback non-monotonic rejected",      test_autotoc_fallback_non_monotonic_rejected),
+        ("TOC | fallback after appendices excluded",   test_autotoc_fallback_after_appendices_excluded),
+        ("TOC | fallback source/note excluded",        test_autotoc_fallback_source_or_note_excluded),
+        ("TOC | fallback strict path unchanged",       test_autotoc_fallback_strict_style_path_unchanged),
         # ── P2-a' relaxed row/page matcher tests — registered at tail to
         # avoid shifting the ordinal position of pre-existing E2 tests, which
         # exposed a latent order-sensitive failure in the suite. The matcher

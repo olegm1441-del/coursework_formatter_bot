@@ -108,10 +108,111 @@ def _is_heading2_style(paragraph) -> bool:
     return _style_name(paragraph) in {"heading 2", "заголовок 2"}
 
 
+def _paragraph_has_word_numbering(paragraph) -> bool:
+    """True when the paragraph carries Word-list numbering (w:numPr)."""
+    p_pr = paragraph._element.pPr
+    if p_pr is None:
+        return False
+    return p_pr.find(qn("w:numPr")) is not None
+
+
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?]\s+[А-ЯЁA-Z]")
+_FALLBACK_TITLE_MAX_LEN = 200
+
+
+def _heading_title_looks_like_body_prose(title: str) -> bool:
+    """
+    True when the title text after a "N." / "N.M." prefix reads like body
+    prose rather than a heading. Used only by the fallback path.
+    """
+    t = clean_spaces(title)
+    if not t:
+        return True
+    if len(t) > _FALLBACK_TITLE_MAX_LEN:
+        return True
+    if t.endswith((".", ":", ";", "?", "!")):
+        return True
+    if _SENTENCE_BOUNDARY_RE.search(t):
+        return True
+    return False
+
+
+def _prev_nonempty_body_text(paragraphs, idx: int, body_start: int) -> str:
+    j = idx - 1
+    while j >= body_start:
+        text = clean_spaces(paragraphs[j].text)
+        if text:
+            return text
+        j -= 1
+    return ""
+
+
+def _is_fallback_heading1_candidate(
+    paragraph,
+    parsed_h1: dict,
+    paragraphs,
+    idx: int,
+    body_start: int,
+    last_h1_chapter: int | None,
+) -> bool:
+    """
+    Accept a real `N. Title` paragraph as a TOC heading even when safe_formatter
+    could not promote it to Heading 1 style. Guards mirror the documented plan
+    so false positives stay blocked.
+    """
+    if _paragraph_has_word_numbering(paragraph):
+        return False
+    if _heading_title_looks_like_body_prose(parsed_h1.get("title") or ""):
+        return False
+
+    prev_text = _prev_nonempty_body_text(paragraphs, idx, body_start)
+    if prev_text.endswith(":"):
+        return False
+
+    chapter_num = parsed_h1["chapter_num"]
+    expected = 1 if last_h1_chapter is None else last_h1_chapter + 1
+    return chapter_num == expected
+
+
+def _is_fallback_heading2_candidate(
+    paragraph,
+    parsed_h2: dict,
+    paragraphs,
+    idx: int,
+    body_start: int,
+    last_h1_chapter: int | None,
+    last_h2_in_chapter: int | None,
+) -> bool:
+    """
+    Accept a real `N.M. Title` paragraph as a TOC heading even when
+    safe_formatter could not promote it to Heading 2 style.
+    """
+    if _paragraph_has_word_numbering(paragraph):
+        return False
+    if _heading_title_looks_like_body_prose(parsed_h2.get("title") or ""):
+        return False
+
+    prev_text = _prev_nonempty_body_text(paragraphs, idx, body_start)
+    if prev_text.endswith(":"):
+        return False
+
+    if last_h1_chapter is None:
+        return False
+    if parsed_h2["chapter_num"] != last_h1_chapter:
+        return False
+
+    expected = 1 if last_h2_in_chapter is None else last_h2_in_chapter + 1
+    return parsed_h2["paragraph_num"] == expected
+
+
 def _collect_body_entries(document: Document, body_start: int) -> list[TocEntry]:
     entries: list[TocEntry] = []
+    paragraphs = document.paragraphs
 
-    for idx, paragraph in enumerate(document.paragraphs[body_start:], start=body_start):
+    last_h1_chapter: int | None = None
+    last_h2_in_chapter: int | None = None
+
+    for idx, paragraph in enumerate(paragraphs[body_start:], start=body_start):
         text = clean_spaces(paragraph.text)
         if not text or _is_excluded_service_line(text):
             continue
@@ -128,12 +229,42 @@ def _collect_body_entries(document: Document, body_start: int) -> list[TocEntry]
             continue
 
         parsed_h1 = parse_heading1(text)
-        if parsed_h1 and parsed_h1["kind"] == "heading1_chapter" and _is_heading1_style(paragraph):
-            entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
-            continue
+        if parsed_h1 and parsed_h1["kind"] == "heading1_chapter":
+            if _is_heading1_style(paragraph):
+                entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
+                last_h1_chapter = parsed_h1["chapter_num"]
+                last_h2_in_chapter = None
+                continue
+            if _is_fallback_heading1_candidate(
+                paragraph, parsed_h1, paragraphs, idx, body_start, last_h1_chapter
+            ):
+                entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
+                last_h1_chapter = parsed_h1["chapter_num"]
+                last_h2_in_chapter = None
+                continue
 
-        if parse_heading2(text) and _is_heading2_style(paragraph):
-            entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
+        parsed_h2 = parse_heading2(text)
+        if parsed_h2:
+            if _is_heading2_style(paragraph):
+                entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
+                if (
+                    last_h1_chapter is not None
+                    and parsed_h2["chapter_num"] == last_h1_chapter
+                ):
+                    last_h2_in_chapter = parsed_h2["paragraph_num"]
+                continue
+            if _is_fallback_heading2_candidate(
+                paragraph,
+                parsed_h2,
+                paragraphs,
+                idx,
+                body_start,
+                last_h1_chapter,
+                last_h2_in_chapter,
+            ):
+                entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
+                last_h2_in_chapter = parsed_h2["paragraph_num"]
+                continue
 
     return entries
 
