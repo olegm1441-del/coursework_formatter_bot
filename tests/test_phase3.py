@@ -10844,6 +10844,281 @@ def test_e2_continuation_label_has_blank_after_before_table() -> tuple[bool, str
     return _result(True, "ordinary continuation has tbl → marker → blank → tbl")
 
 
+def _pg1_add_tbl_pr_child(tbl_xml, tag: str):
+    tbl_pr = tbl_xml.find(qn("w:tblPr"))
+    if tbl_pr is None:
+        tbl_pr = OxmlElement("w:tblPr")
+        tbl_xml.insert(0, tbl_pr)
+    child = OxmlElement(tag)
+    tbl_pr.append(child)
+    return child
+
+
+def _pg1_set_first_cell_tcw(tbl, value: str) -> None:
+    tc_pr = tbl.rows[0].cells[0]._tc.get_or_add_tcPr()
+    tc_w = tc_pr.find(qn("w:tcW"))
+    if tc_w is None:
+        tc_w = OxmlElement("w:tcW")
+        tc_pr.append(tc_w)
+    tc_w.set(qn("w:w"), value)
+    tc_w.set(qn("w:type"), "dxa")
+
+
+def _pg1_geometry_snapshot(tbl_xml) -> tuple:
+    tbl_pr = tbl_xml.find(qn("w:tblPr"))
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    tc_ws = []
+    for tc in tbl_xml.findall(".//" + qn("w:tc")):
+        tc_pr = tc.find(qn("w:tcPr"))
+        tc_w = tc_pr.find(qn("w:tcW")) if tc_pr is not None else None
+        tc_ws.append((
+            tc_w.get(qn("w:w")) if tc_w is not None else None,
+            tc_w.get(qn("w:type")) if tc_w is not None else None,
+        ))
+    return (
+        tbl_pr.xml if tbl_pr is not None else None,
+        grid.xml if grid is not None else None,
+        tuple(tc_ws),
+    )
+
+
+def test_pg1_geometry_policy_classifies_sensitive_tables() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import classify_table_geometry_policy
+
+    cases = []
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.cell(0, 0).merge(tbl.cell(0, 1))
+    cases.append(("gridSpan", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=1)
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[0].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(cont)
+    cases.append(("vMerge", tbl._tbl))
+
+    for name, tag in (
+        ("tblCellSpacing", "w:tblCellSpacing"),
+        ("tblCellMar", "w:tblCellMar"),
+    ):
+        doc = Document()
+        tbl = doc.add_table(rows=1, cols=2)
+        _pg1_add_tbl_pr_child(tbl._tbl, tag)
+        cases.append((name, tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    look = tbl._tbl.find(qn("w:tblPr")).find(qn("w:tblLook"))
+    look.set(qn("w:val"), "0000")
+    cases.append(("tblLook", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    layout = _pg1_add_tbl_pr_child(tbl._tbl, "w:tblLayout")
+    layout.set(qn("w:type"), "fixed")
+    cases.append(("authored fixed layout", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    tbl_w = tbl._tbl.find(qn("w:tblPr")).find(qn("w:tblW"))
+    tbl_w.set(qn("w:type"), "pct")
+    tbl_w.set(qn("w:w"), "5000")
+    cases.append(("tblW pct", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    tr_pr = OxmlElement("w:trPr")
+    tr_pr.append(OxmlElement("w:tblPrEx"))
+    tbl._tbl.findall(qn("w:tr"))[0].insert(0, tr_pr)
+    cases.append(("tblPrEx", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    _pg1_set_first_cell_tcw(tbl, "0")
+    cases.append(("tcW=0", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    tbl._tbl.find(qn("w:tblGrid")).findall(qn("w:gridCol"))[0].set(qn("w:w"), "45")
+    cases.append(("narrow column", tbl._tbl))
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    row = tbl._tbl.findall(qn("w:tr"))[1]
+    row.remove(row.findall(qn("w:tc"))[1])
+    cases.append(("raw tc count mismatch", tbl._tbl))
+
+    for name, tbl_xml in cases:
+        policy = classify_table_geometry_policy(tbl_xml)
+        if policy != "preserve_geometry":
+            return _result(False, f"{name} classified as {policy!r}")
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    policy = classify_table_geometry_policy(
+        tbl._tbl,
+        has_existing_continuation_marker=True,
+    )
+    if policy != "preserve_geometry":
+        return _result(False, f"existing continuation marker classified as {policy!r}")
+
+    return _result(True, f"{len(cases) + 1} sensitive geometry shapes classified preserve_geometry")
+
+
+def test_pg1_geometry_policy_marks_malformed_grid_unsafe() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import classify_table_geometry_policy
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    tbl._tbl.remove(grid)
+    policy = classify_table_geometry_policy(tbl._tbl)
+    if policy != "unsafe_no_split":
+        return _result(False, f"missing tblGrid classified as {policy!r}")
+
+    doc = Document()
+    tbl = doc.add_table(rows=4, cols=1)
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
+    policy = classify_table_geometry_policy(tbl._tbl, split_before_row=2)
+    if policy != "unsafe_no_split":
+        return _result(False, f"split across vMerge classified as {policy!r}")
+
+    return _result(True, "malformed grid and vMerge-crossing split fail closed")
+
+
+def test_pg1_preserve_geometry_skips_width_optimizer() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[1].cells[0].text = "1"
+    tbl.rows[1].cells[1].text = "2"
+    look = tbl._tbl.find(qn("w:tblPr")).find(qn("w:tblLook"))
+    look.set(qn("w:val"), "0000")
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    for gc in grid.findall(qn("w:gridCol")):
+        gc.set(qn("w:w"), "12000")
+    before = _pg1_geometry_snapshot(tbl._tbl)
+
+    n = apply_table_continuation(doc)
+    after = _pg1_geometry_snapshot(tbl._tbl)
+
+    if n != 0:
+        return _result(False, f"preserve table should skip optimizer, got n={n}")
+    if after != before:
+        return _result(False, "preserve table geometry changed during continuation flow")
+    return _result(True, "preserve_geometry table bypassed width optimizer")
+
+
+def test_pg1_simple_table_still_uses_width_optimizer() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "A"
+    tbl.rows[0].cells[1].text = "B"
+    tbl.rows[1].cells[0].text = "1"
+    tbl.rows[1].cells[1].text = "2"
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    for gc in grid.findall(qn("w:gridCol")):
+        gc.set(qn("w:w"), "12000")
+
+    n = apply_table_continuation(doc)
+    if n != 1:
+        return _result(False, f"simple table optimizer path did not run, n={n}")
+    return _result(True, "simple table still uses existing width optimizer")
+
+
+def test_pg1_unsafe_geometry_skips_marker_split() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.3")
+    tbl = doc.add_table(rows=5, cols=1)
+    for r in range(5):
+        tbl.rows[r].cells[0].text = f"r{r}"
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=5,
+        pages_detected=[1, 2],
+        row_pages={0: 1, 1: 1, 2: 2, 3: 2, 4: 2},
+        found_rows=[0, 1, 2, 3, 4],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 1, 1), tm.TablePageSpan(2, 4, 2)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.2.3",
+    )
+
+    decision = tc._MarkerSplitDecision(
+        eligible=True,
+        split_before_row=2,
+        skip_reason=None,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        result, skip_reason = tc._apply_marker_split_candidate(path, diagnostic, decision)
+        out = Document(str(path))
+
+    if result is not None:
+        return _result(False, "unsafe vMerge split unexpectedly applied")
+    if skip_reason != "unsafe_geometry":
+        return _result(False, f"expected unsafe_geometry skip, got {skip_reason!r}")
+    if len(out.tables) != 1:
+        return _result(False, f"unsafe split changed table count to {len(out.tables)}")
+    return _result(True, "unsafe_no_split table skipped marker split generation")
+
+
+def test_pg1_real_continuation_flow_preserves_sensitive_geometry() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    doc = Document()
+    tbl = doc.add_table(rows=3, cols=2)
+    for r in range(3):
+        for c in range(2):
+            tbl.rows[r].cells[c].text = f"r{r}c{c}"
+    _pg1_add_tbl_pr_child(tbl._tbl, "w:tblCellMar")
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    for gc in grid.findall(qn("w:gridCol")):
+        gc.set(qn("w:w"), "15000")
+    _pg1_set_first_cell_tcw(tbl, "15000")
+
+    before = _pg1_geometry_snapshot(tbl._tbl)
+    n = apply_table_continuation(doc)
+    after = _pg1_geometry_snapshot(tbl._tbl)
+
+    if n != 0:
+        return _result(False, f"real continuation flow should not optimize preserve table, got n={n}")
+    if after != before:
+        return _result(False, "tblGrid/tblW/tcW changed for preserve-mode table")
+    return _result(True, "real continuation flow kept tblGrid/tblPr/tcW unchanged")
+
+
 def test_e2_rollback_global_skip_mode_preserves_pre_e2_behaviour() -> tuple[bool, str]:
     """E2: KPFU_MARKER_SPLIT_MODE=global_skip restores pre-E2 behaviour."""
     import logging
@@ -11364,6 +11639,12 @@ def run_all() -> None:
         ("E2 | one diagnose failure does not abort others", test_e2_candidate_diagnose_failure_does_not_abort_others),
         ("E2 | manual continuation preserved (not diagnosed)", test_e2_existing_manual_continuation_preserved),
         ("E2 | continuation has blank between marker and table", test_e2_continuation_label_has_blank_after_before_table),
+        ("PG1 | classify sensitive geometry", test_pg1_geometry_policy_classifies_sensitive_tables),
+        ("PG1 | malformed geometry unsafe", test_pg1_geometry_policy_marks_malformed_grid_unsafe),
+        ("PG1 | preserve skips optimizer", test_pg1_preserve_geometry_skips_width_optimizer),
+        ("PG1 | simple optimizer still runs", test_pg1_simple_table_still_uses_width_optimizer),
+        ("PG1 | unsafe skips marker split", test_pg1_unsafe_geometry_skips_marker_split),
+        ("PG1 | real flow preserves geometry", test_pg1_real_continuation_flow_preserves_sensitive_geometry),
         ("E2 | rollback global_skip preserves pre-E2", test_e2_rollback_global_skip_mode_preserves_pre_e2_behaviour),
         # E3: NUM-row compensation for marker-split first fragment.
         ("E3 | compensation applies for ordinary body table", test_e3_compensation_applies_for_ordinary_body_table),

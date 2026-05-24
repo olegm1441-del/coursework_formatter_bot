@@ -753,6 +753,221 @@ def _find_safe_split_after(rows_xml: list, candidate_after: int) -> int | None:
     return None
 
 
+_GEOMETRY_SIMPLE = "simple"
+_GEOMETRY_PRESERVE = "preserve_geometry"
+_GEOMETRY_UNSAFE = "unsafe_no_split"
+_NARROW_GRID_COL_TWIPS = 120
+
+
+def _int_attr(el, attr: str, default: int | None = None) -> int | None:
+    value = el.get(qn(attr))
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _append_unique(items: list[str], item: str) -> None:
+    if item not in items:
+        items.append(item)
+
+
+def _is_default_tbl_look(tbl_look) -> bool:
+    if tbl_look is None:
+        return False
+    return (
+        tbl_look.get(qn("w:val")) == "04A0"
+        and tbl_look.get(qn("w:firstColumn")) == "1"
+        and tbl_look.get(qn("w:firstRow")) == "1"
+        and tbl_look.get(qn("w:lastColumn")) == "0"
+        and tbl_look.get(qn("w:lastRow")) == "0"
+        and tbl_look.get(qn("w:noHBand")) == "0"
+        and tbl_look.get(qn("w:noVBand")) == "1"
+    )
+
+
+def _is_default_auto_tbl_w(tbl_w) -> bool:
+    if tbl_w is None:
+        return False
+    return tbl_w.get(qn("w:type")) == "auto" and tbl_w.get(qn("w:w")) in {None, "0"}
+
+
+def _row_has_vmerge_continue(row_xml) -> bool:
+    return any(_is_vmerge_continue(tc) for tc in row_xml.findall(qn("w:tc")))
+
+
+def _table_has_adjacent_continuation_marker(
+    body_children: list,
+    para_by_xml: dict,
+    tbl_xml,
+) -> bool:
+    try:
+        idx = body_children.index(tbl_xml)
+    except ValueError:
+        return False
+
+    for offset in (-1, 1):
+        j = idx + offset
+        if j < 0 or j >= len(body_children):
+            continue
+        node = body_children[j]
+        if node.tag != qn("w:p"):
+            continue
+        para = para_by_xml.get(node)
+        if para is not None and _is_any_continuation_marker(para.text or ""):
+            return True
+    return False
+
+
+def _table_geometry_policy_details(
+    tbl_xml,
+    *,
+    split_before_row: int | None = None,
+    has_existing_continuation_marker: bool = False,
+) -> tuple[str, list[str]]:
+    """
+    Classify whether table geometry may be safely width-optimized/split.
+
+    Default python-docx table artifacts (`tblW auto w=0`, default `tblLook`)
+    are intentionally not treated as sensitive on their own; otherwise every
+    simple synthetic/default table would bypass the optimizer.
+    """
+    reasons: list[str] = []
+
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is None:
+        return _GEOMETRY_UNSAFE, ["malformed_grid:missing_tblGrid"]
+    gridcols = grid.findall(qn("w:gridCol"))
+    if not gridcols:
+        return _GEOMETRY_UNSAFE, ["malformed_grid:empty_tblGrid"]
+
+    col_count = len(gridcols)
+    for grid_col in gridcols:
+        width = _int_attr(grid_col, "w:w")
+        if width is None or width <= 0:
+            return _GEOMETRY_UNSAFE, ["malformed_grid:invalid_gridCol_width"]
+        if width <= _NARROW_GRID_COL_TWIPS:
+            _append_unique(reasons, "narrow_grid_col")
+
+    tbl_pr = tbl_xml.find(qn("w:tblPr"))
+    if tbl_pr is not None:
+        if tbl_pr.find(qn("w:tblCellSpacing")) is not None:
+            _append_unique(reasons, "tblCellSpacing")
+        if tbl_pr.find(qn("w:tblCellMar")) is not None:
+            _append_unique(reasons, "tblCellMar")
+
+        tbl_look = tbl_pr.find(qn("w:tblLook"))
+        if tbl_look is not None and not _is_default_tbl_look(tbl_look):
+            _append_unique(reasons, "tblLook")
+
+        tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+        if (
+            tbl_layout is not None
+            and (tbl_layout.get(qn("w:type")) or "").lower() == "fixed"
+        ):
+            _append_unique(reasons, "tblLayout_fixed")
+
+        tbl_w = tbl_pr.find(qn("w:tblW"))
+        if tbl_w is not None and not _is_default_auto_tbl_w(tbl_w):
+            tbl_w_type = (tbl_w.get(qn("w:type")) or "").lower()
+            if tbl_w_type in {"auto", "pct"}:
+                _append_unique(reasons, f"tblW_{tbl_w_type}")
+
+    rows = tbl_xml.findall(qn("w:tr"))
+    if split_before_row is not None:
+        if split_before_row < 0 or split_before_row >= len(rows):
+            return _GEOMETRY_UNSAFE, ["ambiguous_topology:split_out_of_range"]
+        if _row_has_vmerge_continue(rows[split_before_row]):
+            return _GEOMETRY_UNSAFE, ["split_crosses_vMerge_continuation"]
+
+    for row in rows:
+        tr_pr = row.find(qn("w:trPr"))
+        if tr_pr is not None and tr_pr.find(qn("w:tblPrEx")) is not None:
+            _append_unique(reasons, "tblPrEx")
+
+        raw_cells = row.findall(qn("w:tc"))
+        span_total = 0
+        has_grid_span = False
+        for tc in raw_cells:
+            tc_pr = tc.find(qn("w:tcPr"))
+            span = 1
+            if tc_pr is not None:
+                grid_span = tc_pr.find(qn("w:gridSpan"))
+                if grid_span is not None:
+                    has_grid_span = True
+                    _append_unique(reasons, "gridSpan")
+                    span = _int_attr(grid_span, "w:val", 1) or 1
+                    if span < 1:
+                        return _GEOMETRY_UNSAFE, ["ambiguous_topology:invalid_gridSpan"]
+
+                vmerge = tc_pr.find(qn("w:vMerge"))
+                if vmerge is not None:
+                    _append_unique(reasons, "vMerge")
+
+                tc_w = tc_pr.find(qn("w:tcW"))
+                if tc_w is not None and tc_w.get(qn("w:w")) == "0":
+                    _append_unique(reasons, "tcW_zero")
+
+            span_total += span
+
+        if len(raw_cells) != col_count:
+            _append_unique(reasons, "raw_tc_count_mismatch")
+        if span_total > col_count:
+            return _GEOMETRY_UNSAFE, ["ambiguous_topology:span_exceeds_grid"]
+        if span_total < col_count and not has_grid_span:
+            _append_unique(reasons, "raw_tc_count_mismatch")
+
+    if has_existing_continuation_marker:
+        _append_unique(reasons, "existing_continuation_marker")
+
+    if reasons:
+        return _GEOMETRY_PRESERVE, reasons
+    return _GEOMETRY_SIMPLE, []
+
+
+def classify_table_geometry_policy(
+    tbl_xml,
+    *,
+    split_before_row: int | None = None,
+    has_existing_continuation_marker: bool = False,
+) -> str:
+    """Public testable wrapper for geometry preservation policy."""
+    policy, _ = _table_geometry_policy_details(
+        tbl_xml,
+        split_before_row=split_before_row,
+        has_existing_continuation_marker=has_existing_continuation_marker,
+    )
+    return policy
+
+
+def _format_geometry_reasons(reasons: list[str]) -> str:
+    return ",".join(reasons) if reasons else "-"
+
+
+def _split_geometry_is_safe(
+    tbl_xml,
+    *,
+    table_index: int,
+    split_before_row: int,
+    log_prefix: str,
+) -> bool:
+    policy, reasons = _table_geometry_policy_details(
+        tbl_xml,
+        split_before_row=split_before_row,
+    )
+    if policy != _GEOMETRY_UNSAFE:
+        return True
+    logger.info(
+        "%s table_index=%s reason=unsafe_geometry geometry_reasons=%s",
+        log_prefix,
+        table_index,
+        _format_geometry_reasons(reasons),
+    )
+    return False
+
+
 def _find_caption_number_before_table(doc: Document, tbl_xml) -> str | None:
     """
     Strict source of truth: caption paragraph before the table.
@@ -2115,8 +2330,8 @@ def apply_table_continuation(
     Phase 3 Rule 1 — STUB (table page-break splitting disabled).
 
     Still active: column-width optimisation (_optimize_table_col_widths) runs
-    for ALL tables — fixes oversized / phantom-narrow columns regardless of
-    whether splitting is enabled.
+    for simple tables. Geometry-sensitive/unsafe tables bypass this pass so
+    authored widths and grid topology are not re-inferred before splitting.
 
     The splitting part is disabled because reliable page-break detection
     requires a rendering engine.  See module docstring for the FUTURE plan.
@@ -2131,8 +2346,28 @@ def apply_table_continuation(
     # ── Column-width optimisation (always active) ──────────────────────────
     body_w = _body_width_pt(doc)
     n_col_fixed = 0
+    table_index = -1
+    body_children = list(doc.element.body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
     for kind, tbl_xml, _ in _iter_body(doc):
         if kind != "table":
+            continue
+        table_index += 1
+        policy, reasons = _table_geometry_policy_details(
+            tbl_xml,
+            has_existing_continuation_marker=_table_has_adjacent_continuation_marker(
+                body_children,
+                para_by_xml,
+                tbl_xml,
+            ),
+        )
+        if policy != _GEOMETRY_SIMPLE:
+            logger.info(
+                "table_continuation: col-width optimizer skipped table_index=%s policy=%s reasons=%s",
+                table_index,
+                policy,
+                _format_geometry_reasons(reasons),
+            )
             continue
         if _optimize_table_col_widths(tbl_xml, body_w):
             n_col_fixed += 1
@@ -2659,6 +2894,15 @@ def _apply_marker_split_candidate(
     )
     if split_before_row is None:
         return None, "no_boundary"
+    if diagnostic.table_index < 0 or diagnostic.table_index >= len(doc.tables):
+        return None, "invalid_table_index"
+    if not _split_geometry_is_safe(
+        doc.tables[diagnostic.table_index]._tbl,
+        table_index=diagnostic.table_index,
+        split_before_row=split_before_row,
+        log_prefix="marker_split_skipped",
+    ):
+        return None, "unsafe_geometry"
 
     try:
         result = apply_numbered_split_to_document(
@@ -3171,6 +3415,19 @@ def _apply_source_note_detachment_split(
     # tbl at table_index+1 without shifting any not-yet-processed candidate.
     for cand in sorted(candidates, key=lambda c: -c.table_index):
         split_before_row = cand.rows_count - 1  # split off last data row
+        if cand.table_index < 0 or cand.table_index >= len(doc.tables):
+            logger.info(
+                "p1c_source_note_split_skip table_index=%s reason=invalid_table_index",
+                cand.table_index,
+            )
+            continue
+        if not _split_geometry_is_safe(
+            doc.tables[cand.table_index]._tbl,
+            table_index=cand.table_index,
+            split_before_row=split_before_row,
+            log_prefix="p1c_source_note_split_skip",
+        ):
+            continue
         try:
             result = apply_numbered_split_to_document(
                 doc,
@@ -3432,6 +3689,19 @@ def _apply_appendix_table_continuation_split(
     # Reverse table_index order — each split inserts a new <w:tbl> at
     # `table_index + 1` and would shift any not-yet-processed candidate.
     for cand in sorted(candidates, key=lambda c: -c.table_index):
+        if cand.table_index < 0 or cand.table_index >= len(doc.tables):
+            logger.info(
+                "p2a_appendix_continuation_skip table_index=%s reason=invalid_table_index",
+                cand.table_index,
+            )
+            continue
+        if not _split_geometry_is_safe(
+            doc.tables[cand.table_index]._tbl,
+            table_index=cand.table_index,
+            split_before_row=cand.split_before_row,
+            log_prefix="p2a_appendix_continuation_skip",
+        ):
+            continue
         try:
             apply_numbered_split_to_document(
                 doc,
@@ -3682,6 +3952,13 @@ def apply_rendered_table_continuation(
 
     num = _find_caption_number_before_table(doc, candidate.tbl_xml)
     continuation_text = f"Продолжение таблицы {num}" if num else "Продолжение таблицы"
+    if not _split_geometry_is_safe(
+        candidate.tbl_xml,
+        table_index=candidate.table_idx,
+        split_before_row=candidate.split_after + 1,
+        log_prefix="rendered_final_decision action=rendered_no_action",
+    ):
+        return 0
     if not _split_table_at(doc, candidate.tbl_xml, candidate.split_after, continuation_text):
         logger.info(
             "rendered_final_decision action=rendered_no_action reason=split_mutation_failed table_idx=%s split_after=%s",
