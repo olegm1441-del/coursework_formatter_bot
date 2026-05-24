@@ -1074,6 +1074,169 @@ def test_autotoc_fallback_strict_style_path_unchanged() -> tuple[bool, str]:
     return _result(True, "strict-style path output unchanged")
 
 
+# ── Visual TOC polish (Приложение 3) ───────────────────────────────────────
+
+
+def _toc_title_index(doc: Document) -> int | None:
+    for idx, p in enumerate(doc.paragraphs):
+        if (p.text or "").strip() == "СОДЕРЖАНИЕ":
+            return idx
+    return None
+
+
+def _all_hyperlink_runs(paragraph):
+    runs = []
+    for hyperlink in paragraph._element.findall(qn("w:hyperlink")):
+        for run in hyperlink.findall(qn("w:r")):
+            runs.append(run)
+    return runs
+
+
+def _run_ascii_font(run_elem) -> str | None:
+    r_pr = run_elem.find(qn("w:rPr"))
+    if r_pr is None:
+        return None
+    rfonts = r_pr.find(qn("w:rFonts"))
+    if rfonts is None:
+        return None
+    return rfonts.get(qn("w:ascii"))
+
+
+def _run_size_twips(run_elem) -> str | None:
+    r_pr = run_elem.find(qn("w:rPr"))
+    if r_pr is None:
+        return None
+    sz = r_pr.find(qn("w:sz"))
+    if sz is None:
+        return None
+    return sz.get(qn("w:val"))
+
+
+def test_autotoc_blank_paragraph_after_title() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    title_idx = _toc_title_index(out)
+    if title_idx is None:
+        return _result(False, "СОДЕРЖАНИЕ heading missing")
+    if title_idx + 1 >= len(out.paragraphs):
+        return _result(False, "no paragraph after СОДЕРЖАНИЕ heading")
+    blank_p = out.paragraphs[title_idx + 1]
+    if (blank_p.text or "").strip():
+        return _result(False, f"paragraph after СОДЕРЖАНИЕ is not blank: {blank_p.text!r}")
+    if title_idx + 2 >= len(out.paragraphs):
+        return _result(False, "no entry after blank paragraph")
+    first_entry = out.paragraphs[title_idx + 2]
+    if "\t" not in (first_entry.text or ""):
+        return _result(False, f"second paragraph after title is not a TOC entry: {first_entry.text!r}")
+    return _result(True, "exactly one blank paragraph between СОДЕРЖАНИЕ and first entry")
+
+
+def test_autotoc_no_double_blank_after_title() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    title_idx = _toc_title_index(out)
+    if title_idx is None:
+        return _result(False, "СОДЕРЖАНИЕ heading missing")
+    blank_count = 0
+    j = title_idx + 1
+    while j < len(out.paragraphs) and not (out.paragraphs[j].text or "").strip():
+        blank_count += 1
+        j += 1
+    if blank_count != 1:
+        return _result(False, f"expected exactly 1 blank paragraph after title, got {blank_count}")
+    return _result(True, "no double blank after СОДЕРЖАНИЕ on rebuild")
+
+
+def test_autotoc_title_font_is_times_new_roman_14_bold_centered() -> tuple[bool, str]:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    title_idx = _toc_title_index(out)
+    if title_idx is None:
+        return _result(False, "СОДЕРЖАНИЕ heading missing")
+    title_p = out.paragraphs[title_idx]
+    if title_p.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        return _result(False, f"СОДЕРЖАНИЕ not centered: alignment={title_p.alignment!r}")
+    runs = list(title_p.runs)
+    if not runs:
+        return _result(False, "СОДЕРЖАНИЕ paragraph has no runs")
+    for r in runs:
+        if r.font.name != "Times New Roman":
+            return _result(False, f"СОДЕРЖАНИЕ run font is {r.font.name!r}")
+        if r.font.size is None or r.font.size.pt != 14:
+            return _result(False, f"СОДЕРЖАНИЕ run size is {r.font.size!r}")
+        if r.bold is not True:
+            return _result(False, f"СОДЕРЖАНИЕ run not bold: {r.bold!r}")
+    return _result(True, "СОДЕРЖАНИЕ title is TNR 14 bold centered")
+
+
+def test_autotoc_entry_hyperlink_runs_use_times_new_roman_14() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    seen_any = False
+    for p in out.paragraphs:
+        if "\t" not in (p.text or ""):
+            continue
+        hl_runs = _all_hyperlink_runs(p)
+        if not hl_runs:
+            return _result(False, f"TOC entry without hyperlink runs: {p.text!r}")
+        for run in hl_runs:
+            font = _run_ascii_font(run)
+            if font != "Times New Roman":
+                return _result(False, f"hyperlink run ascii font is {font!r} in {p.text!r}")
+            sz = _run_size_twips(run)
+            if sz != "28":
+                return _result(False, f"hyperlink run size is {sz!r} in {p.text!r}")
+            seen_any = True
+    if not seen_any:
+        return _result(False, "no TOC entries with hyperlink runs found")
+    return _result(True, "all TOC hyperlink runs are Times New Roman 14")
+
+
+def test_autotoc_entries_have_zero_hanging_and_firstline_xml() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    for p in out.paragraphs:
+        if "\t" not in (p.text or ""):
+            continue
+        p_pr = p._element.pPr
+        if p_pr is None:
+            continue
+        ind = p_pr.find(qn("w:ind"))
+        if ind is None:
+            continue
+        for attr in ("w:left", "w:right", "w:firstLine", "w:hanging"):
+            value = ind.get(qn(attr))
+            if value is not None and value != "0":
+                return _result(False, f"TOC entry {attr}={value!r} (expected '0'): {p.text!r}")
+    return _result(True, "TOC entries have zero left/right/firstLine/hanging indent")
+
+
+def test_autotoc_blank_paragraph_carries_no_tab_or_hyperlink() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    title_idx = _toc_title_index(out)
+    if title_idx is None:
+        return _result(False, "СОДЕРЖАНИЕ heading missing")
+    blank_p = out.paragraphs[title_idx + 1]
+    if "\t" in (blank_p.text or ""):
+        return _result(False, f"blank paragraph contains tab: {blank_p.text!r}")
+    if blank_p._element.findall(qn("w:hyperlink")):
+        return _result(False, "blank paragraph contains a hyperlink")
+    p_pr = blank_p._element.pPr
+    if p_pr is not None and p_pr.findall(qn("w:tabs")):
+        return _result(False, "blank paragraph carries a tab stop")
+    return _result(True, "blank paragraph has no tab, no hyperlink, no tab stop")
+
+
+def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
+    out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
+    entry_paragraphs = [p for p in out.paragraphs if "\t" in (p.text or "")]
+    if not entry_paragraphs:
+        return _result(False, "no TOC entries found")
+    for p in entry_paragraphs:
+        if not _paragraph_has_right_dot_tab(p):
+            return _result(False, f"entry lacks right dot tab stop: {p.text!r}")
+        if not (p.text or "").split("\t")[-1].strip():
+            return _result(False, f"entry has no page number: {p.text!r}")
+    return _result(True, "dot leader and page numbers preserved with blank paragraph present")
+
+
 def _paragraph_has_texts_in_order(doc: Document, expected: list[str]) -> bool:
     texts = [paragraph.text for paragraph in doc.paragraphs]
     pos = 0
@@ -11237,6 +11400,13 @@ def run_all() -> None:
         ("TOC | fallback after appendices excluded",   test_autotoc_fallback_after_appendices_excluded),
         ("TOC | fallback source/note excluded",        test_autotoc_fallback_source_or_note_excluded),
         ("TOC | fallback strict path unchanged",       test_autotoc_fallback_strict_style_path_unchanged),
+        ("TOC | blank paragraph after title",          test_autotoc_blank_paragraph_after_title),
+        ("TOC | no double blank after title",          test_autotoc_no_double_blank_after_title),
+        ("TOC | title TNR 14 bold centered",           test_autotoc_title_font_is_times_new_roman_14_bold_centered),
+        ("TOC | hyperlink runs TNR 14",                test_autotoc_entry_hyperlink_runs_use_times_new_roman_14),
+        ("TOC | zero hanging/firstLine indent",        test_autotoc_entries_have_zero_hanging_and_firstline_xml),
+        ("TOC | blank paragraph has no tab/hyperlink", test_autotoc_blank_paragraph_carries_no_tab_or_hyperlink),
+        ("TOC | dot leader preserved with blank",      test_autotoc_dot_leader_and_pages_preserved_with_blank),
         # ── P2-a' relaxed row/page matcher tests — registered at tail to
         # avoid shifting the ordinal position of pre-existing E2 tests, which
         # exposed a latent order-sensitive failure in the suite. The matcher

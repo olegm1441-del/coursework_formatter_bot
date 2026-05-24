@@ -380,6 +380,23 @@ def _set_toc_entry_tab_stop(paragraph) -> None:
     p_pr.append(tabs)
 
 
+def _apply_zero_indent_xml(paragraph) -> None:
+    """
+    Wipe inherited w:ind and write a fresh element with all-zero attributes so
+    left/right/firstLine/hanging cannot drift in via styles or python-docx
+    defaults.
+    """
+    p_pr = paragraph._element.get_or_add_pPr()
+    for old in list(p_pr.findall(qn("w:ind"))):
+        p_pr.remove(old)
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:right"), "0")
+    ind.set(qn("w:firstLine"), "0")
+    ind.set(qn("w:hanging"), "0")
+    p_pr.append(ind)
+
+
 def _format_contents_heading(paragraph) -> None:
     paragraph.text = "СОДЕРЖАНИЕ"
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -391,8 +408,31 @@ def _format_contents_heading(paragraph) -> None:
     paragraph.paragraph_format.line_spacing = 1
     paragraph.paragraph_format.page_break_before = False
     _clear_tab_stops(paragraph)
+    _apply_zero_indent_xml(paragraph)
     for run in paragraph.runs:
         _set_run_font(run, bold=True)
+
+
+def _format_toc_blank_paragraph(paragraph) -> None:
+    """
+    The methodical layout (Приложение 3) requires exactly one blank paragraph
+    between the СОДЕРЖАНИЕ title and the first TOC entry. Match entry-level
+    line spacing so the blank reads as a single empty TOC line.
+    """
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    paragraph.paragraph_format.left_indent = Cm(0)
+    paragraph.paragraph_format.right_indent = Cm(0)
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1.5
+    paragraph.paragraph_format.page_break_before = False
+    _clear_tab_stops(paragraph)
+    _apply_zero_indent_xml(paragraph)
+    if not paragraph.runs:
+        paragraph.add_run("")
+    for run in paragraph.runs:
+        _set_run_font(run, bold=False)
 
 
 def _format_toc_entry(paragraph, title: str, page: str) -> None:
@@ -406,6 +446,7 @@ def _format_toc_entry(paragraph, title: str, page: str) -> None:
     paragraph.paragraph_format.line_spacing = 1.5
     paragraph.paragraph_format.page_break_before = False
     _set_toc_entry_tab_stop(paragraph)
+    _apply_zero_indent_xml(paragraph)
     for run in paragraph.runs:
         _set_run_font(run, bold=False)
 
@@ -444,6 +485,11 @@ def _insert_contents_block(document: Document, entries: list[TocEntry], pages: d
 
     new_paragraphs = [document.add_paragraph()]
     _format_contents_heading(new_paragraphs[0])
+
+    blank = document.add_paragraph()
+    _format_toc_blank_paragraph(blank)
+    new_paragraphs.append(blank)
+
     for entry in entries:
         page = str(pages.get(entry.bookmark_name, _PAGE_PLACEHOLDER))
         p = document.add_paragraph()
@@ -574,7 +620,14 @@ def _replace_contents_entry_pages(document: Document, entries: list[TocEntry], p
     if contents_start is None:
         raise ValueError("draft contents block not found")
 
-    entry_paragraphs = document.paragraphs[contents_start + 1:body_start]
+    # The draft block is [title, blank, entry, entry, ...]. Skip blanks so the
+    # second-pass page rewrite stays aligned with `entries` even when the
+    # methodical-required blank paragraph is present after the title.
+    entry_paragraphs = [
+        paragraph
+        for paragraph in document.paragraphs[contents_start + 1:body_start]
+        if clean_spaces(paragraph.text)
+    ]
     if len(entry_paragraphs) != len(entries):
         raise ValueError("draft contents entry count changed")
 
