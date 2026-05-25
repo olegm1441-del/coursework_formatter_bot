@@ -6328,6 +6328,121 @@ def test_h1_body_sentence_no_duplicate_in_output_pipeline() -> tuple[bool, str]:
     return _result(True, "single H1 for chapter 1; body sentence preserved as body text")
 
 
+# ── Always-safe pre-pass: strip_obsolete_toc_blocks_inplace ───────────────
+
+
+def test_strip_obsolete_toc_blocks_inplace_removes_sdt_and_plain_toc() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.contents_builder import (
+        strip_obsolete_toc_blocks_inplace,
+    )
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("Title page")
+    _add_sdt_toc_block(doc)
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ\t3")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ\t5")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ\t10")
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro.style = "Heading 1"
+    doc.add_paragraph("Body prose.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "in.docx")
+        doc.save(p)
+        report = strip_obsolete_toc_blocks_inplace(p)
+        out = Document(p)
+
+    if report["sdt_removed"] != 1:
+        return _result(False, f"expected 1 SDT removed, got {report['sdt_removed']}")
+    if report["plain_toc_removed"] < 4:
+        return _result(False, f"expected ≥4 plain paragraphs removed, got {report['plain_toc_removed']}")
+    if _count_sdt_blocks(out) != 0:
+        return _result(False, "SDT still present after pre-pass")
+    if any((p.text or "").strip() in ("СОДЕРЖАНИЕ", "ВВЕДЕНИЕ\t3", "1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ\t5") for p in out.paragraphs):
+        return _result(False, "old TOC paragraphs survived pre-pass")
+    return _result(True, "pre-pass removes SDT + plain old TOC and saves in place")
+
+
+def test_strip_obsolete_toc_blocks_inplace_noop_on_clean_doc() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.contents_builder import (
+        strip_obsolete_toc_blocks_inplace,
+    )
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("Title page")
+    doc.add_paragraph("ВВЕДЕНИЕ").style = "Heading 1"
+    doc.add_paragraph("Body prose.")
+    doc.add_paragraph("1. Глава").style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "in.docx")
+        doc.save(p)
+        report = strip_obsolete_toc_blocks_inplace(p)
+        out = Document(p)
+
+    if report["sdt_removed"] != 0 or report["plain_toc_removed"] != 0:
+        return _result(False, f"unexpected removals on clean doc: {report!r}")
+    if len(out.paragraphs) != 5:
+        return _result(False, f"clean doc paragraph count changed: {len(out.paragraphs)}")
+    return _result(True, "pre-pass is no-op when no obsolete TOC artifacts present")
+
+
+def test_strip_obsolete_toc_blocks_inplace_runs_even_when_pdf_render_would_fail() -> tuple[bool, str]:
+    """
+    Mock rebuild_static_contents_page to raise (simulating LibreOffice
+    failure); verify obsolete TOC cleanup is still applied via the
+    formatter_service pre-pass.
+    """
+    import guides.coursework_kfu_2025.formatter_service as fs
+    from guides.coursework_kfu_2025.contents_builder import (
+        strip_obsolete_toc_blocks_inplace,
+    )
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("Title")
+    _add_sdt_toc_block(doc)
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ\t3")
+    doc.add_paragraph("1. Глава\t5")
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro.style = "Heading 1"
+    doc.add_paragraph("Body.")
+    h1 = doc.add_paragraph("1. Глава")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Section body.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ").style = "Heading 1"
+    doc.add_paragraph("Conclusion.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ").style = "Heading 1"
+    doc.add_paragraph("1. Источник.")
+
+    saved_rebuild = fs.rebuild_static_contents_page
+
+    def _failing_rebuild(_path):
+        raise RuntimeError("simulated LibreOffice render failure")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        outp = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        fs.rebuild_static_contents_page = _failing_rebuild
+        try:
+            fs.format_docx(inp, outp)
+        finally:
+            fs.rebuild_static_contents_page = saved_rebuild
+        formatted = Document(outp)
+
+    if _count_sdt_blocks(formatted) != 0:
+        return _result(False, "SDT TOC survived when rebuild was simulated to fail")
+    if any((p.text or "").strip() == "СОДЕРЖАНИЕ" for p in formatted.paragraphs):
+        return _result(False, "old plain СОДЕРЖАНИЕ survived when rebuild was simulated to fail")
+    return _result(True, "obsolete TOC cleanup runs even when rebuild raises (no LibreOffice)")
+
+
 def test_table_caption_trailing_period_cleanup() -> tuple[bool, str]:
     """Table numbers/titles lose one terminal period; body text stays unchanged."""
     from guides.coursework_kfu_2025.safe_formatter import process_document
@@ -12843,6 +12958,9 @@ def run_all() -> None:
         ("H1 | exact intro still promoted",              test_h1_exact_intro_still_promoted_with_toc_text),
         ("H1 | centered+bold body promoted",             test_h1_centered_bold_body_with_toc_text_promoted),
         ("H1 | integration: no duplicate H1 in output",  test_h1_body_sentence_no_duplicate_in_output_pipeline),
+        ("CLEAN | pre-pass strips SDT + plain old TOC",  test_strip_obsolete_toc_blocks_inplace_removes_sdt_and_plain_toc),
+        ("CLEAN | pre-pass no-op on clean doc",          test_strip_obsolete_toc_blocks_inplace_noop_on_clean_doc),
+        ("CLEAN | pre-pass survives rebuild failure",    test_strip_obsolete_toc_blocks_inplace_runs_even_when_pdf_render_would_fail),
         ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
         ("B2.5 | real caption before table", test_b25_real_table_caption_directly_before_table_is_formatted),
         ("B2.5 | caption title table", test_b25_real_table_caption_title_table_is_formatted),

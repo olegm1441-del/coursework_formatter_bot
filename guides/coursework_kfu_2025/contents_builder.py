@@ -879,6 +879,60 @@ def _add_body_bookmarks(document: Document, entries: list[TocEntry]) -> None:
             _add_bookmark(paragraphs[entry.paragraph_index], entry.bookmark_name, idx)
 
 
+def strip_obsolete_toc_blocks_inplace(docx_path: str | Path) -> dict:
+    """
+    Strip obsolete TOC artifacts from a DOCX on disk and save back to the same
+    path. DOCX-only operation: no LibreOffice / PDF rendering involved.
+
+    Always-safe pre-pass that complements `rebuild_static_contents_page`.
+    The rebuild pipeline can fail mid-way (PDF render unavailable, degenerate
+    page mapping, etc.) and currently leaves the source untouched; without
+    this pre-pass that fail-safe meant the user saw the original TOC even
+    after our patch removed it inside the rebuild. By stripping obsolete
+    TOC artifacts FIRST and saving directly, we guarantee that the user
+    never gets two TOCs: at worst (rebuild also fails) they get a document
+    without a canonical TOC, which is recoverable.
+
+    Removes:
+      * Every Word-managed Table-of-Contents `<w:sdt>` block in the body
+        (`_is_toc_sdt_block` — three accepted markers).
+      * The plain-text old TOC block between a standalone Содержание /
+        Оглавление paragraph and the real body intro, when the block is
+        `_is_safe_to_remove_pre_body_block`.
+
+    Returns a small report dict so callers can log. Source DOCX is touched
+    only when at least one obsolete artifact was found.
+    """
+    source_path = Path(docx_path)
+    document = Document(str(source_path))
+
+    sdt_removed = _remove_word_managed_toc_blocks(document)
+
+    plain_removed = 0
+    body_start = _find_body_start_index_for_contents(document)
+    if body_start is not None:
+        contents_start = _find_existing_contents_start(document, body_start)
+        if contents_start is not None:
+            paragraphs = document.paragraphs
+            plain_removed = body_start - contents_start
+            _remove_body_children_range(
+                document,
+                paragraphs[contents_start]._element,
+                paragraphs[body_start]._element,
+            )
+
+    if sdt_removed or plain_removed:
+        document.save(str(source_path))
+        logger.info(
+            "obsolete_toc_stripped path=%s sdt=%d plain_paragraphs=%d",
+            source_path,
+            sdt_removed,
+            plain_removed,
+        )
+
+    return {"sdt_removed": sdt_removed, "plain_toc_removed": plain_removed}
+
+
 def rebuild_static_contents_page(docx_path: str | Path) -> bool:
     """
     Rebuild static KFU contents page. The source DOCX is replaced only after all

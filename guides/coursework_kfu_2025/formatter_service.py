@@ -15,7 +15,7 @@ from .table_continuation import (
     apply_rule6_figure_orphan,
     remove_empty_before_figure_captions,
 )
-from .contents_builder import rebuild_static_contents_page
+from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,25 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             logger.info("format_docx: rendered table continuation splits=%d", n_rendered)
     except Exception:
         logger.exception("format_docx: phase3 failed, skipping (phase2 result preserved)")
+
+    # Always-safe pre-pass: strip obsolete TOC artifacts (Word SDT TOC and
+    # the plain-text old TOC block) BEFORE the page-resolving rebuild. The
+    # rebuild can fail (LibreOffice unavailable, degenerate page mapping)
+    # and historically would leave the source TOC visible in that case —
+    # producing two TOCs once the canonical insertion ran in a later run.
+    # This pre-pass is DOCX-only, has no PDF dependency, and saves directly,
+    # so even when the subsequent rebuild fails the user never sees the
+    # original TOC alongside a missing canonical one.
+    try:
+        report_strip = strip_obsolete_toc_blocks_inplace(output_path)
+        if report_strip["sdt_removed"] or report_strip["plain_toc_removed"]:
+            logger.info(
+                "format_docx: pre-rebuild TOC cleanup sdt=%d plain_paragraphs=%d",
+                report_strip["sdt_removed"],
+                report_strip["plain_toc_removed"],
+            )
+    except Exception:
+        logger.exception("format_docx: pre-rebuild TOC cleanup failed, continuing")
 
     try:
         if rebuild_static_contents_page(output_path):
