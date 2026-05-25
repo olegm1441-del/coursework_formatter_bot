@@ -483,6 +483,8 @@ from .classifier import (
     find_body_start_index,
     classify_paragraph,
     clean_spaces,
+    is_intro_heading_text,
+    paragraph_text,
     parse_heading1,
     parse_heading2,
     parse_broken_heading2,
@@ -5425,6 +5427,122 @@ def _format_footnotes(doc: Document) -> int:
     return count
 
 
+_PLAIN_CONTENTS_HEADING_RE = re.compile(
+    r"^\s*(содержание|оглавление)\s*[.:;]?\s*[.․‥…·•\s]*\d{0,4}\s*$",
+    re.IGNORECASE,
+)
+_TOC_ENTRY_PAGE_TAIL_RE = re.compile(r"[\s.․‥…·•]+\d{1,4}\s*$")
+_TOC_ENTRY_APPENDIX_RE = re.compile(
+    r"^приложение\s+(?:\d{1,3}|[a-zа-яё])\b", re.IGNORECASE
+)
+
+
+def _is_plain_contents_heading_paragraph(text: str) -> bool:
+    cleaned = clean_spaces(text or "")
+    if not cleaned:
+        return False
+    first = re.split(r"[\n\v]+", cleaned, maxsplit=1)[0].strip()
+    return bool(_PLAIN_CONTENTS_HEADING_RE.match(first))
+
+
+def _looks_like_toc_entry_text(text: str) -> bool:
+    t = clean_spaces(text or "").strip()
+    if not t:
+        return False
+    t = _TOC_ENTRY_PAGE_TAIL_RE.sub("", t).strip()
+    if not t:
+        return False
+    low = t.lower().rstrip(".").strip()
+    if low in {"введение", "заключение", "приложения"}:
+        return True
+    if low.startswith("список использованных") or low.startswith("список использованной"):
+        return True
+    if _TOC_ENTRY_APPENDIX_RE.match(low):
+        return True
+    if re.match(r"^\d+\.\d+\.?\s+\S", t):
+        return True
+    if re.match(r"^\d+\.\s+\S", t):
+        return True
+    return False
+
+
+def _paragraph_is_heading_styled(paragraph) -> bool:
+    try:
+        style_name = (paragraph.style.name or "").strip().lower()
+    except Exception:
+        style_name = ""
+    if style_name in {
+        "heading 1", "heading 2", "heading 3",
+        "заголовок 1", "заголовок 2", "заголовок 3",
+    }:
+        return True
+    pPr = paragraph._element.pPr
+    if pPr is not None and pPr.find(qn("w:outlineLvl")) is not None:
+        return True
+    return False
+
+
+def find_real_body_start_index(document):
+    """
+    Find the real body ВВЕДЕНИЕ paragraph, skipping past entries of an old
+    plain-text TOC where a 'ВВЕДЕНИЕ' line appears as a TOC entry rather
+    than as the real body intro.
+
+    Strategy (most specific first):
+
+    1. Among all standalone 'ВВЕДЕНИЕ' paragraphs, prefer one that is
+       styled as a Heading (Heading 1/2/3 / Заголовок 1/2/3) or carries
+       a `w:outlineLvl`. A styled intro is an unambiguous real-body
+       signal and overrides any plain-text TOC entries before it.
+
+    2. Otherwise, if a standalone 'Содержание' / 'Оглавление' paragraph
+       (with optional trailing punctuation / leaders / page number)
+       exists earlier in the document AND at least one TOC-like entry
+       sits between it and a later 'ВВЕДЕНИЕ', the later 'ВВЕДЕНИЕ' is
+       the real body intro — return the last such candidate after the
+       last contents heading.
+
+    3. Otherwise fall back to `find_body_start_index` — the legacy
+       first-match behaviour, preserved for documents without any TOC
+       structure.
+    """
+    paragraphs = document.paragraphs
+    intros: list[int] = [
+        idx
+        for idx, p in enumerate(paragraphs)
+        if is_intro_heading_text(paragraph_text(p))
+    ]
+    if not intros:
+        return find_body_start_index(document)
+
+    styled_intros = [idx for idx in intros if _paragraph_is_heading_styled(paragraphs[idx])]
+    if styled_intros:
+        return styled_intros[-1]
+
+    contents_indices = [
+        idx
+        for idx, p in enumerate(paragraphs)
+        if _is_plain_contents_heading_paragraph(paragraph_text(p))
+    ]
+    if contents_indices:
+        last_contents_idx = max(contents_indices)
+        # Require at least one TOC-like entry between the contents heading and
+        # a later ВВЕДЕНИЕ before we treat it as the real intro. Without that
+        # evidence, a standalone Содержание that did not lead a real TOC must
+        # not displace the legacy first-match rule.
+        for j in range(last_contents_idx + 1, len(paragraphs)):
+            text = paragraph_text(paragraphs[j])
+            if not clean_spaces(text):
+                continue
+            if _looks_like_toc_entry_text(text):
+                candidates_after = [i for i in intros if i > last_contents_idx]
+                if candidates_after:
+                    return candidates_after[-1]
+                break
+
+    return intros[0]
+
+
 def process_document(input_path: Path, output_path: Path):
     doc = Document(str(input_path))
 
@@ -5432,7 +5550,7 @@ def process_document(input_path: Path, output_path: Path):
     remove_all_italic(doc)
     set_section_margins(doc)
 
-    body_start = find_body_start_index(doc)
+    body_start = find_real_body_start_index(doc)
     if body_start is None:
         raise RuntimeError("Не найден заголовок 'Введение'; файл пропущен из соображений безопасности.")
 

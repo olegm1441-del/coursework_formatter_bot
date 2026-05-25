@@ -5837,6 +5837,186 @@ def test_lists_bibliography_section_not_normalized() -> tuple[bool, str]:
     return _result(True, "bibliography entries not converted")
 
 
+# ── Real body-start detection (skip fake/old TOC entries) ──────────────
+
+
+def _intro_index_at(doc: Document, text: str) -> int | None:
+    for idx, p in enumerate(doc.paragraphs):
+        if (p.text or "").strip() == text:
+            return idx
+    return None
+
+
+def test_real_body_start_skips_fake_plain_toc_soderzhanie() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    fake_intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Раздел первый")
+    doc.add_paragraph("1.1. Подраздел")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    real_intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    real_intro.style = "Heading 1"
+    doc.add_paragraph("Тело введения.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(real_intro._element)
+    fake_idx = [p._element for p in doc.paragraphs].index(fake_intro._element)
+    if body_start != expected:
+        return _result(False, f"expected body_start={expected} (real intro), got {body_start} (fake={fake_idx})")
+    return _result(True, "fake СОДЕРЖАНИЕ ВВЕДЕНИЕ entry skipped, real Heading 1 ВВЕДЕНИЕ picked")
+
+
+def test_real_body_start_skips_fake_oglavlenie_toc() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титульная страница")
+    doc.add_paragraph("Оглавление")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Раздел один")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    real_intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    real_intro.style = "Heading 1"
+    doc.add_paragraph("Текст введения.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(real_intro._element)
+    if body_start != expected:
+        return _result(False, f"expected real intro at {expected}, got {body_start}")
+    return _result(True, "fake Оглавление ВВЕДЕНИЕ entry skipped")
+
+
+def test_real_body_start_skips_fake_toc_with_appendix_entries() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титул")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. Глава")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 2")
+    real_intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    real_intro.style = "Heading 1"
+    doc.add_paragraph("Тело.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(real_intro._element)
+    if body_start != expected:
+        return _result(False, f"expected real intro at {expected}, got {body_start}")
+    return _result(True, "fake TOC with appendix entries skipped, real intro picked")
+
+
+def test_real_body_start_without_toc_returns_first_intro() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титульная страница")
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. Глава первая")
+    doc.add_paragraph("Текст главы.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(intro._element)
+    if body_start != expected:
+        return _result(False, f"expected first intro at {expected}, got {body_start}")
+    return _result(True, "doc without TOC picks first standalone ВВЕДЕНИЕ")
+
+
+def test_real_body_start_with_canonical_toc_picks_real_intro() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титул")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ\t3")
+    doc.add_paragraph("1. Глава\t4")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ\t10")
+    real_intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    real_intro.style = "Heading 1"
+    doc.add_paragraph("Текст.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(real_intro._element)
+    if body_start != expected:
+        return _result(False, f"expected real intro at {expected}, got {body_start}")
+    return _result(True, "canonical-TOC doc picks Heading 1 ВВЕДЕНИЕ as body start")
+
+
+def test_real_body_start_styled_intro_wins_when_no_fake_toc() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Параграф вступления.")
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro.style = "Heading 1"
+    doc.add_paragraph("Тело.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(intro._element)
+    if body_start != expected:
+        return _result(False, f"expected styled intro at {expected}, got {body_start}")
+    return _result(True, "styled-Heading intro picked directly")
+
+
+def test_real_body_start_lone_contents_heading_does_not_demote_intro() -> tuple[bool, str]:
+    """
+    Standalone Содержание with NO TOC-like entries before the intro should
+    NOT push body_start later — there is no fake TOC to skip.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Титул")
+    doc.add_paragraph("Содержание.")
+    doc.add_paragraph("Обычная вступительная фраза без структуры TOC.")
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Тело.")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(intro._element)
+    if body_start != expected:
+        return _result(False, f"expected lone first intro at {expected}, got {body_start}")
+    return _result(True, "lone Содержание without TOC entries does not displace body_start")
+
+
+def test_real_body_start_smoke_input_picks_heading1_intro() -> tuple[bool, str]:
+    """
+    End-to-end fixture mirroring list_normalization_smoke_input_kfu.docx:
+    a plain-text fake TOC including СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ at
+    front, then real Heading 1 ВВЕДЕНИЕ further down. The real intro must
+    win — otherwise convert_reference_numbering will eat the whole body.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import find_real_body_start_index
+
+    doc = Document()
+    doc.add_paragraph("Заголовок документа")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("1. ТЕСТОВЫЕ БЛОКИ СПИСКОВ")
+    doc.add_paragraph("1.1. Ручные списки")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    real_intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    real_intro.style = "Heading 1"
+    doc.add_paragraph("Контрольный текст.")
+    doc.add_paragraph("1. изучить теоретические основы;")
+    doc.add_paragraph("2. проанализировать практику;")
+
+    body_start = find_real_body_start_index(doc)
+    expected = [p._element for p in doc.paragraphs].index(real_intro._element)
+    if body_start != expected:
+        return _result(False, f"smoke fixture: expected real intro at {expected}, got {body_start}")
+    return _result(True, "smoke-input fixture picks real Heading 1 ВВЕДЕНИЕ")
+
+
 def test_table_caption_trailing_period_cleanup() -> tuple[bool, str]:
     """Table numbers/titles lose one terminal period; body text stays unchanged."""
     from guides.coursework_kfu_2025.safe_formatter import process_document
@@ -11885,6 +12065,14 @@ def run_all() -> None:
         ("LIST | colon numeric-dot → letters preserved", test_lists_existing_colon_numeric_dot_letters_unchanged),
         ("LIST | appendix section NOT normalized",       test_lists_appendix_section_not_normalized),
         ("LIST | bibliography section NOT normalized",   test_lists_bibliography_section_not_normalized),
+        ("BODY | skip fake plain-TOC СОДЕРЖАНИЕ",        test_real_body_start_skips_fake_plain_toc_soderzhanie),
+        ("BODY | skip fake Оглавление",                  test_real_body_start_skips_fake_oglavlenie_toc),
+        ("BODY | skip fake TOC with appendix entries",   test_real_body_start_skips_fake_toc_with_appendix_entries),
+        ("BODY | no TOC → first intro",                  test_real_body_start_without_toc_returns_first_intro),
+        ("BODY | canonical TOC picks real intro",        test_real_body_start_with_canonical_toc_picks_real_intro),
+        ("BODY | styled intro wins",                     test_real_body_start_styled_intro_wins_when_no_fake_toc),
+        ("BODY | lone Содержание keeps first intro",     test_real_body_start_lone_contents_heading_does_not_demote_intro),
+        ("BODY | smoke fixture picks real intro",        test_real_body_start_smoke_input_picks_heading1_intro),
         ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
         ("B2.5 | real caption before table", test_b25_real_table_caption_directly_before_table_is_formatted),
         ("B2.5 | caption title table", test_b25_real_table_caption_title_table_is_formatted),
