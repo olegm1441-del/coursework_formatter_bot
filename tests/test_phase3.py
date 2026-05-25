@@ -5617,6 +5617,226 @@ def test_t5_list_formatting() -> tuple[bool, str]:
     return _result(True, "list items converted and indented correctly ✓")
 
 
+# ── Free-standing list normalization (MVP) ──────────────────────────────
+
+
+def _list_ind_attrs(paragraph):
+    pPr = paragraph._element.find(qn("w:pPr"))
+    if pPr is None:
+        return None, None, None
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        return None, None, None
+    return (
+        ind.get(qn("w:left")),
+        ind.get(qn("w:hanging")),
+        ind.get(qn("w:right")),
+    )
+
+
+def test_lists_manual_dash_block_normalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    p1 = doc.add_paragraph("- первый пункт")
+    p2 = doc.add_paragraph("- второй пункт")
+    p3 = doc.add_paragraph("- третий пункт")
+    _normalize_plain_list_paragraphs([pre, p1, p2, p3])
+    for p in (p1, p2, p3):
+        if not p.text.startswith("– "):
+            return _result(False, f"dash item not normalized: {p.text!r}")
+        left, hang, right = _list_ind_attrs(p)
+        if (left, hang, right) != ("906", "198", "0"):
+            return _result(False, f"dash item bad indent: left={left} hang={hang} right={right}")
+    return _result(True, "ascii-hyphen block normalized to methodical dash")
+
+
+def test_lists_manual_em_dash_block_normalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Введение к блоку.")
+    p1 = doc.add_paragraph("— первый пункт")
+    p2 = doc.add_paragraph("— второй пункт")
+    _normalize_plain_list_paragraphs([pre, p1, p2])
+    for p in (p1, p2):
+        if not p.text.startswith("– "):
+            return _result(False, f"em-dash item not normalized: {p.text!r}")
+    return _result(True, "em-dash block normalized to methodical en-dash")
+
+
+def test_lists_manual_black_bullets_normalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    p1 = doc.add_paragraph("• первый bullet")
+    p2 = doc.add_paragraph("· второй bullet")
+    p3 = doc.add_paragraph("● третий bullet")
+    _normalize_plain_list_paragraphs([pre, p1, p2, p3])
+    for p in (p1, p2, p3):
+        if not p.text.startswith("– "):
+            return _result(False, f"black bullet not normalized: {p.text!r}")
+    return _result(True, "black bullets normalized to methodical dash")
+
+
+def test_lists_singleton_dash_not_converted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    solo = doc.add_paragraph("- одинокий пункт")
+    after = doc.add_paragraph("Обычный текст после.")
+    _normalize_plain_list_paragraphs([pre, solo, after])
+    if solo.text.startswith("– "):
+        return _result(False, f"singleton dash unexpectedly normalized: {solo.text!r}")
+    left, hang, _ = _list_ind_attrs(solo)
+    if left == "906" and hang == "198":
+        return _result(False, "singleton dash unexpectedly got list indent")
+    return _result(True, "singleton dash left untouched")
+
+
+def test_lists_mixed_marker_block_not_converted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    p1 = doc.add_paragraph("- первый пункт")
+    p2 = doc.add_paragraph("1. второй пункт")
+    _normalize_plain_list_paragraphs([pre, p1, p2])
+    if p1.text.startswith("– "):
+        return _result(False, f"mixed-family block converted p1: {p1.text!r}")
+    if p2.text.startswith("а)") or p2.text.startswith("– "):
+        return _result(False, f"mixed-family block converted p2: {p2.text!r}")
+    return _result(True, "mixed-family block left untouched")
+
+
+def test_lists_free_standing_letter_block_normalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    p1 = doc.add_paragraph("а) первый пункт")
+    p2 = doc.add_paragraph("б) второй пункт")
+    p3 = doc.add_paragraph("в) третий пункт")
+    _normalize_plain_list_paragraphs([pre, p1, p2, p3])
+    if not p1.text.startswith("а)"):
+        return _result(False, f"letter item lost marker: {p1.text!r}")
+    if not p2.text.startswith("б)"):
+        return _result(False, f"letter item lost marker: {p2.text!r}")
+    left, hang, _ = _list_ind_attrs(p1)
+    if (left, hang) != ("906", "198"):
+        return _result(False, f"letter item missing indent: left={left} hang={hang}")
+    return _result(True, "free-standing letter block keeps markers, gets hanging indent")
+
+
+def test_lists_numeric_dot_without_colon_not_converted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Обычный абзац без двоеточия.")
+    p1 = doc.add_paragraph("1. Первое утверждение по тексту.")
+    p2 = doc.add_paragraph("2. Второе утверждение по тексту.")
+    p3 = doc.add_paragraph("3. Третье утверждение по тексту.")
+    _normalize_plain_list_paragraphs([pre, p1, p2, p3])
+    if p1.text.startswith("а)") or p1.text.startswith("– "):
+        return _result(False, f"numeric-dot without colon converted: {p1.text!r}")
+    return _result(True, "numeric-dot without colon lead-in untouched")
+
+
+def test_lists_heading_styled_dash_not_converted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Обычный абзац без двоеточия.")
+    h1 = doc.add_paragraph("- ТЕОРЕТИЧЕСКИЕ ОСНОВЫ")
+    h1.style = "Heading 1"
+    p2 = doc.add_paragraph("- продолжение псевдо-списка")
+    _normalize_plain_list_paragraphs([pre, h1, p2])
+    if h1.text.startswith("– "):
+        return _result(False, f"heading-styled dash converted: {h1.text!r}")
+    return _result(True, "heading-styled paragraph not converted")
+
+
+def test_lists_table_caption_not_converted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Обычный абзац без двоеточия.")
+    cap = doc.add_paragraph("- Таблица 1.1.1")  # absurd but tests guard
+    real_cap = doc.add_paragraph("Таблица 1.1.2")
+    p2 = doc.add_paragraph("- второй пункт")
+    _normalize_plain_list_paragraphs([pre, cap, real_cap, p2])
+    if real_cap.text.startswith("– "):
+        return _result(False, f"real table caption converted: {real_cap.text!r}")
+    return _result(True, "table caption guard fires")
+
+
+def test_lists_source_line_not_converted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Обычный абзац без двоеточия.")
+    src1 = doc.add_paragraph("Источник: составлено автором.")
+    src2 = doc.add_paragraph("Примечание: тестовая заметка.")
+    _normalize_plain_list_paragraphs([pre, src1, src2])
+    if src1.text.startswith("– ") or src2.text.startswith("– "):
+        return _result(False, f"source/note converted: {src1.text!r} / {src2.text!r}")
+    return _result(True, "source/note service lines not converted")
+
+
+def test_lists_existing_colon_numeric_dot_letters_unchanged() -> tuple[bool, str]:
+    """Lock-in regression for colon-mode numeric-dot → letters behaviour."""
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    intro = doc.add_paragraph("Для достижения цели необходимо решить следующие задачи:")
+    p1 = doc.add_paragraph("1. изучить теоретические основы")
+    p2 = doc.add_paragraph("2. проанализировать практику")
+    p3 = doc.add_paragraph("3. разработать предложения")
+    _normalize_plain_list_paragraphs([intro, p1, p2, p3])
+    if not p1.text.startswith("а)") or not p2.text.startswith("б)") or not p3.text.startswith("в)"):
+        return _result(False, f"colon numeric-dot not converted to letters: {[p1.text, p2.text, p3.text]!r}")
+    return _result(True, "colon mode numeric-dot → letters preserved")
+
+
+def test_lists_appendix_section_not_normalized() -> tuple[bool, str]:
+    """After ПРИЛОЖЕНИЯ heading, list-like paragraphs are not touched."""
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    doc.add_paragraph("ПРИЛОЖЕНИЕ 1")
+    p1 = doc.add_paragraph("- псевдо-пункт в приложении")
+    p2 = doc.add_paragraph("- второй псевдо-пункт")
+    normalize_plain_lists_in_document(doc, body_start=0)
+    if p1.text.startswith("– "):
+        return _result(False, f"appendix dash converted: {p1.text!r}")
+    if p2.text.startswith("– "):
+        return _result(False, f"appendix dash converted: {p2.text!r}")
+    return _result(True, "appendix-local list-like paragraphs left untouched")
+
+
+def test_lists_bibliography_section_not_normalized() -> tuple[bool, str]:
+    """Numeric entries inside СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ are preserved."""
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    intro = doc.add_paragraph("Для проверки задачи:")
+    p1 = doc.add_paragraph("1. Иванов И.И. Учебное пособие.")
+    p2 = doc.add_paragraph("2. Петров П.П. Документооборот.")
+    normalize_plain_lists_in_document(doc, body_start=0)
+    if p1.text.startswith("а)") or p2.text.startswith("а)"):
+        return _result(False, f"bibliography entry converted: {p1.text!r} / {p2.text!r}")
+    return _result(True, "bibliography entries not converted")
+
+
 def test_table_caption_trailing_period_cleanup() -> tuple[bool, str]:
     """Table numbers/titles lose one terminal period; body text stays unchanged."""
     from guides.coursework_kfu_2025.safe_formatter import process_document
@@ -11652,6 +11872,19 @@ def run_all() -> None:
         ("T3 | reference subheading centred + source indent", test_t3_reference_subheading_centred),
         ("T4 | citation brackets split + p. notation + hyphen→en-dash", test_t4_citation_brackets_split),
         ("T5 | list а)/б)/в) formatting", test_t5_list_formatting),
+        ("LIST | manual dash block normalized",          test_lists_manual_dash_block_normalized),
+        ("LIST | manual em-dash normalized",             test_lists_manual_em_dash_block_normalized),
+        ("LIST | manual black bullets normalized",       test_lists_manual_black_bullets_normalized),
+        ("LIST | singleton dash NOT converted",          test_lists_singleton_dash_not_converted),
+        ("LIST | mixed marker block NOT converted",      test_lists_mixed_marker_block_not_converted),
+        ("LIST | free-standing letter block normalized", test_lists_free_standing_letter_block_normalized),
+        ("LIST | numeric-dot w/o colon NOT converted",   test_lists_numeric_dot_without_colon_not_converted),
+        ("LIST | heading-styled dash NOT converted",     test_lists_heading_styled_dash_not_converted),
+        ("LIST | table caption NOT converted",           test_lists_table_caption_not_converted),
+        ("LIST | source/note NOT converted",             test_lists_source_line_not_converted),
+        ("LIST | colon numeric-dot → letters preserved", test_lists_existing_colon_numeric_dot_letters_unchanged),
+        ("LIST | appendix section NOT normalized",       test_lists_appendix_section_not_normalized),
+        ("LIST | bibliography section NOT normalized",   test_lists_bibliography_section_not_normalized),
         ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
         ("B2.5 | real caption before table", test_b25_real_table_caption_directly_before_table_is_formatted),
         ("B2.5 | caption title table", test_b25_real_table_caption_title_table_is_formatted),

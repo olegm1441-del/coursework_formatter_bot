@@ -1161,6 +1161,13 @@ _CYRILLIC_LIST_ALPHA = 'абвгдежзиклмнопрстуфхцчшщэюя
 _CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яё])\)\s+(.+)$', re.DOTALL)
 _NUMERIC_PAREN_LIST_RE   = re.compile(r'^(\d+)\)\s+(.+)$',   re.DOTALL)
 _NUMERIC_DOT_LIST_RE     = re.compile(r'^(\d+)\.\s+(.+)$',   re.DOTALL)
+# Manual L1 dash/bullet markers (ascii hyphen, en/em dash, common black bullet
+# glyphs). Methodical first-level list marker is en-dash `–`; everything in
+# this class normalises to `– text`.
+_DASH_BULLET_LIST_RE = re.compile(
+    r'^([-–—•·●▪◆■►◦○])\s+(.+)$',
+    re.DOTALL,
+)
 
 
 def _is_level1_list_text(text: str) -> bool:
@@ -1170,6 +1177,14 @@ def _is_level1_list_text(text: str) -> bool:
         or _NUMERIC_PAREN_LIST_RE.match(t)
         or _NUMERIC_DOT_LIST_RE.match(t)
     )
+
+
+def _is_dash_or_bullet_list_text(text: str) -> bool:
+    return bool(_DASH_BULLET_LIST_RE.match(clean_spaces(text)))
+
+
+def _is_letter_list_text(text: str) -> bool:
+    return bool(_CYRILLIC_LETTER_LIST_RE.match(clean_spaces(text)))
 
 
 def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
@@ -1234,16 +1249,104 @@ def _format_level2_list_item(paragraph, number: int, body_text: str):
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
 
 
+def _format_dash_list_item(paragraph, body_text: str):
+    """Format a paragraph as methodical first-level dash list item (`– text`)."""
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    replace_paragraph_text(paragraph, f"– {body_text}")
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+
+def _paragraph_blocks_list_conversion(paragraph, text: str) -> bool:
+    """
+    Hard veto for free-standing list conversion. Paragraphs that look like
+    structural headings, table/figure captions, table continuation labels,
+    source/note service lines, formulas or formula explanations must never be
+    rewritten as list items, regardless of how they start.
+    """
+    try:
+        style_name = (paragraph.style.name or "").strip().lower()
+    except Exception:
+        style_name = ""
+    if style_name in {
+        "heading 1", "heading 2", "heading 3",
+        "заголовок 1", "заголовок 2", "заголовок 3",
+    }:
+        return True
+    pPr = paragraph._element.pPr
+    if pPr is not None and pPr.find(qn("w:outlineLvl")) is not None:
+        return True
+    if TABLE_NUM_RE.match(text) or FIG_RE.match(text) or FIG_SERVICE_LINE_RE.match(text):
+        return True
+    if is_table_continuation_text(text):
+        return True
+    if is_formula_paragraph_text(text):
+        return True
+    if is_formula_explanation_start(text):
+        return True
+    return False
+
+
 def _normalize_plain_list_paragraphs(paragraphs: list):
     """
     Detect and reformat plain-text list items in a sequence of paragraphs.
-    A list context is triggered by a paragraph ending with ':'.
+
+    Three modes are supported:
+
+    1) Colon-trigger (existing behaviour, unchanged):
+       A paragraph ending with ':' (that is not itself a list item) opens a
+       list context. Subsequent numeric / letter markers become methodical
+       L1 letters (`а)/б)/в)…`); a nested `1)` directly after the first L1
+       item becomes L2 numeric (`1) 2) 3)…`).
+
+    2) Free-standing dash / bullet (new, safe MVP):
+       Two or more consecutive paragraphs starting with `-`, `–`, `—`, `•`,
+       `·`, `●`, etc. become methodical L1 dash items (`– text`) with
+       hanging indent. Singletons stay untouched. Any structural-guard hit
+       on a candidate paragraph aborts the block.
+
+    3) Free-standing letter (new, safe MVP):
+       Two or more consecutive `а) б) в)` paragraphs get the L1 letter
+       layout applied (letters preserved as-is from the source).
+
+    A blank paragraph, a guarded paragraph, or a paragraph of a different
+    marker family resets every free-standing buffer so a singleton or mixed
+    block is never converted.
     """
     in_list = False
     level1_counter = 0
     level2_counter = 0
     prev_was_level1 = False
     prev_was_level2 = False
+
+    dash_buffer = None        # (paragraph, body_text) pending dash candidate
+    in_dash_block = False
+    letter_buffer = None      # (paragraph, letter, body_text) pending letter candidate
+    in_letter_block = False
+
+    def _reset_free_blocks() -> None:
+        nonlocal dash_buffer, in_dash_block, letter_buffer, in_letter_block
+        dash_buffer = None
+        in_dash_block = False
+        letter_buffer = None
+        in_letter_block = False
 
     for p in paragraphs:
         text = clean_spaces(p.text)
@@ -1253,6 +1356,7 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
             level2_counter = 0
             prev_was_level1 = False
             prev_was_level2 = False
+            _reset_free_blocks()
             continue
 
         if text.endswith(':') and not _is_level1_list_text(text):
@@ -1261,67 +1365,131 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
             level2_counter = 0
             prev_was_level1 = False
             prev_was_level2 = False
+            _reset_free_blocks()
             continue
 
-        if not in_list:
-            continue
+        if in_list:
+            m_cyr       = _CYRILLIC_LETTER_LIST_RE.match(text)
+            m_num_paren = _NUMERIC_PAREN_LIST_RE.match(text)
+            m_num_dot   = _NUMERIC_DOT_LIST_RE.match(text)
 
-        m_cyr      = _CYRILLIC_LETTER_LIST_RE.match(text)
-        m_num_paren = _NUMERIC_PAREN_LIST_RE.match(text)
-        m_num_dot   = _NUMERIC_DOT_LIST_RE.match(text)
-
-        if m_cyr:
-            body = m_cyr.group(2).strip()
-            letter = _CYRILLIC_LIST_ALPHA[level1_counter] if level1_counter < len(_CYRILLIC_LIST_ALPHA) else m_cyr.group(1)
-            _format_cyrillic_list_item(p, letter, body)
-            level1_counter += 1
-            level2_counter = 0
-            prev_was_level1 = True
-            prev_was_level2 = False
-
-        elif m_num_paren or m_num_dot:
-            m = m_num_paren or m_num_dot
-            body = m.group(2).strip()
-            num = int(m.group(1))
-
-            if prev_was_level1 and num == 1:
-                level2_counter = 1
-                _format_level2_list_item(p, level2_counter, body)
-                prev_was_level1 = False
-                prev_was_level2 = True
-            elif prev_was_level2:
-                level2_counter += 1
-                _format_level2_list_item(p, level2_counter, body)
-            else:
-                letter_idx = level1_counter
-                letter = _CYRILLIC_LIST_ALPHA[letter_idx] if letter_idx < len(_CYRILLIC_LIST_ALPHA) else str(level1_counter + 1)
+            if m_cyr:
+                body = m_cyr.group(2).strip()
+                letter = _CYRILLIC_LIST_ALPHA[level1_counter] if level1_counter < len(_CYRILLIC_LIST_ALPHA) else m_cyr.group(1)
                 _format_cyrillic_list_item(p, letter, body)
                 level1_counter += 1
                 level2_counter = 0
                 prev_was_level1 = True
                 prev_was_level2 = False
-        else:
+                continue
+
+            if m_num_paren or m_num_dot:
+                m = m_num_paren or m_num_dot
+                body = m.group(2).strip()
+                num = int(m.group(1))
+
+                if prev_was_level1 and num == 1:
+                    level2_counter = 1
+                    _format_level2_list_item(p, level2_counter, body)
+                    prev_was_level1 = False
+                    prev_was_level2 = True
+                elif prev_was_level2:
+                    level2_counter += 1
+                    _format_level2_list_item(p, level2_counter, body)
+                else:
+                    letter_idx = level1_counter
+                    letter = _CYRILLIC_LIST_ALPHA[letter_idx] if letter_idx < len(_CYRILLIC_LIST_ALPHA) else str(level1_counter + 1)
+                    _format_cyrillic_list_item(p, letter, body)
+                    level1_counter += 1
+                    level2_counter = 0
+                    prev_was_level1 = True
+                    prev_was_level2 = False
+                continue
+
+            # Colon-mode saw a non-numeric/non-letter paragraph: close the
+            # colon context and re-evaluate this same paragraph against
+            # free-standing detection. This is what lets `- text` items
+            # right after a `задачи:` lead-in be recognised by the dash
+            # path instead of being silently consumed by the reset.
             in_list = False
             level1_counter = 0
             level2_counter = 0
             prev_was_level1 = False
             prev_was_level2 = False
+            # fall through to free-standing detection
+
+        # Free-standing modes — apply hard guards first so headings, captions,
+        # source lines, formulas, and figure-service lines can never be
+        # rewritten as list items.
+        if _paragraph_blocks_list_conversion(p, text):
+            _reset_free_blocks()
+            continue
+
+        m_dash_free = _DASH_BULLET_LIST_RE.match(text)
+        if m_dash_free:
+            body = m_dash_free.group(2).strip()
+            # Different family pending? abort it.
+            letter_buffer = None
+            in_letter_block = False
+            if in_dash_block:
+                _format_dash_list_item(p, body)
+            elif dash_buffer is None:
+                dash_buffer = (p, body)
+            else:
+                first_p, first_body = dash_buffer
+                _format_dash_list_item(first_p, first_body)
+                _format_dash_list_item(p, body)
+                dash_buffer = None
+                in_dash_block = True
+            continue
+
+        m_letter_free = _CYRILLIC_LETTER_LIST_RE.match(text)
+        if m_letter_free:
+            letter = m_letter_free.group(1)
+            body = m_letter_free.group(2).strip()
+            dash_buffer = None
+            in_dash_block = False
+            if in_letter_block:
+                _format_cyrillic_list_item(p, letter, body)
+            elif letter_buffer is None:
+                letter_buffer = (p, letter, body)
+            else:
+                first_p, first_letter, first_body = letter_buffer
+                _format_cyrillic_list_item(first_p, first_letter, first_body)
+                _format_cyrillic_list_item(p, letter, body)
+                letter_buffer = None
+                in_letter_block = True
+            continue
+
+        # Anything else breaks any pending free-standing block.
+        _reset_free_blocks()
 
 
 def normalize_plain_lists_in_document(document, body_start):
-    """Normalise plain-text list items in the document body. Skips references block."""
+    """
+    Normalise plain-text list items in the document body.
+
+    Skips the bibliography block (between `СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ`
+    and `ПРИЛОЖЕНИЯ`) and the appendices block (everything from `ПРИЛОЖЕНИЯ`
+    to the end of the document). Numbered entries in references and
+    appendix-local paragraphs must remain plain text.
+    """
     in_ref = False
-    body_paras = []
+    in_appendix = False
+    body_paras: list = []
     for idx, p in enumerate(document.paragraphs):
         if idx < (body_start or 0):
             continue
         t = clean_spaces(p.text)
+        if is_appendix_heading_text(t):
+            in_appendix = True
         if is_references_heading_text(t):
             in_ref = True
         if in_ref and is_appendix_heading_text(t):
             in_ref = False
-        if not in_ref:
-            body_paras.append(p)
+        if in_ref or in_appendix:
+            continue
+        body_paras.append(p)
 
     _normalize_plain_list_paragraphs(body_paras)
 
@@ -5797,5 +5965,14 @@ def process_document(input_path: Path, output_path: Path):
         doc,
         body_start,
     )
+
+    # Re-apply plain-list normalisation as the final pass: `format_body` in the
+    # main classification loop resets paragraph indents back to body defaults
+    # (left=0 firstLine=709), which strips the methodical list hanging indent
+    # written by the early Phase-1 pass. Running the same normaliser again
+    # against the now-stable, heading-styled document re-attaches `left=906
+    # hanging=198` to dash/letter list blocks while heading guards continue to
+    # protect chapter and subchapter paragraphs.
+    normalize_plain_lists_in_document(doc, body_start)
 
     doc.save(str(output_path))
