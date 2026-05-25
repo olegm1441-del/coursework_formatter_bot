@@ -427,6 +427,64 @@ def _remove_body_children_range(document: Document, start_elem, end_elem) -> Non
         body.remove(child)
 
 
+def _is_toc_sdt_block(sdt_elem) -> bool:
+    """
+    Identify a `<w:sdt>` block that wraps a Word-managed Table of Contents.
+
+    Three accepted markers (any one is sufficient):
+      * `<w:docPartGallery w:val="Table of Contents"/>` in sdtPr (Word's
+        canonical TOC SDT — observed in real student docs).
+      * any nested `<w:fldChar>` referencing a `TOC` field (legacy field-code
+        TOC wrapped in an SDT).
+      * a nested `<w:fldSimple w:instr="TOC ...">` element.
+    """
+    properties = sdt_elem.find(qn("w:sdtPr"))
+    if properties is not None:
+        doc_part_obj = properties.find(qn("w:docPartObj"))
+        if doc_part_obj is not None:
+            gallery = doc_part_obj.find(qn("w:docPartGallery"))
+            if gallery is not None:
+                value = (gallery.get(qn("w:val")) or "").strip().lower()
+                if value == "table of contents":
+                    return True
+    # Field-code based TOCs nested inside SDT
+    for instr_text in sdt_elem.findall(".//" + qn("w:instrText")):
+        if "TOC" in (instr_text.text or "").upper():
+            return True
+    for fld_simple in sdt_elem.findall(".//" + qn("w:fldSimple")):
+        instr = (fld_simple.get(qn("w:instr")) or "").upper()
+        if "TOC" in instr:
+            return True
+    return False
+
+
+def _remove_word_managed_toc_blocks(document: Document) -> int:
+    """
+    Remove every Word-managed TOC `<w:sdt>` block from the document body.
+
+    `python-docx`'s `document.paragraphs` reports only top-level `<w:p>` body
+    children; paragraphs nested inside `<w:sdt>` are invisible to the
+    contents detection / removal helpers above. As a result a Word-managed
+    Table of Contents SDT survives the canonical TOC rebuild and the
+    rendered file contains two TOCs.
+
+    This helper drops the entire SDT element (the whole TOC container,
+    not its inner paragraphs) for every SDT block that satisfies
+    `_is_toc_sdt_block`. Other SDT blocks (form fields, content controls
+    that are NOT a TOC) are untouched.
+
+    Returns the number of SDT blocks removed.
+    """
+    body = document.element.body
+    removed = 0
+    for sdt_elem in list(body.findall(qn("w:sdt"))):
+        if not _is_toc_sdt_block(sdt_elem):
+            continue
+        body.remove(sdt_elem)
+        removed += 1
+    return removed
+
+
 def _set_run_font(run, *, bold: bool) -> None:
     run.font.name = "Times New Roman"
     run.font.size = Pt(14)
@@ -613,7 +671,23 @@ def _insert_contents_block(document: Document, entries: list[TocEntry], pages: d
     if body_start is None:
         raise ValueError("real ВВЕДЕНИЕ heading not found")
 
+    # Step 1: drop every Word-managed TOC `<w:sdt>` block from the body.
+    # `document.paragraphs` is blind to SDT-nested content, so without this
+    # step the previous Word TOC survives the rebuild and the rendered file
+    # contains two TOCs side-by-side. Done BEFORE recomputing the paragraph
+    # list because removing body children renumbers indices.
+    sdt_removed = _remove_word_managed_toc_blocks(document)
+
     paragraphs = document.paragraphs
+    if sdt_removed:
+        # Re-locate body_start: paragraph indices shift when SDT-wrapped
+        # children disappear. Re-running the detector keeps subsequent helpers
+        # consistent.
+        body_start = _find_body_start_index_for_contents(document)
+        if body_start is None:
+            raise ValueError("real ВВЕДЕНИЕ heading not found after SDT cleanup")
+        paragraphs = document.paragraphs
+
     intro_elem = paragraphs[body_start]._element
     contents_start = _find_existing_contents_start(document, body_start)
     removed_count = 0
@@ -624,6 +698,10 @@ def _insert_contents_block(document: Document, entries: list[TocEntry], pages: d
             if _is_contents_heading(paragraph.text)
         )
         _remove_body_children_range(document, paragraphs[contents_start]._element, intro_elem)
+    if sdt_removed:
+        logger.info(
+            "contents_rebuild_sdt_toc_removed path=<doc> count=%d", sdt_removed
+        )
 
     new_paragraphs = [document.add_paragraph()]
     _format_contents_heading(new_paragraphs[0])

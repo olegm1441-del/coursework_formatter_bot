@@ -3263,13 +3263,23 @@ def is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=None):
     if parsed_h1["kind"] == "heading1_exact":
         return True
 
-    if toc_text:
+    # toc_text alone is NOT sufficient. A body sentence shaped like `N. Foo.`
+    # may match parse_heading1 and find a chapter-N entry inside toc_h1_map
+    # built from an old / fake TOC; relying on toc_text in that case promoted
+    # the body sentence to Heading 1 and triggered uppercase + duplicate-H1
+    # contamination (file 198 idx 80 "1. Маркетинговый подход. Данный
+    # подход" → "1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ…"). Require an independent
+    # structural signal — Heading style / outline level or a centred-bold
+    # visual heading — for the toc_text shortcut to fire.
+    has_structural_signal = (
+        paragraph_has_heading_style_or_outline(paragraph)
+        or is_probable_center_bold_heading(paragraph)
+    )
+
+    if toc_text and has_structural_signal:
         return True
 
-    if paragraph_has_heading_style_or_outline(paragraph):
-        return True
-
-    if is_probable_center_bold_heading(paragraph):
+    if has_structural_signal:
         return True
 
     title = clean_spaces(parsed_h1.get("title") or "")

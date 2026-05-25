@@ -6017,6 +6017,317 @@ def test_real_body_start_smoke_input_picks_heading1_intro() -> tuple[bool, str]:
     return _result(True, "smoke-input fixture picks real Heading 1 ВВЕДЕНИЕ")
 
 
+# ── Word-managed SDT TOC removal + tightened H1 promotion ─────────────────
+
+
+def _add_sdt_toc_block(document: Document, gallery_val: str = "Table of Contents") -> None:
+    """
+    Inject a synthetic Word-managed TOC <w:sdt> block at the start of the
+    document body, mirroring the structure observed in real student docs
+    (file 198 inspect).
+    """
+    body = document.element.body
+    sdt = OxmlElement("w:sdt")
+    sdt_pr = OxmlElement("w:sdtPr")
+    doc_part_obj = OxmlElement("w:docPartObj")
+    gallery = OxmlElement("w:docPartGallery")
+    gallery.set(qn("w:val"), gallery_val)
+    doc_part_obj.append(gallery)
+    sdt_pr.append(doc_part_obj)
+    sdt.append(sdt_pr)
+    sdt_content = OxmlElement("w:sdtContent")
+    for text in (
+        "Содержание",
+        "Введение",
+        "1. Теоретические аспекты критериев",
+        "1.1. Понятие",
+    ):
+        p = OxmlElement("w:p")
+        r = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.text = text
+        r.append(t)
+        p.append(r)
+        sdt_content.append(p)
+    sdt.append(sdt_content)
+    body.insert(0, sdt)
+
+
+def _add_sdt_with_field_toc(document: Document) -> None:
+    body = document.element.body
+    sdt = OxmlElement("w:sdt")
+    sdt_pr = OxmlElement("w:sdtPr")
+    sdt.append(sdt_pr)
+    sdt_content = OxmlElement("w:sdtContent")
+    p = OxmlElement("w:p")
+    r = OxmlElement("w:r")
+    fld = OxmlElement("w:fldChar")
+    fld.set(qn("w:fldCharType"), "begin")
+    r.append(fld)
+    instr = OxmlElement("w:instrText")
+    instr.text = ' TOC \\o "1-3" '
+    r.append(instr)
+    p.append(r)
+    sdt_content.append(p)
+    sdt.append(sdt_content)
+    body.insert(0, sdt)
+
+
+def _add_non_toc_sdt(document: Document) -> None:
+    """An SDT used for a content control (NOT a TOC) — must be preserved."""
+    body = document.element.body
+    sdt = OxmlElement("w:sdt")
+    sdt_pr = OxmlElement("w:sdtPr")
+    doc_part_obj = OxmlElement("w:docPartObj")
+    gallery = OxmlElement("w:docPartGallery")
+    gallery.set(qn("w:val"), "Cover Pages")
+    doc_part_obj.append(gallery)
+    sdt_pr.append(doc_part_obj)
+    sdt.append(sdt_pr)
+    sdt_content = OxmlElement("w:sdtContent")
+    p = OxmlElement("w:p")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "Cover content placeholder"
+    r.append(t)
+    p.append(r)
+    sdt_content.append(p)
+    sdt.append(sdt_content)
+    body.insert(0, sdt)
+
+
+def _count_sdt_blocks(document: Document) -> int:
+    return len(document.element.body.findall(qn("w:sdt")))
+
+
+def test_contents_removes_word_managed_sdt_toc() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.contents_builder import _remove_word_managed_toc_blocks
+
+    doc = Document()
+    doc.add_paragraph("Титульная страница")
+    doc.add_paragraph("ВВЕДЕНИЕ").style = "Heading 1"
+    doc.add_paragraph("Тело.")
+    _add_sdt_toc_block(doc)
+
+    before = _count_sdt_blocks(doc)
+    removed = _remove_word_managed_toc_blocks(doc)
+    after = _count_sdt_blocks(doc)
+
+    if before != 1:
+        return _result(False, f"setup: expected 1 SDT before, got {before}")
+    if removed != 1:
+        return _result(False, f"expected 1 removal, got {removed}")
+    if after != 0:
+        return _result(False, f"expected 0 SDT after, got {after}")
+    return _result(True, "Word-managed TOC SDT removed")
+
+
+def test_contents_removes_field_code_sdt_toc() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.contents_builder import _remove_word_managed_toc_blocks
+
+    doc = Document()
+    doc.add_paragraph("Title")
+    doc.add_paragraph("ВВЕДЕНИЕ").style = "Heading 1"
+    _add_sdt_with_field_toc(doc)
+
+    removed = _remove_word_managed_toc_blocks(doc)
+    if removed != 1:
+        return _result(False, f"expected 1 field-code TOC removal, got {removed}")
+    if _count_sdt_blocks(doc) != 0:
+        return _result(False, "field-code TOC SDT not removed")
+    return _result(True, "field-code TOC SDT removed via instrText TOC detection")
+
+
+def test_contents_keeps_non_toc_sdt() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.contents_builder import _remove_word_managed_toc_blocks
+
+    doc = Document()
+    doc.add_paragraph("Title")
+    doc.add_paragraph("ВВЕДЕНИЕ").style = "Heading 1"
+    _add_non_toc_sdt(doc)
+
+    removed = _remove_word_managed_toc_blocks(doc)
+    if removed != 0:
+        return _result(False, f"non-TOC SDT was removed; count={removed}")
+    if _count_sdt_blocks(doc) != 1:
+        return _result(False, "non-TOC SDT count drift")
+    return _result(True, "non-TOC SDT (Cover Pages gallery) preserved")
+
+
+def test_contents_rebuild_drops_sdt_toc_end_to_end() -> tuple[bool, str]:
+    """
+    End-to-end via rebuild_static_contents_page: doc with a Word-managed
+    TOC SDT in front matter should have it stripped during rebuild; only
+    the canonical text TOC remains.
+    """
+    doc = Document()
+    doc.add_paragraph("Титульная страница")
+    _add_sdt_toc_block(doc)
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro.style = "Heading 1"
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("ЗАКЛЮЧЕНИЕ", 5),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+
+    if _count_sdt_blocks(out) != 0:
+        return _result(False, f"SDT TOC survived rebuild; count={_count_sdt_blocks(out)}")
+
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected exactly one canonical СОДЕРЖАНИЕ, got {front!r}")
+    return _result(True, "end-to-end: SDT TOC dropped, single canonical TOC remains")
+
+
+def test_h1_body_sentence_not_promoted_via_toc_text() -> tuple[bool, str]:
+    """
+    Body sentence shaped like `1. Foo. Bar.` with Normal style + matching
+    chapter entry in toc_h1_map must NOT be promoted to Heading 1.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import is_heading1_promotion_safe
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+
+    doc = Document()
+    # Exact text from file 198 source idx 80 — `parse_heading1` accepts it
+    # because the body sentence has no trailing punctuation and only one
+    # embedded period. Before the patch, `toc_text` from the front-matter
+    # plain TOC was a sufficient signal to flip this paragraph into a
+    # Heading 1 — producing duplicate "1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ…" headings.
+    p = doc.add_paragraph("1. Маркетинговый подход. Данный подход")
+    parsed = parse_heading1(p.text)
+    if parsed is None:
+        return _result(False, "test setup: parse_heading1 did not parse body sentence")
+    toc_text = "1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ КРИТЕРИЕВ И ПОКАЗАТЕЛЕЙ"
+
+    if is_heading1_promotion_safe(p, parsed, toc_text=toc_text):
+        return _result(False, "body sentence promoted via toc_text alone — regression")
+    return _result(True, "toc_text shortcut blocked for body prose without structural signal")
+
+
+def test_h1_styled_chapter_with_toc_text_still_promoted() -> tuple[bool, str]:
+    """
+    Real chapter heading styled Heading 1 + matching toc_h1_map entry MUST
+    still be promotion-safe. Regression guard against over-tightening.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import is_heading1_promotion_safe
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+
+    doc = Document()
+    p = doc.add_paragraph("1. Теоретические основы")
+    p.style = "Heading 1"
+    parsed = parse_heading1(p.text)
+    if parsed is None:
+        return _result(False, "test setup: parse_heading1 did not parse styled heading")
+
+    if not is_heading1_promotion_safe(p, parsed, toc_text="1. Теоретические основы"):
+        return _result(False, "styled chapter heading was wrongly rejected")
+    return _result(True, "styled Heading 1 + toc_text remains promotion-safe")
+
+
+def test_h1_exact_intro_still_promoted_with_toc_text() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import is_heading1_promotion_safe
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+
+    p = Document().add_paragraph("ВВЕДЕНИЕ")
+    parsed = parse_heading1(p.text)
+    if not parsed or parsed["kind"] != "heading1_exact":
+        return _result(False, f"setup: unexpected parse_heading1 result: {parsed!r}")
+    if not is_heading1_promotion_safe(p, parsed, toc_text="ВВЕДЕНИЕ"):
+        return _result(False, "exact intro rejected")
+    return _result(True, "ВВЕДЕНИЕ exact-match still promotion-safe")
+
+
+def test_h1_centered_bold_body_with_toc_text_promoted() -> tuple[bool, str]:
+    """
+    A centred + bold heading-like paragraph + matching toc_h1_map entry
+    must still be promotion-safe even with Normal style (visual signal).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import is_heading1_promotion_safe
+    from guides.coursework_kfu_2025.classifier import parse_heading1
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    p = doc.add_paragraph()
+    run = p.add_run("1. Теоретические основы")
+    run.bold = True
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    parsed = parse_heading1(p.text)
+    if parsed is None:
+        return _result(False, "test setup: parse_heading1 did not parse")
+    if not is_heading1_promotion_safe(p, parsed, toc_text="1. Теоретические основы"):
+        return _result(False, "centred+bold body heading wrongly rejected")
+    return _result(True, "centred+bold visual heading remains promotion-safe")
+
+
+def test_h1_body_sentence_no_duplicate_in_output_pipeline() -> tuple[bool, str]:
+    """
+    Integration: a doc with an old plain-text TOC AND a body sentence shaped
+    like a chapter heading must produce a single Heading 1 per chapter in
+    the formatted output. The body sentence stays body text.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    import tempfile, os
+
+    doc = Document()
+    doc.add_paragraph("Титульная страница")
+    doc.add_paragraph("СОДЕРЖАНИЕ")
+    doc.add_paragraph("ВВЕДЕНИЕ\t3")
+    doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ КРИТЕРИЕВ И ПОКАЗАТЕЛЕЙ\t5")
+    doc.add_paragraph("1.1. Понятие и сущность\t5")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\t38")
+    intro = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro.style = "Heading 1"
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. ТЕОРЕТИЧЕСКИЕ АСПЕКТЫ КРИТЕРИЕВ И ПОКАЗАТЕЛЕЙ")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Тело раздела.")
+    # Body prose that USED to be promoted to a duplicate Heading 1:
+    doc.add_paragraph("1. Маркетинговый подход. Данный подход применяется в анализе.")
+    doc.add_paragraph("Продолжение прозы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ").style = "Heading 1"
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ").style = "Heading 1"
+    doc.add_paragraph("1. Источник.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        formatted = Document(out)
+
+    h1_chapter_paragraphs = [
+        p for p in formatted.paragraphs
+        if (p.style.name or "").lower() in {"heading 1", "заголовок 1"}
+        and (p.text or "").startswith("1. ")
+    ]
+    if len(h1_chapter_paragraphs) != 1:
+        texts = [p.text[:80] for p in h1_chapter_paragraphs]
+        return _result(False, f"expected exactly 1 Heading 1 starting with '1. ', got {len(h1_chapter_paragraphs)}: {texts!r}")
+
+    # The body sentence must remain body text and keep its original phrasing.
+    body_sentence_present = any(
+        "Маркетинговый подход" in (p.text or "")
+        and (p.style.name or "").lower() not in {"heading 1", "заголовок 1"}
+        for p in formatted.paragraphs
+    )
+    if not body_sentence_present:
+        return _result(False, "body sentence with 'Маркетинговый подход' was lost or promoted")
+    return _result(True, "single H1 for chapter 1; body sentence preserved as body text")
+
+
 def test_table_caption_trailing_period_cleanup() -> tuple[bool, str]:
     """Table numbers/titles lose one terminal period; body text stays unchanged."""
     from guides.coursework_kfu_2025.safe_formatter import process_document
@@ -12523,6 +12834,15 @@ def run_all() -> None:
         ("BODY | styled intro wins",                     test_real_body_start_styled_intro_wins_when_no_fake_toc),
         ("BODY | lone Содержание keeps first intro",     test_real_body_start_lone_contents_heading_does_not_demote_intro),
         ("BODY | smoke fixture picks real intro",        test_real_body_start_smoke_input_picks_heading1_intro),
+        ("SDT | Word-managed TOC SDT removed",           test_contents_removes_word_managed_sdt_toc),
+        ("SDT | field-code TOC SDT removed",             test_contents_removes_field_code_sdt_toc),
+        ("SDT | non-TOC SDT preserved",                  test_contents_keeps_non_toc_sdt),
+        ("SDT | end-to-end SDT TOC removed via rebuild", test_contents_rebuild_drops_sdt_toc_end_to_end),
+        ("H1 | body sentence NOT promoted via toc_text", test_h1_body_sentence_not_promoted_via_toc_text),
+        ("H1 | styled chapter with toc_text promoted",   test_h1_styled_chapter_with_toc_text_still_promoted),
+        ("H1 | exact intro still promoted",              test_h1_exact_intro_still_promoted_with_toc_text),
+        ("H1 | centered+bold body promoted",             test_h1_centered_bold_body_with_toc_text_promoted),
+        ("H1 | integration: no duplicate H1 in output",  test_h1_body_sentence_no_duplicate_in_output_pipeline),
         ("T5 | table caption trailing period cleanup", test_table_caption_trailing_period_cleanup),
         ("B2.5 | real caption before table", test_b25_real_table_caption_directly_before_table_is_formatted),
         ("B2.5 | caption title table", test_b25_real_table_caption_title_table_is_formatted),
