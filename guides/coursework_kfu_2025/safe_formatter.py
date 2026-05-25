@@ -2672,11 +2672,40 @@ def clear_cell_borders(cell):
     if tcBorders is not None:
         tcPr.remove(tcBorders)
 
+
+def _safe_formatter_table_geometry_policy(table) -> str:
+    """
+    Classify table geometry before Phase 1 width/border normalization.
+
+    Phase 1 fails closed here: if classification cannot be evaluated, existing
+    geometry is preserved instead of rewritten.
+    """
+    try:
+        from .table_continuation import classify_table_geometry_policy
+
+        policy = classify_table_geometry_policy(table._tbl)
+    except Exception:
+        return "preserve_geometry"
+
+    if policy == "simple":
+        return "simple"
+    if policy in {"preserve_geometry", "unsafe_no_split"}:
+        return policy
+    return "preserve_geometry"
+
+
+def _safe_formatter_preserve_table_geometry(table) -> bool:
+    return _safe_formatter_table_geometry_policy(table) != "simple"
+
+
 def force_table_outer_borders_single(table, color="000000", size="4", space="0"):
     """
     Жестко задает одинарные границы таблицы и удаляет те table-level XML-узлы,
     которые в Word for Mac могут давать визуальный эффект двойного контура.
     """
+    if _safe_formatter_preserve_table_geometry(table):
+        return
+
     tbl = table._tbl
     tblPr = tbl.tblPr
     if tblPr is None:
@@ -2758,6 +2787,9 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 
 
 def apply_table_borders(table):
+    if _safe_formatter_preserve_table_geometry(table):
+        return
+
     # Один источник истины для рамок — tblBorders на уровне таблицы.
     force_table_outer_borders_single(table, size="4")
 
@@ -2947,12 +2979,17 @@ def _set_table_paragraph_alignment(paragraph, alignment) -> None:
     fmt.right_indent = Cm(0)
 
 
-def _set_table_fixed_widths_from_grid(table):
+def _set_table_fixed_widths_from_grid(table, *, preserve_geometry: bool | None = None):
     """
     Жестко переносит ширины из tblGrid в tblW и tcW,
     чтобы Word не пересчитывал геометрию таблицы как auto.
     Это снижает риск визуально "двойных" линий.
     """
+    if preserve_geometry is None:
+        preserve_geometry = _safe_formatter_preserve_table_geometry(table)
+    if preserve_geometry:
+        return
+
     tbl = table._tbl
     tblPr = tbl.tblPr
     if tblPr is None:
@@ -3022,14 +3059,17 @@ def ensure_all_table_rows_cant_split(document):
 
 def format_tables(document):
     for table in document.tables:
-        apply_table_borders(table)
+        preserve_geometry = _safe_formatter_preserve_table_geometry(table)
 
-        try:
-            table.autofit = False
-        except Exception:
-            pass
+        if not preserve_geometry:
+            apply_table_borders(table)
 
-        _set_table_fixed_widths_from_grid(table)
+            try:
+                table.autofit = False
+            except Exception:
+                pass
+
+            _set_table_fixed_widths_from_grid(table, preserve_geometry=preserve_geometry)
 
         column_scales = _get_table_numeric_column_scales(table)
 

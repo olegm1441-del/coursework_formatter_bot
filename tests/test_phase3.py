@@ -11666,6 +11666,456 @@ def test_pg1_real_continuation_flow_preserves_sensitive_geometry() -> tuple[bool
     return _result(True, "real continuation flow kept tblGrid/tblPr/tcW unchanged")
 
 
+# ── Table-engine split model / diagnostics foundation ────────────────────────
+# These tests are model/diagnostic tests only. They are not visual proof of
+# production table quality; visual DOCX/PDF smoke remains mandatory before merge.
+
+def _table_engine_diag_module():
+    import importlib.util
+    import sys
+
+    path = ROOT / "tests" / "tools" / "table_engine_diagnostics.py"
+    spec = importlib.util.spec_from_file_location("table_engine_diagnostics", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load table diagnostics module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _tm_fill_table(tbl) -> None:
+    for r, row in enumerate(tbl.rows):
+        for c, cell in enumerate(row.cells):
+            cell.text = f"r{r}c{c}"
+
+
+def test_tm_split_eligibility_requires_rendered_boundary() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    tbl = doc.add_table(rows=8, cols=3)
+    _tm_fill_table(tbl)
+
+    no_render = diag.evaluate_split_eligibility(
+        tbl._tbl,
+        rendered_row_pages=None,
+        split_before_row=4,
+        header_rows=1,
+    )
+    if no_render.eligible or no_render.reason != "render_boundary_unmapped":
+        return _result(False, f"row-count-only split was allowed: {no_render!r}")
+
+    rendered = {0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2, 7: 2}
+    decision = diag.evaluate_split_eligibility(
+        tbl._tbl,
+        rendered_row_pages=rendered,
+        split_before_row=4,
+        header_rows=1,
+    )
+    if not decision.eligible:
+        return _result(False, f"safe rendered boundary rejected: {decision!r}")
+
+    return _result(True, "split model rejects row-count-only fallback and accepts safe rendered boundary")
+
+
+def test_tm_forbidden_split_reasons_are_explicit() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    tbl = doc.add_table(rows=5, cols=1)
+    _tm_fill_table(tbl)
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
+    rendered = {0: 1, 1: 1, 2: 2, 3: 2, 4: 2}
+    decision = diag.evaluate_split_eligibility(
+        tbl._tbl,
+        rendered_row_pages=rendered,
+        split_before_row=2,
+        header_rows=1,
+    )
+    if decision.reason != "unsafe_vmerge_boundary":
+        return _result(False, f"expected unsafe_vmerge_boundary, got {decision!r}")
+
+    doc = Document()
+    tbl = doc.add_table(rows=5, cols=2)
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    tbl._tbl.remove(grid)
+    decision = diag.evaluate_split_eligibility(
+        tbl._tbl,
+        rendered_row_pages={0: 1, 1: 1, 2: 2, 3: 2, 4: 2},
+        split_before_row=2,
+        header_rows=1,
+    )
+    if decision.reason != "malformed_grid":
+        return _result(False, f"expected malformed_grid, got {decision!r}")
+
+    doc = Document()
+    tbl = doc.add_table(rows=5, cols=2)
+    _tm_fill_table(tbl)
+    decision = diag.evaluate_split_eligibility(
+        tbl._tbl,
+        rendered_row_pages={0: 1, 1: 2, 2: 2, 3: 2, 4: 2},
+        split_before_row=1,
+        header_rows=1,
+    )
+    if decision.reason != "fragment_too_small":
+        return _result(False, f"expected fragment_too_small, got {decision!r}")
+
+    return _result(True, "forbidden split cases return explicit skip reasons")
+
+
+def test_tm_numeric_row_safety_model() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    tbl = doc.add_table(rows=3, cols=3)
+    for c, text in enumerate(["A", "B", "C"]):
+        tbl.rows[0].cells[c].text = text
+        tbl.rows[1].cells[c].text = str(c + 1)
+    roles = diag.classify_table_rows(tbl._tbl, header_rows=1)
+    if roles[1].role != "numeric":
+        return _result(False, f"numeric row not detected: {roles!r}")
+    safety = diag.numeric_row_synthesis_safety(tbl._tbl, header_rows=1)
+    if not safety.safe:
+        return _result(False, f"simple numeric synthesis should be safe: {safety!r}")
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=3)
+    tbl.cell(0, 0).merge(tbl.cell(0, 1))
+    safety = diag.numeric_row_synthesis_safety(tbl._tbl, header_rows=1)
+    if safety.safe or safety.reason != "unsafe_numeric_row_synthesis":
+        return _result(False, f"merged header synthesis should be unsafe: {safety!r}")
+
+    return _result(True, "numeric row detection and synthesis safety model are conservative")
+
+
+def test_tm_source_note_boundary_fails_closed() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    tbl = doc.add_table(rows=4, cols=2)
+    _tm_fill_table(tbl)
+    tbl.rows[3].cells[0].text = "Источник: составлено автором"
+    tbl.rows[3].cells[1].text = ""
+
+    roles = diag.classify_table_rows(tbl._tbl, header_rows=1)
+    if roles[3].role != "source_note":
+        return _result(False, f"source/note row not detected: {roles!r}")
+
+    decision = diag.evaluate_split_eligibility(
+        tbl._tbl,
+        rendered_row_pages={0: 1, 1: 1, 2: 1, 3: 2},
+        split_before_row=3,
+        header_rows=1,
+        min_body_rows_per_fragment=1,
+    )
+    if decision.eligible or decision.reason != "source_note_boundary_uncertain":
+        return _result(False, f"source/note-only continuation was allowed: {decision!r}")
+
+    return _result(True, "source/note-only continuation fails closed")
+
+
+def test_tm_geometry_snapshot_invariant_for_preserve_mode() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.table_continuation import apply_table_continuation
+
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    tbl = doc.add_table(rows=2, cols=2)
+    _pg1_add_tbl_pr_child(tbl._tbl, "w:tblCellMar")
+    grid = tbl._tbl.find(qn("w:tblGrid"))
+    for gc in grid.findall(qn("w:gridCol")):
+        gc.set(qn("w:w"), "15000")
+
+    before = diag.snapshot_table(tbl._tbl)
+    apply_table_continuation(doc)
+    after = diag.snapshot_table(tbl._tbl)
+    changes = diag.diff_table_geometry(before, after)
+    if changes:
+        return _result(False, f"preserve-mode geometry changed: {changes!r}")
+
+    return _result(True, "diagnostic geometry snapshot catches preserve-mode invariants")
+
+
+def test_tm_diagnostic_harness_writes_stage_artifacts() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 1.1.1")
+    tbl = doc.add_table(rows=3, cols=2)
+    _tm_fill_table(tbl)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.docx"
+        artifact_root = Path(tmp) / "artifacts"
+        doc.save(src)
+        result = diag.run_table_engine_diagnostics(
+            src,
+            artifact_root=artifact_root,
+            render=False,
+        )
+        summary = Path(result.summary_json_path)
+        if not summary.exists():
+            return _result(False, f"summary was not written: {summary}")
+        expected = {
+            "00_source",
+            "01_after_safe_formatter",
+            "02_after_table_continuation",
+            "03_final",
+        }
+        stage_names = {stage.name for stage in result.stages}
+        if not expected.issubset(stage_names):
+            return _result(False, f"missing stages: expected={expected}, got={stage_names}")
+        for stage in result.stages:
+            if not stage.tables:
+                return _result(False, f"stage has no table snapshots: {stage.name}")
+            table = stage.tables[0]
+            for key in ("tblPr_xml", "tblGrid_xml", "gridCol_widths", "row_count", "raw_tc_counts"):
+                if key not in table:
+                    return _result(False, f"snapshot missing {key}: {table}")
+
+    return _result(True, "diagnostic harness writes stage artifacts and table geometry reports")
+
+
+# ── PG2: safe_formatter geometry isolation foundation ────────────────────────
+# These tests guard Phase 1 table geometry preservation. They are not visual
+# proof; rendered diagnostics/smoke remain the source of truth for table quality.
+
+def _pg2_base_doc() -> Document:
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст перед таблицей.")
+    return doc
+
+
+def _pg2_fill_table(tbl) -> None:
+    for r, row in enumerate(tbl.rows):
+        for c, cell in enumerate(row.cells):
+            cell.text = f"Значение {r + 1}.{c + 1}"
+
+
+def _pg2_get_tbl_pr(tbl_xml):
+    tbl_pr = tbl_xml.find(qn("w:tblPr"))
+    if tbl_pr is None:
+        tbl_pr = OxmlElement("w:tblPr")
+        tbl_xml.insert(0, tbl_pr)
+    return tbl_pr
+
+
+def _pg2_set_tbl_w(tbl, value: str, typ: str) -> None:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:w"), value)
+    tbl_w.set(qn("w:type"), typ)
+
+
+def _pg2_set_tbl_layout(tbl, typ: str = "fixed") -> None:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(layout)
+    layout.set(qn("w:type"), typ)
+
+
+def _pg2_set_all_tcw(tbl, widths: list[int]) -> None:
+    for row in tbl.rows:
+        for idx, cell in enumerate(row.cells):
+            tc_pr = cell._tc.get_or_add_tcPr()
+            tc_w = tc_pr.find(qn("w:tcW"))
+            if tc_w is None:
+                tc_w = OxmlElement("w:tcW")
+                tc_pr.append(tc_w)
+            tc_w.set(qn("w:w"), str(widths[idx % len(widths)]))
+            tc_w.set(qn("w:type"), "dxa")
+
+
+def _pg2_process_and_snapshot(doc: Document, table_index: int = 0):
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    diag = _table_engine_diag_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(inp)
+        before_doc = Document(str(inp))
+        before = diag.snapshot_table(before_doc.tables[table_index]._tbl, table_index=table_index)
+        process_document(inp, out)
+        after_doc = Document(str(out))
+        after = diag.snapshot_table(after_doc.tables[table_index]._tbl, table_index=table_index)
+    return before, after
+
+
+def _pg2_geometry_changes(before: dict, after: dict) -> dict:
+    diag = _table_engine_diag_module()
+    return diag.diff_table_geometry(before, after)
+
+
+def test_pg2_safe_formatter_preserves_sensitive_tblw_layout_tcw_grid() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=2, cols=3)
+    _pg2_fill_table(tbl)
+    _pg2_set_tbl_w(tbl, "5000", "pct")
+    _pg2_set_tbl_layout(tbl, "fixed")
+    _pg2_set_all_tcw(tbl, [1300, 2200, 3100])
+
+    before, after = _pg2_process_and_snapshot(doc)
+    for key in ("tblW", "tblLayout", "tblGrid_xml", "gridCol_widths", "tcW"):
+        if before[key] != after[key]:
+            return _result(False, f"{key} changed for preserve-mode table")
+    return _result(True, "safe_formatter preserved tblW/tblLayout/tcW/tblGrid for sensitive table")
+
+
+def test_pg2_safe_formatter_keeps_simple_table_width_normalization() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=2, cols=3)
+    _pg2_fill_table(tbl)
+
+    _before, after = _pg2_process_and_snapshot(doc)
+    if after["tblW"].get("type") != "dxa" or not after["tblW"].get("w"):
+        return _result(False, f"simple table tblW was not normalized: {after['tblW']!r}")
+    if after["tblLayout"] != "fixed":
+        return _result(False, f"simple table layout not fixed: {after['tblLayout']!r}")
+    if not after["tcW"] or any(item.get("w") is None for item in after["tcW"]):
+        return _result(False, "simple table tcW widths were not populated")
+    if "w:tblBorders" not in (after.get("tblPr_xml") or ""):
+        return _result(False, "simple table borders were not normalized")
+    return _result(True, "simple table still receives width/layout/border normalization")
+
+
+def test_pg2_safe_formatter_preserves_auto_pct_and_authored_fixed_layout() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    pct_tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(pct_tbl)
+    _pg2_set_tbl_w(pct_tbl, "4200", "pct")
+    _pg2_set_all_tcw(pct_tbl, [1800, 3000])
+
+    fixed_tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(fixed_tbl)
+    _pg2_set_tbl_layout(fixed_tbl, "fixed")
+    _pg2_set_all_tcw(fixed_tbl, [1500, 2500])
+
+    before_pct, after_pct = _pg2_process_and_snapshot(doc, table_index=0)
+    before_fixed, after_fixed = _pg2_process_and_snapshot(doc, table_index=1)
+
+    if before_pct["tblW"] != after_pct["tblW"] or before_pct["tcW"] != after_pct["tcW"]:
+        return _result(False, "tblW pct table geometry changed")
+    if before_fixed["tblLayout"] != after_fixed["tblLayout"] or before_fixed["tcW"] != after_fixed["tcW"]:
+        return _result(False, "authored fixed-layout table geometry changed")
+    return _result(True, "auto/pct and authored fixed-layout tables are preserved")
+
+
+def test_pg2_safe_formatter_preserves_merged_and_vmerge_tables() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=3, cols=3)
+    _pg2_fill_table(tbl)
+    _pg2_set_all_tcw(tbl, [1200, 2400, 3600])
+    tbl.cell(0, 0).merge(tbl.cell(0, 1))
+
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
+
+    before, after = _pg2_process_and_snapshot(doc)
+    for key in ("tblGrid_xml", "gridCol_widths", "tcW", "gridSpan", "vMerge"):
+        if before[key] != after[key]:
+            return _result(False, f"{key} changed for merged/vMerge table")
+    return _result(True, "merged/vMerge table geometry is preserved by safe_formatter")
+
+
+def test_pg2_force_borders_preserves_geometry_adjacent_nodes() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import force_table_outer_borders_single
+
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=1)
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    for tag in ("w:tblLook", "w:tblCellMar", "w:tblCellSpacing"):
+        tbl_pr.append(OxmlElement(tag))
+
+    tr_pr = tbl.rows[0]._tr.get_or_add_trPr()
+    tr_pr.append(OxmlElement("w:tblPrEx"))
+
+    force_table_outer_borders_single(tbl)
+
+    for tag in ("w:tblLook", "w:tblCellMar", "w:tblCellSpacing"):
+        if tbl_pr.find(qn(tag)) is None:
+            return _result(False, f"{tag} was deleted")
+    if tr_pr.find(qn("w:tblPrEx")) is None:
+        return _result(False, "w:tblPrEx was deleted")
+    return _result(True, "border cleanup preserves geometry-adjacent nodes for preserve tables")
+
+
+def test_pg2_rybakov_style_table_keeps_tcw_in_safe_formatter_stage() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    candidates = sorted(Path("/Users/mac/Desktop/курсовые").glob("*ромаркетинг_Рыбаков.docx"))
+    if not candidates:
+        return _result(True, "Rybakov fixture not present; skipped")
+
+    diag = _table_engine_diag_module()
+    src = candidates[0]
+    before_doc = Document(str(src))
+    preserve_indexes = [
+        idx for idx, table in enumerate(before_doc.tables)
+        if diag.snapshot_table(table._tbl, table_index=idx)["geometry_policy"] != "simple"
+    ]
+    if not preserve_indexes:
+        return _result(False, "Rybakov fixture had no preserve-mode tables")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out.docx"
+        process_document(src, out)
+        after_doc = Document(str(out))
+
+    for idx in preserve_indexes:
+        before = diag.snapshot_table(before_doc.tables[idx]._tbl, table_index=idx)
+        after = diag.snapshot_table(after_doc.tables[idx]._tbl, table_index=idx)
+        changes = diag.diff_table_geometry(before, after)
+        if "tcW" in changes:
+            return _result(False, f"tcW changed for Rybakov preserve table {idx}")
+
+    return _result(True, f"Rybakov-style preserve tables kept tcW unchanged: {preserve_indexes}")
+
+
+def test_pg2_diagnostics_show_reduced_safe_formatter_geometry_mutation() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = _pg2_base_doc()
+    preserve_tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(preserve_tbl)
+    _pg1_add_tbl_pr_child(preserve_tbl._tbl, "w:tblCellMar")
+    _pg2_set_all_tcw(preserve_tbl, [1400, 2600])
+
+    simple_tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(simple_tbl)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.docx"
+        doc.save(src)
+        result = diag.run_table_engine_diagnostics(src, artifact_root=Path(tmp) / "artifacts", render=False)
+
+    safe_stage = next(stage for stage in result.stages if stage.name == "01_after_safe_formatter")
+    preserve_snapshot = safe_stage.tables[0]
+    simple_snapshot = safe_stage.tables[1]
+    if preserve_snapshot["geometry_diff_from_previous_stage"]:
+        return _result(False, f"preserve table still mutated: {preserve_snapshot['geometry_diff_from_previous_stage']}")
+    if not simple_snapshot["geometry_diff_from_previous_stage"]:
+        return _result(False, "simple table no longer records expected normalization diff")
+    return _result(True, "diagnostics distinguish preserved sensitive table from normalized simple table")
+
+
 def test_e2_rollback_global_skip_mode_preserves_pre_e2_behaviour() -> tuple[bool, str]:
     """E2: KPFU_MARKER_SPLIT_MODE=global_skip restores pre-E2 behaviour."""
     import logging
@@ -12213,6 +12663,19 @@ def run_all() -> None:
         ("PG1 | simple optimizer still runs", test_pg1_simple_table_still_uses_width_optimizer),
         ("PG1 | unsafe skips marker split", test_pg1_unsafe_geometry_skips_marker_split),
         ("PG1 | real flow preserves geometry", test_pg1_real_continuation_flow_preserves_sensitive_geometry),
+        ("TM | split eligibility requires render", test_tm_split_eligibility_requires_rendered_boundary),
+        ("TM | forbidden split reasons", test_tm_forbidden_split_reasons_are_explicit),
+        ("TM | numeric row safety model", test_tm_numeric_row_safety_model),
+        ("TM | source note boundary fail closed", test_tm_source_note_boundary_fails_closed),
+        ("TM | geometry snapshot invariant", test_tm_geometry_snapshot_invariant_for_preserve_mode),
+        ("TM | diagnostic harness artifacts", test_tm_diagnostic_harness_writes_stage_artifacts),
+        ("PG2 | preserve sensitive safe_formatter geometry", test_pg2_safe_formatter_preserves_sensitive_tblw_layout_tcw_grid),
+        ("PG2 | simple safe_formatter normalization remains", test_pg2_safe_formatter_keeps_simple_table_width_normalization),
+        ("PG2 | auto pct and fixed layout preserved", test_pg2_safe_formatter_preserves_auto_pct_and_authored_fixed_layout),
+        ("PG2 | merged and vMerge tables preserved", test_pg2_safe_formatter_preserves_merged_and_vmerge_tables),
+        ("PG2 | borders preserve geometry nodes", test_pg2_force_borders_preserves_geometry_adjacent_nodes),
+        ("PG2 | Rybakov-style tcW preserved", test_pg2_rybakov_style_table_keeps_tcw_in_safe_formatter_stage),
+        ("PG2 | diagnostics reduced safe_formatter mutation", test_pg2_diagnostics_show_reduced_safe_formatter_geometry_mutation),
         ("E2 | rollback global_skip preserves pre-E2", test_e2_rollback_global_skip_mode_preserves_pre_e2_behaviour),
         # E3: NUM-row compensation for marker-split first fragment.
         ("E3 | compensation applies for ordinary body table", test_e3_compensation_applies_for_ordinary_body_table),
