@@ -1310,7 +1310,7 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
     """
     Detect and reformat plain-text list items in a sequence of paragraphs.
 
-    Three modes are supported:
+    Modes supported:
 
     1) Colon-trigger (existing behaviour, unchanged):
        A paragraph ending with ':' (that is not itself a list item) opens a
@@ -1318,19 +1318,27 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
        L1 letters (`а)/б)/в)…`); a nested `1)` directly after the first L1
        item becomes L2 numeric (`1) 2) 3)…`).
 
-    2) Free-standing dash / bullet (new, safe MVP):
+    2) Free-standing dash / bullet (existing):
        Two or more consecutive paragraphs starting with `-`, `–`, `—`, `•`,
        `·`, `●`, etc. become methodical L1 dash items (`– text`) with
-       hanging indent. Singletons stay untouched. Any structural-guard hit
-       on a candidate paragraph aborts the block.
+       hanging indent. Singletons stay untouched.
 
-    3) Free-standing letter (new, safe MVP):
-       Two or more consecutive `а) б) в)` paragraphs get the L1 letter
-       layout applied (letters preserved as-is from the source).
+    3) Free-standing letter (existing — extended by G4):
+       Two or more consecutive `а) б) в)` paragraphs get L1 letter layout.
+       Letters preserved as-is from the source. G4 EXTENSION: letter items
+       whose body ends with `:` are still valid in this block (e.g.
+       `а) первый пункт первого уровня:` / `б) второй пункт первого уровня:`
+       / `в) третий пункт:`). The trailing `:` is preserved in the output.
 
-    A blank paragraph, a guarded paragraph, or a paragraph of a different
-    marker family resets every free-standing buffer so a singleton or mixed
-    block is never converted.
+    4) Letter-colon + nested numeric L2 (G1, new):
+       A letter L1 item ending with `:` may be followed by `1) ...`,
+       `2) ...` children, which become L2 numeric (`left=963 hanging=198`).
+       This works whether the parent is the first letter of a block (still
+       buffered) — in which case the first numeric child confirms the
+       buffer — or already inside a confirmed letter block.
+
+    Aborts: blank, guarded paragraph, or any non-matching paragraph resets
+    every buffer / context so singletons and mixed blocks remain untouched.
     """
     in_list = False
     level1_counter = 0
@@ -1342,13 +1350,20 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
     in_dash_block = False
     letter_buffer = None      # (paragraph, letter, body_text) pending letter candidate
     in_letter_block = False
+    # G1: nested L2 numeric context opened by a confirmed letter L1 item
+    # whose body ends with ':'. Counter restarts at 1 for each new letter.
+    in_letter_colon_l2_context = False
+    letter_colon_l2_counter = 0
 
     def _reset_free_blocks() -> None:
         nonlocal dash_buffer, in_dash_block, letter_buffer, in_letter_block
+        nonlocal in_letter_colon_l2_context, letter_colon_l2_counter
         dash_buffer = None
         in_dash_block = False
         letter_buffer = None
         in_letter_block = False
+        in_letter_colon_l2_context = False
+        letter_colon_l2_counter = 0
 
     for p in paragraphs:
         text = clean_spaces(p.text)
@@ -1453,6 +1468,15 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
             in_dash_block = False
             if in_letter_block:
                 _format_cyrillic_list_item(p, letter, body)
+                # G1: a new letter sibling restarts the L2 numeric context
+                # only when this letter's body also ends with `:` — otherwise
+                # any pending L2 context is closed.
+                if body.endswith(":"):
+                    in_letter_colon_l2_context = True
+                    letter_colon_l2_counter = 0
+                else:
+                    in_letter_colon_l2_context = False
+                    letter_colon_l2_counter = 0
             elif letter_buffer is None:
                 letter_buffer = (p, letter, body)
             else:
@@ -1461,6 +1485,43 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
                 _format_cyrillic_list_item(p, letter, body)
                 letter_buffer = None
                 in_letter_block = True
+                # If THIS confirming letter ends with `:`, the nested L2
+                # numeric context opens for the next paragraph. Note that
+                # the FIRST (buffered) letter may also have ended with `:`,
+                # but that does not retroactively open L2 — by the time we
+                # confirm here the next paragraph follows the second letter
+                # and its `:` decides.
+                if body.endswith(":"):
+                    in_letter_colon_l2_context = True
+                    letter_colon_l2_counter = 0
+                else:
+                    in_letter_colon_l2_context = False
+                    letter_colon_l2_counter = 0
+            continue
+
+        # G1: numeric-paren paragraph (`1) ...`, `2) ...`) following a
+        # letter L1 item whose body ended with `:`. Two activation paths:
+        #   * letter_buffer is pending AND its body ends with `:` — the
+        #     numeric child confirms the buffered letter as L1, becomes
+        #     numeric L2 child 1, and opens an L2 context for further
+        #     children.
+        #   * in_letter_colon_l2_context already True — current paragraph
+        #     becomes the next numeric L2 child.
+        m_numeric_l2 = _NUMERIC_PAREN_LIST_RE.match(text)
+        if m_numeric_l2 and (
+            (letter_buffer is not None and letter_buffer[2].endswith(":"))
+            or in_letter_colon_l2_context
+        ):
+            child_body = m_numeric_l2.group(2).strip()
+            if letter_buffer is not None and letter_buffer[2].endswith(":"):
+                first_p, first_letter, first_body = letter_buffer
+                _format_cyrillic_list_item(first_p, first_letter, first_body)
+                letter_buffer = None
+                in_letter_block = True
+                in_letter_colon_l2_context = True
+                letter_colon_l2_counter = 0
+            letter_colon_l2_counter += 1
+            _format_level2_list_item(p, letter_colon_l2_counter, child_body)
             continue
 
         # Anything else breaks any pending free-standing block.

@@ -5731,6 +5731,149 @@ def test_lists_free_standing_letter_block_normalized() -> tuple[bool, str]:
     return _result(True, "free-standing letter block keeps markers, gets hanging indent")
 
 
+def test_lists_g4_letter_block_with_colon_endings() -> tuple[bool, str]:
+    """
+    G4: a free-standing letter block where every item ends with `:` must
+    still be recognised as L1 letters with hanging indent. The `:` is
+    preserved in the output text.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    p1 = doc.add_paragraph("а) первый пункт первого уровня:")
+    p2 = doc.add_paragraph("б) второй пункт первого уровня:")
+    p3 = doc.add_paragraph("в) третий пункт первого уровня:")
+    _normalize_plain_list_paragraphs([pre, p1, p2, p3])
+
+    for p, expected_marker in ((p1, "а)"), (p2, "б)"), (p3, "в)")):
+        if not p.text.startswith(expected_marker):
+            return _result(False, f"letter+colon item lost marker: {p.text!r}")
+        if not p.text.rstrip().endswith(":"):
+            return _result(False, f"letter+colon item lost trailing colon: {p.text!r}")
+        left, hang, _ = _list_ind_attrs(p)
+        if (left, hang) != ("906", "198"):
+            return _result(False, f"letter+colon item missing hanging indent: left={left} hang={hang} text={p.text!r}")
+    return _result(True, "G4: letter block with colon endings keeps markers + `:` + hanging indent")
+
+
+def test_lists_g1_letter_parent_colon_nested_numeric_l2() -> tuple[bool, str]:
+    """
+    G1: letter L1 parent ending with `:` followed by numeric paren children
+    becomes nested L2 (`left=963 hanging=198`). Parent letter L1 keeps the
+    L1 hanging indent (`left=906 hanging=198`).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    parent = doc.add_paragraph("а) первый пункт первого уровня:")
+    child1 = doc.add_paragraph("1) вложенный пункт второго уровня один")
+    child2 = doc.add_paragraph("2) вложенный пункт второго уровня два")
+    _normalize_plain_list_paragraphs([pre, parent, child1, child2])
+
+    if not parent.text.startswith("а) "):
+        return _result(False, f"parent lost marker: {parent.text!r}")
+    if not parent.text.rstrip().endswith(":"):
+        return _result(False, f"parent lost trailing colon: {parent.text!r}")
+    p_left, p_hang, _ = _list_ind_attrs(parent)
+    if (p_left, p_hang) != ("906", "198"):
+        return _result(False, f"parent missing L1 indent: left={p_left} hang={p_hang}")
+
+    for child, expected in ((child1, "1) "), (child2, "2) ")):
+        if not child.text.startswith(expected):
+            return _result(False, f"child lost marker: {child.text!r}")
+        c_left, c_hang, _ = _list_ind_attrs(child)
+        if (c_left, c_hang) != ("963", "198"):
+            return _result(False, f"child missing L2 indent: left={c_left} hang={c_hang} text={child.text!r}")
+    return _result(True, "G1: letter parent + nested numeric children get L1 + L2 indents")
+
+
+def test_lists_g1_g4_block_e_full_smoke_case() -> tuple[bool, str]:
+    """
+    Block E from list_normalization_smoke_input_kfu.docx — two letter L1
+    parents each ending with `:`, each followed by two numeric children.
+    All 6 paragraphs must end up methodically formatted.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("BLOCK E — вложенный список: тестовый параграф без двоеточия в конце.")
+    parent_a = doc.add_paragraph("а) первый пункт первого уровня:")
+    child_a1 = doc.add_paragraph("1) вложенный пункт второго уровня с длинным текстом для переноса")
+    child_a2 = doc.add_paragraph("2) второй вложенный пункт второго уровня")
+    parent_b = doc.add_paragraph("б) второй пункт первого уровня:")
+    child_b1 = doc.add_paragraph("1) вложенный пункт второго уровня внутри второго буквенного пункта")
+    child_b2 = doc.add_paragraph("2) второй вложенный пункт второго уровня внутри второго буквенного пункта")
+    _normalize_plain_list_paragraphs([pre, parent_a, child_a1, child_a2, parent_b, child_b1, child_b2])
+
+    for parent, expected_letter in ((parent_a, "а)"), (parent_b, "б)")):
+        if not parent.text.startswith(expected_letter):
+            return _result(False, f"parent lost marker: {parent.text!r}")
+        if not parent.text.rstrip().endswith(":"):
+            return _result(False, f"parent lost colon: {parent.text!r}")
+        left, hang, _ = _list_ind_attrs(parent)
+        if (left, hang) != ("906", "198"):
+            return _result(False, f"parent indent wrong: left={left} hang={hang} text={parent.text!r}")
+
+    for child, expected_marker in (
+        (child_a1, "1) "),
+        (child_a2, "2) "),
+        (child_b1, "1) "),
+        (child_b2, "2) "),
+    ):
+        if not child.text.startswith(expected_marker):
+            return _result(False, f"child marker wrong: {child.text!r}")
+        left, hang, _ = _list_ind_attrs(child)
+        if (left, hang) != ("963", "198"):
+            return _result(False, f"child L2 indent wrong: left={left} hang={hang} text={child.text!r}")
+
+    return _result(True, "G1+G4: Block E fully formatted methodically with restart of L2 counter per letter parent")
+
+
+def test_lists_g4_letter_singleton_with_colon_not_converted() -> tuple[bool, str]:
+    """
+    Safety lock: single `а) item:` paragraph alone (no nested numerics, no
+    sibling letters) must stay untouched per MVP singleton rule.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия.")
+    solo = doc.add_paragraph("а) одинокий пункт с двоеточием:")
+    after = doc.add_paragraph("Обычный текст после, не список.")
+    _normalize_plain_list_paragraphs([pre, solo, after])
+
+    left, hang, _ = _list_ind_attrs(solo)
+    if left == "906" and hang == "198":
+        return _result(False, f"singleton letter+colon got L1 indent: {solo.text!r}")
+    if not solo.text.startswith("а) "):
+        return _result(False, f"singleton text mutated unexpectedly: {solo.text!r}")
+    return _result(True, "singleton letter+colon not converted (MVP safety preserved)")
+
+
+def test_lists_g1_numeric_without_letter_parent_not_promoted_to_l2() -> tuple[bool, str]:
+    """
+    Safety lock: a stand-alone numeric-paren block (`1)/2)/3)`) WITHOUT a
+    preceding letter+`:` parent must NOT be auto-promoted to L2 indent.
+    Existing colon-mode tests cover the legacy non-promotion behaviour;
+    this guards the new path explicitly.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+
+    doc = Document()
+    pre = doc.add_paragraph("Параграф без двоеточия и без letter parent.")
+    p1 = doc.add_paragraph("1) первый пункт")
+    p2 = doc.add_paragraph("2) второй пункт")
+    _normalize_plain_list_paragraphs([pre, p1, p2])
+
+    for p in (p1, p2):
+        left, hang, _ = _list_ind_attrs(p)
+        if (left, hang) == ("963", "198"):
+            return _result(False, f"stray numeric-paren got L2 indent: {p.text!r}")
+    return _result(True, "stand-alone numeric-paren without letter parent not converted")
+
+
 def test_lists_numeric_dot_without_colon_not_converted() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
 
@@ -12934,6 +13077,11 @@ def run_all() -> None:
         ("LIST | singleton dash NOT converted",          test_lists_singleton_dash_not_converted),
         ("LIST | mixed marker block NOT converted",      test_lists_mixed_marker_block_not_converted),
         ("LIST | free-standing letter block normalized", test_lists_free_standing_letter_block_normalized),
+        ("LIST | G4 letter+colon block",                 test_lists_g4_letter_block_with_colon_endings),
+        ("LIST | G1 letter parent + numeric L2 children", test_lists_g1_letter_parent_colon_nested_numeric_l2),
+        ("LIST | G1+G4 Block E full smoke",              test_lists_g1_g4_block_e_full_smoke_case),
+        ("LIST | G4 singleton letter+colon NOT converted", test_lists_g4_letter_singleton_with_colon_not_converted),
+        ("LIST | G1 stray numeric-paren NOT promoted",   test_lists_g1_numeric_without_letter_parent_not_promoted_to_l2),
         ("LIST | numeric-dot w/o colon NOT converted",   test_lists_numeric_dot_without_colon_not_converted),
         ("LIST | heading-styled dash NOT converted",     test_lists_heading_styled_dash_not_converted),
         ("LIST | table caption NOT converted",           test_lists_table_caption_not_converted),
