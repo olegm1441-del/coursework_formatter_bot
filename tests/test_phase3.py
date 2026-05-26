@@ -1710,8 +1710,8 @@ def test_c_apply_table_merging_keeps_marker_without_keep_next() -> tuple[bool, s
     t2.rows[1].cells[1].text = "d"
 
     n = apply_table_merging(doc)
-    if n != 0:
-        return _result(False, f"expected 0 merges (chain structurally valid), got {n}")
+    if n <= 0:
+        return _result(False, f"expected marker anchor repair to be reported, got {n}")
     if len(doc.tables) != 2:
         return _result(False, f"expected 2 tables preserved, got {len(doc.tables)}")
     if not any("Продолжение таблицы" in (p.text or "") for p in doc.paragraphs):
@@ -1779,10 +1779,8 @@ def test_p0_manual_continuation_numeric_row_only_fragment_is_valid() -> tuple[bo
         t2.rows[1].cells[c].text = text
 
     n = apply_table_merging(doc)
-    if n != 0:
-        return _result(False, f"numeric-row-only continuation chain was merged: merges={n}")
     if len(doc.tables) != 2:
-        return _result(False, f"expected 2 preserved fragments, got {len(doc.tables)}")
+        return _result(False, f"numeric-row-only continuation chain was merged; expected 2 preserved fragments, got {len(doc.tables)}")
     if [cell.text for cell in doc.tables[1].rows[0].cells] != ["1", "2", "3", "4"]:
         return _result(False, "continuation numeric row was not preserved as first row")
     return _result(True, "numeric-row-only continuation fragment is preserved")
@@ -1812,12 +1810,10 @@ def test_p0_preserved_manual_chain_synthesizes_missing_numeric_rows() -> tuple[b
 
     merges = apply_table_merging(doc)
     repairs = apply_table_continuation(doc)
-    if merges != 0:
-        return _result(False, f"manual chain should be preserved, got merges={merges}")
-    if repairs < 2:
-        return _result(False, f"expected numeric-row repairs in both fragments, got {repairs}")
     if len(doc.tables) != 2:
         return _result(False, f"expected 2 preserved fragments, got {len(doc.tables)}")
+    if repairs < 2:
+        return _result(False, f"expected numeric-row repairs in both fragments, got {repairs}")
     if [cell.text for cell in doc.tables[0].rows[1].cells] != ["1", "2", "3"]:
         return _result(False, "numeric row missing from first fragment")
     if [cell.text for cell in doc.tables[1].rows[1].cells] != ["1", "2", "3"]:
@@ -1908,10 +1904,8 @@ def test_p0_rybakov_style_221_chain_does_not_merge_into_malformed_table() -> tup
         t2.rows[1].cells[c].text = text
 
     n = apply_table_merging(doc)
-    if n != 0:
-        return _result(False, f"Rybakov-style chain was merged: merges={n}")
     if len(doc.tables) != 2:
-        return _result(False, f"expected 2 fragments, got {len(doc.tables)}")
+        return _result(False, f"Rybakov-style chain was merged; expected 2 fragments, got {len(doc.tables)}")
     if _count_table_rows_with_texts(doc.tables[0], ["1", "2", "3", "4"]) != 1:
         return _result(False, "first fragment numeric row count changed")
     if _count_table_rows_with_texts(doc.tables[1], ["1", "2", "3", "4"]) != 1:
@@ -1997,6 +1991,96 @@ def test_e_preserved_student_marker_enables_page_break_before() -> tuple[bool, s
     if len(doc.tables) != 2:
         return _result(False, f"chain should remain preserved; got {len(doc.tables)} tables")
     return _result(True, "preserved student marker has pageBreakBefore + keepNext enabled")
+
+
+def test_e_preserved_student_marker_anchor_repairs_are_counted() -> tuple[bool, str]:
+    """
+    P1-critical / persistence regression: marker anchor repairs are real DOCX
+    changes. If apply_table_merging enables disabled pageBreakBefore/keepNext
+    but returns 0, formatter_service may skip doc.save() and lose the repair.
+    """
+    from guides.coursework_kfu_2025.table_continuation import apply_table_merging
+
+    doc, marker = _build_student_chain_doc()
+    if _marker_page_break_before_enabled(marker._element):
+        return _result(False, "fixture invariant violated: pageBreakBefore already enabled")
+    if _marker_keep_next_enabled(marker._element):
+        return _result(False, "fixture invariant violated: keepNext already enabled")
+
+    n = apply_table_merging(doc)
+
+    if n <= 0:
+        return _result(False, f"expected anchor repairs to be counted, got {n}")
+    if not _marker_page_break_before_enabled(marker._element):
+        return _result(False, "pageBreakBefore repair did not apply")
+    if not _marker_keep_next_enabled(marker._element):
+        return _result(False, "keepNext repair did not apply")
+    return _result(True, f"anchor repairs counted: {n}")
+
+
+def test_e_format_docx_saves_repaired_manual_marker_anchors() -> tuple[bool, str]:
+    """
+    Full formatter regression: Phase 1 can save disabled marker anchors, then
+    Phase 3 repairs them in memory. The formatter must persist that repair.
+    """
+    import guides.coursework_kfu_2025.formatter_service as fs
+
+    prepared_doc, _marker = _build_student_chain_doc()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "input.docx"
+        output_path = Path(tmp) / "output.docx"
+        Document().save(input_path)
+
+        old_process = fs.process_document
+        old_pagination = fs.apply_pagination_rules
+        old_rule3 = fs.apply_rule3_table_orphan
+        old_rule4 = fs.apply_rule4_empty_first_lines
+        old_rule6 = fs.apply_rule6_figure_orphan
+        old_gap = fs.remove_empty_before_figure_captions
+        old_continuation = fs.apply_table_continuation
+        old_rendered = fs.apply_rendered_table_continuation
+        old_rebuild = fs.rebuild_static_contents_page
+        old_restore = fs.restore_docx_if_same_page_continuation_markers
+        try:
+            fs.process_document = lambda _src, dst: prepared_doc.save(dst)
+            fs.apply_pagination_rules = lambda _doc: None
+            fs.apply_rule3_table_orphan = lambda _doc: 0
+            fs.apply_rule4_empty_first_lines = lambda _doc: 0
+            fs.apply_rule6_figure_orphan = lambda _doc: 0
+            fs.remove_empty_before_figure_captions = lambda _doc: 0
+            fs.apply_table_continuation = lambda _doc, report=None: 0
+            fs.apply_rendered_table_continuation = lambda _path, report=None: 0
+            fs.rebuild_static_contents_page = lambda _path: False
+            fs.restore_docx_if_same_page_continuation_markers = (
+                lambda _output, _backup, report=None, context="": False
+            )
+            fs.format_docx(str(input_path), str(output_path))
+        finally:
+            fs.process_document = old_process
+            fs.apply_pagination_rules = old_pagination
+            fs.apply_rule3_table_orphan = old_rule3
+            fs.apply_rule4_empty_first_lines = old_rule4
+            fs.apply_rule6_figure_orphan = old_rule6
+            fs.remove_empty_before_figure_captions = old_gap
+            fs.apply_table_continuation = old_continuation
+            fs.apply_rendered_table_continuation = old_rendered
+            fs.rebuild_static_contents_page = old_rebuild
+            fs.restore_docx_if_same_page_continuation_markers = old_restore
+
+        out = Document(str(output_path))
+        marker_xml = next(
+            (p._element for p in out.paragraphs if p.text == "Продолжение таблицы 1.1.1"),
+            None,
+        )
+
+    if marker_xml is None:
+        return _result(False, "manual continuation marker was lost")
+    if not _marker_page_break_before_enabled(marker_xml):
+        return _result(False, "format_docx did not persist repaired pageBreakBefore")
+    if not _marker_keep_next_enabled(marker_xml):
+        return _result(False, "format_docx did not persist repaired keepNext")
+    return _result(True, "format_docx persisted repaired marker anchors")
 
 
 def test_e_page_break_enable_is_idempotent() -> tuple[bool, str]:
@@ -2190,10 +2274,8 @@ def test_p1a_preserved_manual_chain_normalized_without_merging() -> tuple[bool, 
     merges = apply_table_merging(doc)
     repairs = apply_table_continuation(doc)
 
-    if merges != 0:
-        return _result(False, f"manual chain was merged: merges={merges}")
     if len(doc.tables) != 2:
-        return _result(False, f"expected preserved two-table chain, got {len(doc.tables)} tables")
+        return _result(False, f"manual chain was merged; expected preserved two-table chain, got {len(doc.tables)} tables")
     if not _marker_page_break_before_enabled(marker) or not _marker_keep_next_enabled(marker):
         return _result(False, "preserved marker was not anchored")
     if not _marker_keep_next_enabled(blank):
@@ -12452,6 +12534,368 @@ def test_tm_diagnostic_harness_writes_stage_artifacts() -> tuple[bool, str]:
     return _result(True, "diagnostic harness writes stage artifacts and table geometry reports")
 
 
+def test_tm_same_page_continuation_marker_is_flagged() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    markers = diag.validate_continuation_markers_from_blocks([
+        {"kind": "table", "page": 16, "y0": 56.0, "y1": 237.0},
+        {"kind": "text", "page": 16, "y0": 242.0, "y1": 252.0, "text": "Продолжение таблицы 1.3.1"},
+        {"kind": "table", "page": 16, "y0": 262.0, "y1": 692.0},
+    ])
+
+    if len(markers) != 1:
+        return _result(False, f"expected one marker diagnostic, got {markers!r}")
+    marker = markers[0]
+    if marker.verdict != "fail" or marker.same_page_violation is not True:
+        return _result(False, f"same-page continuation was not flagged: {marker!r}")
+    if marker.marker_page != 16 or marker.previous_table_page != 16 or marker.following_table_page != 16:
+        return _result(False, f"unexpected marker/table pages: {marker!r}")
+    return _result(True, "same-page continuation marker is reported as a violation")
+
+
+def test_tm_next_page_continuation_marker_passes_validation() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    markers = diag.validate_continuation_markers_from_blocks([
+        {"kind": "table", "page": 10, "y0": 450.0, "y1": 760.0},
+        {"kind": "text", "page": 11, "y0": 60.0, "y1": 70.0, "text": "Продолжение таблицы 2.2.1"},
+        {"kind": "table", "page": 11, "y0": 82.0, "y1": 400.0},
+    ])
+
+    marker = markers[0]
+    if marker.verdict != "pass" or marker.same_page_violation is not False:
+        return _result(False, f"new-page continuation was not accepted: {marker!r}")
+    if marker.previous_table_page != 10 or marker.marker_page != 11 or marker.following_table_page != 11:
+        return _result(False, f"unexpected marker/table pages: {marker!r}")
+    return _result(True, "new-page continuation marker passes validation")
+
+
+def test_tm_inline_prose_continuation_text_is_not_valid_marker() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    markers = diag.validate_continuation_markers_from_blocks([
+        {
+            "kind": "text",
+            "page": 7,
+            "y0": 180.0,
+            "y1": 194.0,
+            "text": "В тексте встречается Продолжение таблицы 1.2.3 как пример.",
+        },
+    ])
+
+    if len(markers) != 1:
+        return _result(False, f"expected inline prose diagnostic, got {markers!r}")
+    marker = markers[0]
+    if marker.marker_kind != "source_inline_marker_text" or marker.verdict != "source_inline_marker_text":
+        return _result(False, f"inline prose was treated as a valid marker: {marker!r}")
+    if marker.same_page_violation is not None:
+        return _result(False, f"inline prose should not get pass/fail validation: {marker!r}")
+    return _result(True, "inline prose continuation text is classified separately")
+
+
+def test_tm_unknown_marker_relation_is_not_pass() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    markers = diag.validate_continuation_markers_from_blocks([
+        {"kind": "text", "page": 12, "y0": 80.0, "y1": 92.0, "text": "Продолжение таблицы 3.1.4"},
+    ])
+
+    marker = markers[0]
+    if marker.verdict != "unknown" or marker.same_page_violation is not None:
+        return _result(False, f"low-confidence relation produced pass/fail: {marker!r}")
+    if marker.confidence != "low":
+        return _result(False, f"unknown relation should be low confidence: {marker!r}")
+    return _result(True, "unknown continuation relation is reported as unknown, not pass")
+
+
+def test_tm_continuation_marker_report_includes_page_and_violation() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    markers = diag.validate_continuation_markers_from_blocks([
+        {"kind": "table", "page": 16, "y0": 56.0, "y1": 237.0},
+        {"kind": "text", "page": 16, "y0": 242.0, "y1": 252.0, "text": "Продолжение таблицы 1.3.1"},
+        {"kind": "table", "page": 16, "y0": 262.0, "y1": 692.0},
+    ])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = diag.write_continuation_marker_reports(
+            Path(tmp),
+            {"03_final": markers},
+        )
+        json_text = Path(paths["continuation_markers_json_path"]).read_text(encoding="utf-8")
+        md_text = Path(paths["markdown_summary_path"]).read_text(encoding="utf-8")
+
+    if '"marker_page": 16' not in json_text or '"same_page_violation": true' not in json_text:
+        return _result(False, f"JSON report missing page/violation: {json_text}")
+    if "Продолжение таблицы 1.3.1" not in md_text or "page 16" not in md_text or "violation=True" not in md_text:
+        return _result(False, f"markdown report missing marker summary: {md_text}")
+    return _result(True, "continuation marker report includes marker page and violation flag")
+
+
+def test_tm_post_render_gate_rejects_same_page_marker_output() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    violations = tc._same_page_continuation_marker_violations_from_blocks([
+        {"kind": "table", "page": 13, "y0": 80.0, "y1": 180.0},
+        {"kind": "text", "page": 13, "y0": 190.0, "y1": 202.0, "text": "Продолжение таблицы 1.2.2"},
+        {"kind": "table", "page": 13, "y0": 210.0, "y1": 390.0},
+    ])
+
+    if len(violations) != 1:
+        return _result(False, f"expected same-page violation, got {violations!r}")
+    violation = violations[0]
+    if violation.marker_text != "Продолжение таблицы 1.2.2" or violation.marker_page != 13:
+        return _result(False, f"unexpected violation payload: {violation!r}")
+    return _result(True, "post-render validator rejects same-page marker output")
+
+
+def test_tm_post_render_gate_restores_backup_on_same_page_marker() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    clean = Document()
+    clean.add_paragraph("ВВЕДЕНИЕ")
+    clean.add_paragraph("Таблица 1.2.2")
+    table = clean.add_table(rows=2, cols=1)
+    table.rows[0].cells[0].text = "H"
+    table.rows[1].cells[0].text = "A"
+
+    bad = Document()
+    bad.add_paragraph("ВВЕДЕНИЕ")
+    bad.add_paragraph("Таблица 1.2.2")
+    bad.add_table(rows=2, cols=1)
+    bad.add_paragraph("Продолжение таблицы 1.2.2")
+    bad.add_table(rows=2, cols=1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backup = Path(tmp) / "backup.docx"
+        output = Path(tmp) / "output.docx"
+        clean.save(backup)
+        bad.save(output)
+
+        old_probe = tc._same_page_continuation_marker_violations_for_docx
+        try:
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: [
+                tc._SamePageContinuationMarkerViolation(
+                    marker_text="Продолжение таблицы 1.2.2",
+                    marker_page=13,
+                    previous_table_page=13,
+                    following_table_page=13,
+                    confidence="high",
+                )
+            ]
+            restored = tc.restore_docx_if_same_page_continuation_markers(
+                output,
+                backup,
+                context="unit_test",
+            )
+        finally:
+            tc._same_page_continuation_marker_violations_for_docx = old_probe
+
+        out = Document(str(output))
+
+    if not restored:
+        return _result(False, "same-page marker did not trigger restore")
+    if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
+        return _result(False, "fake continuation marker survived restore")
+    if len(out.tables) != 1:
+        return _result(False, f"restore should leave unsplit table only, got {len(out.tables)} tables")
+    return _result(True, "same-page marker gate restores pre-split backup")
+
+
+def test_tm_post_render_gate_preserves_clean_next_page_marker() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 2.3.3")
+    doc.add_table(rows=2, cols=1)
+    doc.add_paragraph("Продолжение таблицы 2.3.3")
+    doc.add_table(rows=2, cols=1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backup = Path(tmp) / "backup.docx"
+        output = Path(tmp) / "output.docx"
+        doc.save(backup)
+        doc.save(output)
+
+        old_probe = tc._same_page_continuation_marker_violations_for_docx
+        try:
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: []
+            restored = tc.restore_docx_if_same_page_continuation_markers(
+                output,
+                backup,
+                context="unit_test",
+            )
+        finally:
+            tc._same_page_continuation_marker_violations_for_docx = old_probe
+
+        out = Document(str(output))
+
+    if restored:
+        return _result(False, "clean next-page marker unexpectedly restored")
+    if sum(1 for p in out.paragraphs if p.text == "Продолжение таблицы 2.3.3") != 1:
+        return _result(False, "clean continuation marker was removed")
+    if len(out.tables) != 2:
+        return _result(False, f"clean continuation chain changed: tables={len(out.tables)}")
+    return _result(True, "clean next-page marker output is preserved")
+
+
+def test_tm_post_render_gate_preserves_unresolved_manual_marker() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 2.1.2")
+    doc.add_table(rows=2, cols=1)
+    doc.add_paragraph("Продолжение таблицы 2.1.2")
+    doc.add_table(rows=2, cols=1)
+
+    violation = tc._SamePageContinuationMarkerViolation(
+        marker_text="Продолжение таблицы 2.1.2",
+        marker_page=26,
+        previous_table_page=26,
+        following_table_page=27,
+        confidence="medium",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backup = Path(tmp) / "backup.docx"
+        output = Path(tmp) / "output.docx"
+        doc.save(backup)
+        doc.save(output)
+
+        old_probe = tc._same_page_continuation_marker_violations_for_docx
+        log_stream = io.StringIO()
+        handler = logging.StreamHandler(log_stream)
+        tc.logger.addHandler(handler)
+        try:
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: [violation]
+            restored = tc.restore_docx_if_same_page_continuation_markers(
+                output,
+                backup,
+                context="unit_test",
+            )
+        finally:
+            tc.logger.removeHandler(handler)
+            tc._same_page_continuation_marker_violations_for_docx = old_probe
+
+        out = Document(str(output))
+        marker_count = sum(1 for p in out.paragraphs if p.text == "Продолжение таблицы 2.1.2")
+        logs = log_stream.getvalue()
+
+    if not restored:
+        return _result(False, "same-page marker did not trigger restore")
+    if marker_count != 1:
+        return _result(False, f"manual continuation marker should be preserved, got {marker_count}")
+    if "post_render_same_page_marker_violation_unresolved" not in logs:
+        return _result(False, f"unresolved violation was not logged: {logs}")
+    if "post_render_same_page_marker_removed" in logs:
+        return _result(False, f"semantic marker was silently removed: {logs}")
+    return _result(True, "unresolved manual continuation marker is preserved and logged")
+
+
+def test_tm_apply_rendered_split_rolls_back_same_page_marker() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    import guides.coursework_kfu_2025.table_markers as tm
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.2")
+    table = doc.add_table(rows=6, cols=3)
+    for r in range(6):
+        for c in range(3):
+            table.rows[r].cells[c].text = f"r{r}c{c}"
+
+    diagnostic = tm.TableMarkerDiagnostic(
+        table_index=0,
+        rows_count=6,
+        pages_detected=[1, 2],
+        row_pages={0: 1, 1: 1, 2: 1, 3: 2, 4: 2, 5: 2},
+        found_rows=[0, 1, 2, 3, 4, 5],
+        missing_rows=[],
+        duplicate_rows={},
+        candidate_for_split=False,
+        page_spans=[tm.TablePageSpan(0, 2, 1), tm.TablePageSpan(3, 5, 2)],
+        appendix_table=False,
+        caption_detected=True,
+        has_standard_table_caption=True,
+        preceding_paragraph_text="Таблица 1.2.2",
+    )
+
+    save = _e2_set_candidate_mode(budget=20)
+    old_dt = tm.diagnose_table
+    old_probe = tc._same_page_continuation_marker_violations_for_docx
+    try:
+        tm.diagnose_table = lambda _p, idx, keep_temp=False: diagnostic
+        tc._same_page_continuation_marker_violations_for_docx = lambda _path: [
+            tc._SamePageContinuationMarkerViolation(
+                marker_text="Продолжение таблицы 1.2.2",
+                marker_page=13,
+                previous_table_page=13,
+                following_table_page=13,
+                confidence="high",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.docx"
+            doc.save(path)
+            n = tc.apply_rendered_table_continuation(path)
+            out = Document(str(path))
+    finally:
+        tm.diagnose_table = old_dt
+        tc._same_page_continuation_marker_violations_for_docx = old_probe
+        _e2_restore_env(save)
+
+    if n != 0:
+        return _result(False, f"same-page split should be reported as skipped/restored, got n={n}")
+    if len(out.tables) != 1:
+        return _result(False, f"rollback should restore one unsplit table, got {len(out.tables)}")
+    if any("Продолжение таблицы" in (p.text or "") for p in out.paragraphs):
+        return _result(False, "same-page continuation marker survived apply_rendered rollback")
+    return _result(True, "rendered split rollback removes same-page continuation marker")
+
+
+def test_tm_real_fixture_marker_gate_preserves_semantic_markers() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.formatter_service import format_docx
+
+    strict_fixtures = [
+        Path("/Users/mac/Desktop/курсовые/курсовая пример 1.docx"),
+        Path("/Users/mac/Desktop/курсовые/Гаянов_Амир_Ленарович_Разработка проектного решения по автоматизации документооборота в организации.docx"),
+        Path("/Users/mac/Desktop/курсовые/курсовая_Бондарев_Никита_2_курс.docx"),
+    ]
+    reference = Path("/Users/mac/Desktop/курсовые/Рыбаков_Олег_Дмитриевич_курсовая_3_курс.docx")
+    fixtures = strict_fixtures + [reference]
+    missing = [str(path) for path in fixtures if not path.exists()]
+    if missing:
+        return _result(True, f"fixture(s) not present; skipped: {missing!r}")
+
+    failures: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for idx, fixture in enumerate(strict_fixtures):
+            out = Path(tmp) / f"strict_fixture_{idx}_formatted.docx"
+            format_docx(str(fixture), str(out))
+            violations = tc._same_page_continuation_marker_violations_for_docx(out)
+            if violations:
+                failures.append(
+                    f"{fixture.name}: "
+                    + "; ".join(
+                        f"{v.marker_text}@p{v.marker_page}/prev={v.previous_table_page}/next={v.following_table_page}"
+                        for v in violations
+                    )
+                )
+
+        ref_out = Path(tmp) / "reference_rybakov_formatted.docx"
+        format_docx(str(reference), str(ref_out))
+        ref_doc = Document(str(ref_out))
+        ref_texts = [p.text for p in ref_doc.paragraphs]
+        if "Продолжение таблицы 2.1.2" not in ref_texts:
+            failures.append("reference Рыбаков: semantic marker Продолжение таблицы 2.1.2 was deleted")
+
+    if failures:
+        return _result(False, "real fixture marker gate regression: " + " | ".join(failures))
+    return _result(True, "real fixture marker gate preserves semantic markers while strict fixtures stay clean")
+
+
 # ── PG2: safe_formatter geometry isolation foundation ────────────────────────
 # These tests guard Phase 1 table geometry preservation. They are not visual
 # proof; rendered diagnostics/smoke remain the source of truth for table quality.
@@ -12984,6 +13428,8 @@ def run_all() -> None:
         ("P0 | existing NUM rows not duplicated",        test_p0_existing_correct_numeric_rows_are_not_duplicated),
         ("P0 | Rybakov 2.2.1 chain not merged",          test_p0_rybakov_style_221_chain_does_not_merge_into_malformed_table),
         ("E  | student marker enables pageBreakBefore", test_e_preserved_student_marker_enables_page_break_before),
+        ("E  | student marker anchor repairs counted", test_e_preserved_student_marker_anchor_repairs_are_counted),
+        ("E  | formatter saves repaired marker anchors", test_e_format_docx_saves_repaired_manual_marker_anchors),
         ("E  | enable pageBreakBefore is idempotent",   test_e_page_break_enable_is_idempotent),
         ("E  | formatter-authored chain not modified",  test_e_formatter_authored_chain_with_keepnext_not_modified),
         ("E  | preserved marker keeps alignment+text",  test_e_preserved_marker_keeps_alignment_and_text),
@@ -13255,6 +13701,17 @@ def run_all() -> None:
         ("TM | source note boundary fail closed", test_tm_source_note_boundary_fails_closed),
         ("TM | geometry snapshot invariant", test_tm_geometry_snapshot_invariant_for_preserve_mode),
         ("TM | diagnostic harness artifacts", test_tm_diagnostic_harness_writes_stage_artifacts),
+        ("TM | same-page continuation marker flagged", test_tm_same_page_continuation_marker_is_flagged),
+        ("TM | next-page continuation marker passes", test_tm_next_page_continuation_marker_passes_validation),
+        ("TM | inline continuation prose classified", test_tm_inline_prose_continuation_text_is_not_valid_marker),
+        ("TM | unknown continuation relation not pass", test_tm_unknown_marker_relation_is_not_pass),
+        ("TM | continuation marker report page+flag", test_tm_continuation_marker_report_includes_page_and_violation),
+        ("TM | post-render same-page marker rejected", test_tm_post_render_gate_rejects_same_page_marker_output),
+        ("TM | post-render gate restores backup", test_tm_post_render_gate_restores_backup_on_same_page_marker),
+        ("TM | post-render gate preserves clean marker", test_tm_post_render_gate_preserves_clean_next_page_marker),
+        ("TM | post-render gate preserves unresolved manual marker", test_tm_post_render_gate_preserves_unresolved_manual_marker),
+        ("TM | rendered split rollback on same-page marker", test_tm_apply_rendered_split_rolls_back_same_page_marker),
+        ("TM | real fixture marker gate preserves semantic markers", test_tm_real_fixture_marker_gate_preserves_semantic_markers),
         ("PG2 | preserve sensitive safe_formatter geometry", test_pg2_safe_formatter_preserves_sensitive_tblw_layout_tcw_grid),
         ("PG2 | simple safe_formatter normalization remains", test_pg2_safe_formatter_keeps_simple_table_width_normalization),
         ("PG2 | auto pct and fixed layout preserved", test_pg2_safe_formatter_preserves_auto_pct_and_authored_fixed_layout),

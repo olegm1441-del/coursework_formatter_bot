@@ -1,5 +1,7 @@
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 from docx import Document
@@ -14,6 +16,7 @@ from .table_continuation import (
     apply_rule4_empty_first_lines,
     apply_rule6_figure_orphan,
     remove_empty_before_figure_captions,
+    restore_docx_if_same_page_continuation_markers,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
@@ -61,6 +64,8 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         logger.exception("format_docx: phase2 failed, skipping (phase1 result preserved)")
 
     # Phase 3: DOCX-only cleanup/normalisation, then rendered table split entry.
+    table_gate_backup_dir: Path | None = None
+    table_gate_backup_path: Path | None = None
     try:
         doc = Document(str(output_path))
         logger.info(
@@ -85,6 +90,9 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         else:
             logger.info("format_docx: phase3 no changes")
 
+        table_gate_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_format_table_gate_"))
+        table_gate_backup_path = table_gate_backup_dir / output_path.name
+        shutil.copy2(output_path, table_gate_backup_path)
         n_rendered = apply_rendered_table_continuation(output_path, report=report)
         if n_rendered:
             logger.info("format_docx: rendered table continuation splits=%d", n_rendered)
@@ -115,5 +123,22 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             logger.info("format_docx: static contents page rebuilt")
     except Exception:
         logger.exception("format_docx: contents rebuild failed, preserving phase3 result")
+
+    if table_gate_backup_path is not None:
+        try:
+            if restore_docx_if_same_page_continuation_markers(
+                output_path,
+                table_gate_backup_path,
+                report=report,
+                context="format_docx_final",
+            ):
+                logger.warning(
+                    "format_docx: final same-page continuation marker gate restored pre-rendered table state"
+                )
+        except Exception:
+            logger.exception("format_docx: final same-page continuation marker validation failed")
+        finally:
+            if table_gate_backup_dir is not None:
+                shutil.rmtree(table_gate_backup_dir, ignore_errors=True)
 
     return str(output_path), report.warnings

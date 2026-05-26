@@ -53,6 +53,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -86,6 +87,25 @@ class _MarkerSplitStats:
 
 
 _ACTIVE_MARKER_STATS: _MarkerSplitStats | None = None
+
+
+@dataclass(frozen=True)
+class _SamePageContinuationMarkerViolation:
+    marker_text: str
+    marker_page: int
+    previous_table_page: int
+    following_table_page: int | None = None
+    confidence: str = "low"
+
+
+_STRICT_CONTINUATION_MARKER_RE = re.compile(
+    r"^\s*Продолжение\s+таблицы\s+\d+(?:\.\d+)*\s*$",
+    re.IGNORECASE,
+)
+_ANY_CONTINUATION_MARKER_RE = re.compile(
+    r"продолжение\s+таблицы\s+\d+(?:\.\d+)*",
+    re.IGNORECASE,
+)
 
 # ── Unit helpers ─────────────────────────────────────────────────────────────
 
@@ -1349,7 +1369,7 @@ def _ensure_paragraph_bool_property_active(p_xml, prop_name: str, *, prepend: bo
     return True
 
 
-def _enable_marker_page_break_for_student_chain(marker_p) -> None:
+def _enable_marker_page_break_for_student_chain(marker_p) -> int:
     # P1-critical / DEFECT E: Phase 1 `hard_reset_paragraph_format` neutralizes
     # `<w:pageBreakBefore/>` and `<w:keepNext/>` on the marker paragraph by
     # setting w:val="0" (disabled). When the chain is preserved as a student
@@ -1361,9 +1381,14 @@ def _enable_marker_page_break_for_student_chain(marker_p) -> None:
     # these properties ENABLED with no w:val attribute and render correctly.
     # Replicate that XML shape on preserved student markers: strip the
     # disabling w:val from existing elements, or insert fresh enabled ones.
-    # Idempotent.
-    _ensure_paragraph_bool_property_active(marker_p, "w:pageBreakBefore", prepend=True)
-    _ensure_paragraph_bool_property_active(marker_p, "w:keepNext")
+    # Idempotent. Returns how many OOXML properties were inserted or changed so
+    # callers can persist marker-only repairs.
+    changed = 0
+    if _ensure_paragraph_bool_property_active(marker_p, "w:pageBreakBefore", prepend=True):
+        changed += 1
+    if _ensure_paragraph_bool_property_active(marker_p, "w:keepNext"):
+        changed += 1
+    return changed
 
 
 def _normalise_ordinary_continuation_anchors(doc: Document) -> int:
@@ -2296,7 +2321,14 @@ def apply_table_merging(doc: Document) -> int:
             # chains (keep_manual_split) already pass the strict validator
             # that requires keepNext enabled — they must NOT be touched.
             if keep_student_chain and not keep_manual_split:
-                _enable_marker_page_break_for_student_chain(node)
+                repairs = _enable_marker_page_break_for_student_chain(node)
+                if repairs:
+                    merges += repairs
+                    logger.info(
+                        "student_continuation_anchor_marker_normalized marker=%s changes=%s",
+                        marker_text,
+                        repairs,
+                    )
             i += 1
             continue
 
@@ -2481,6 +2513,226 @@ def _marker_split_num_row_compensation_enabled() -> bool:
     raw = (os.getenv("KPFU_MARKER_SPLIT_NUM_ROW_COMPENSATION") or "").strip().lower()
     if raw in {"0", "false", "off", "no"}:
         return False
+    return True
+
+
+def _render_block_page(block: dict) -> int:
+    try:
+        return int(block.get("page") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _render_block_float(block: dict | None, key: str) -> float:
+    if block is None:
+        return 0.0
+    try:
+        return float(block.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _nearest_previous_rendered_table(tables: list[dict], marker: dict) -> dict | None:
+    marker_page = _render_block_page(marker)
+    marker_y0 = _render_block_float(marker, "y0")
+    candidates: list[dict] = []
+    for table in tables:
+        page = _render_block_page(table)
+        if page < marker_page:
+            candidates.append(table)
+        elif page == marker_page and _render_block_float(table, "y1") <= marker_y0 + 2.0:
+            candidates.append(table)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (_render_block_page(item), _render_block_float(item, "y1")))
+
+
+def _nearest_following_rendered_table(tables: list[dict], marker: dict) -> dict | None:
+    marker_page = _render_block_page(marker)
+    marker_y1 = _render_block_float(marker, "y1")
+    candidates: list[dict] = []
+    for table in tables:
+        page = _render_block_page(table)
+        if page > marker_page:
+            candidates.append(table)
+        elif page == marker_page and _render_block_float(table, "y0") >= marker_y1 - 2.0:
+            candidates.append(table)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (_render_block_page(item), _render_block_float(item, "y0")))
+
+
+def _same_page_continuation_marker_violations_from_blocks(
+    blocks: list[dict],
+) -> list[_SamePageContinuationMarkerViolation]:
+    tables = [
+        block for block in blocks
+        if (block.get("kind") or "").strip().lower() == "table"
+        and _render_block_page(block) > 0
+    ]
+    marker_blocks = [
+        block for block in blocks
+        if (block.get("kind") or "").strip().lower() == "text"
+        and _render_block_page(block) > 0
+        and _ANY_CONTINUATION_MARKER_RE.search(str(block.get("text") or ""))
+    ]
+
+    violations: list[_SamePageContinuationMarkerViolation] = []
+    for marker in sorted(marker_blocks, key=lambda item: (_render_block_page(item), _render_block_float(item, "y0"))):
+        text = " ".join(str(marker.get("text") or "").split())
+        if not _STRICT_CONTINUATION_MARKER_RE.match(text):
+            continue
+        previous = _nearest_previous_rendered_table(tables, marker)
+        if previous is None:
+            continue
+        marker_page = _render_block_page(marker)
+        previous_page = _render_block_page(previous)
+        if previous_page != marker_page:
+            continue
+        following = _nearest_following_rendered_table(tables, marker)
+        following_page = _render_block_page(following) if following is not None else None
+        confidence = "high" if following_page == marker_page else "medium"
+        violations.append(
+            _SamePageContinuationMarkerViolation(
+                marker_text=text,
+                marker_page=marker_page,
+                previous_table_page=previous_page,
+                following_table_page=following_page,
+                confidence=confidence,
+            )
+        )
+    return violations
+
+
+def _continuation_marker_line_blocks_from_pdf_page(page, *, page_number: int) -> list[dict]:
+    words = page.extract_words(
+        x_tolerance=3,
+        y_tolerance=3,
+        keep_blank_chars=False,
+        use_text_flow=False,
+    ) or []
+    words = sorted(words, key=lambda item: (float(item.get("top", 0.0)), float(item.get("x0", 0.0))))
+    lines: list[list[dict]] = []
+    for word in words:
+        top = float(word.get("top", 0.0))
+        if not lines or abs(float(lines[-1][0].get("top", 0.0)) - top) > 3.0:
+            lines.append([word])
+        else:
+            lines[-1].append(word)
+
+    blocks: list[dict] = []
+    for line in lines:
+        text = " ".join(
+            str(word.get("text") or "")
+            for word in sorted(line, key=lambda item: float(item.get("x0", 0.0)))
+        )
+        text = " ".join(text.split())
+        if not _ANY_CONTINUATION_MARKER_RE.search(text):
+            continue
+        blocks.append(
+            {
+                "kind": "text",
+                "page": page_number,
+                "text": text,
+                "y0": min(float(word.get("top", 0.0)) for word in line),
+                "y1": max(float(word.get("bottom", 0.0)) for word in line),
+            }
+        )
+    return blocks
+
+
+def _continuation_marker_render_blocks_from_pdf(pdf_path: Path) -> list[dict]:
+    try:
+        import pdfplumber
+    except ImportError:
+        raise ImportError(
+            "pdfplumber is required for Phase 3 continuation marker validation. "
+            "Install it: pip install pdfplumber"
+        )
+
+    blocks: list[dict] = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            try:
+                tables = page.find_tables()
+            except Exception:
+                tables = []
+            for table_idx, table in enumerate(tables):
+                _x0, y0, _x1, y1 = table.bbox
+                blocks.append(
+                    {
+                        "kind": "table",
+                        "page": page_number,
+                        "table_block_index": table_idx,
+                        "y0": float(y0),
+                        "y1": float(y1),
+                    }
+                )
+            blocks.extend(_continuation_marker_line_blocks_from_pdf_page(page, page_number=page_number))
+    return blocks
+
+
+def _same_page_continuation_marker_violations_for_docx(
+    docx_path: Path,
+) -> list[_SamePageContinuationMarkerViolation]:
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        blocks = _continuation_marker_render_blocks_from_pdf(pdf_path)
+        return _same_page_continuation_marker_violations_from_blocks(blocks)
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+
+def restore_docx_if_same_page_continuation_markers(
+    docx_path: Path,
+    backup_docx_path: Path,
+    *,
+    report: FormattingReport | None = None,
+    context: str = "post_render",
+) -> bool:
+    """Restore backup when final render contains fake same-page continuations."""
+    try:
+        violations = _same_page_continuation_marker_violations_for_docx(Path(docx_path))
+    except Exception as exc:
+        logger.info(
+            "post_render_same_page_marker_validation_skip context=%s reason=validation_failed error=%s",
+            context, exc,
+        )
+        return False
+
+    if not violations:
+        return False
+
+    shutil.copy2(backup_docx_path, docx_path)
+    details = [
+        f"{v.marker_text}@p{v.marker_page}:prev={v.previous_table_page}:next={v.following_table_page}:confidence={v.confidence}"
+        for v in violations
+    ]
+    logger.warning(
+        "post_render_same_page_marker_violation context=%s restored_backup=1 violations=%s",
+        context, ";".join(details),
+    )
+    if report is not None:
+        report.warn(
+            "Автоматическое разделение таблиц пропущено: обнаружен маркер "
+            "продолжения на той же странице. Таблицу нужно проверить вручную."
+        )
+    try:
+        remaining = _same_page_continuation_marker_violations_for_docx(Path(docx_path))
+    except Exception as exc:
+        logger.info(
+            "post_render_same_page_marker_recheck_skip context=%s reason=validation_failed error=%s",
+            context, exc,
+        )
+        return True
+    if remaining:
+        logger.warning(
+            "post_render_same_page_marker_violation_unresolved context=%s restored_backup=1 violations=%s",
+            context,
+            ";".join(f"{v.marker_text}@p{v.marker_page}" for v in remaining),
+        )
     return True
 
 
@@ -3732,6 +3984,36 @@ def _apply_appendix_table_continuation_split(
 
 
 def apply_rendered_table_continuation(
+    docx_path: Path,
+    report: FormattingReport | None = None,
+    max_passes: int = 1,
+) -> int:
+    docx_path = Path(docx_path)
+    backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_rendered_table_gate_"))
+    backup_path = backup_dir / "pre_rendered_table_continuation.docx"
+    try:
+        shutil.copy2(docx_path, backup_path)
+        applied = _apply_rendered_table_continuation_impl(
+            docx_path,
+            report=report,
+            max_passes=max_passes,
+        )
+        if applied and restore_docx_if_same_page_continuation_markers(
+            docx_path,
+            backup_path,
+            report=report,
+            context="apply_rendered_table_continuation",
+        ):
+            logger.info(
+                "rendered_final_decision action=rendered_no_action reason=post_render_same_page_marker_violation"
+            )
+            return 0
+        return applied
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _apply_rendered_table_continuation_impl(
     docx_path: Path,
     report: FormattingReport | None = None,
     max_passes: int = 1,
