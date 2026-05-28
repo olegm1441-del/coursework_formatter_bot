@@ -1384,6 +1384,171 @@ def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]
     return _result(True, "dot leader and page numbers preserved with blank paragraph present")
 
 
+def _add_softbreak_para(doc: Document, lines: list[str]):
+    """Add a paragraph with soft line-breaks (<w:br/>) between each line."""
+    p = doc.add_paragraph()
+    p.clear()
+    for i, line in enumerate(lines):
+        run = p.add_run(line)
+        if i < len(lines) - 1:
+            br = OxmlElement("w:br")
+            run._element.append(br)
+    return p
+
+
+_SOFTBREAK_TOC_RENDERED_LINES: list[tuple[str, int]] = [
+    ("ВВЕДЕНИЕ", 3),
+    ("1. Теоретические основы", 4),
+    ("2. Анализ и совершенствование", 5),
+    ("ЗАКЛЮЧЕНИЕ", 6),
+    ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 7),
+]
+
+
+def _make_softbreak_toc_doc_173_pattern() -> Document:
+    """
+    Mimics the 173 input structure:
+      - title paragraph
+      - Para 1: soft-break TOC part 1 (СОДЕРЖАНИЕ + a few chapters)
+      - Para 2: soft-break TOC part 2 (more chapters + ПРИЛОЖЕНИЕ 1/2/3)
+      - two near-empty paragraphs (spaces)
+      - real ВВЕДЕНИЕ heading (Heading 1 style) → body start
+      - body content with headings
+    """
+    doc = Document()
+    doc.add_paragraph("Специфика организационного покупательского поведения")
+    _add_softbreak_para(doc, [
+        "СОДЕРЖАНИЕ",
+        "ВВЕДЕНИЕ",
+        "1. Теоретические основы",
+    ])
+    _add_softbreak_para(doc, [
+        "2. Анализ и совершенствование",
+        "ЗАКЛЮЧЕНИЕ",
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+        "ПРИЛОЖЕНИЕ 1",
+        "ПРИЛОЖЕНИЕ 2",
+        "ПРИЛОЖЕНИЕ 3",
+    ])
+    doc.add_paragraph(" ")
+    doc.add_paragraph(" ")
+    intro_p = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro_p.style = doc.styles["Heading 1"]
+    doc.add_paragraph("Текст введения.")
+    h1a = doc.add_paragraph("1. Теоретические основы")
+    h1a.style = doc.styles["Heading 1"]
+    doc.add_paragraph("Текст раздела 1.")
+    h1b = doc.add_paragraph("2. Анализ и совершенствование")
+    h1b.style = doc.styles["Heading 1"]
+    doc.add_paragraph("Текст раздела 2.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+    return doc
+
+
+def test_autotoc_softbreak_plain_toc_removed() -> tuple[bool, str]:
+    """
+    Old TOC where heading + all entries live in a single soft-break paragraph
+    (no page numbers) must be removed; one canonical СОДЕРЖАНИЕ inserted.
+    """
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    _add_softbreak_para(doc, [
+        "СОДЕРЖАНИЕ",
+        "ВВЕДЕНИЕ",
+        "1. Теоретические основы",
+        "ЗАКЛЮЧЕНИЕ",
+        "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+    ])
+    intro_p = doc.add_paragraph("ВВЕДЕНИЕ")
+    intro_p.style = doc.styles["Heading 1"]
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = doc.styles["Heading 1"]
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("ЗАКЛЮЧЕНИЕ", 5),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered)
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ, got front={front!r}")
+    canonical_idx = front.index("СОДЕРЖАНИЕ")
+    # Old TOC entries (not the title) must not appear above the canonical heading
+    old_toc_entries = {"ВВЕДЕНИЕ", "1. ТЕОРЕТИЧЕСКИЕ ОСНОВЫ", "ЗАКЛЮЧЕНИЕ", "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ"}
+    for above in front[:canonical_idx]:
+        if above.upper() in old_toc_entries or above.startswith("1. "):
+            return _result(False, f"old TOC entry survived above canonical: {front!r}")
+    return _result(True, "old soft-break plain TOC removed; canonical single block")
+
+
+def test_autotoc_softbreak_toc_appendix_continuation_removed() -> tuple[bool, str]:
+    """
+    173-pattern: two-paragraph soft-break front matter where the second paragraph
+    contains ПРИЛОЖЕНИЕ 1/2/3 as soft-break lines. Previously _is_toc_like_entry
+    stripped 'ПРИЛОЖЕНИЕ 1' to 'ПРИЛОЖЕНИЕ' (treating '1' as a page number),
+    so the appendix regex rejected it and the entire old TOC block was left in place.
+    After the fix, the full block must be removed.
+    """
+    doc = _make_softbreak_toc_doc_173_pattern()
+    out = _run_static_contents_rebuild(doc, _SOFTBREAK_TOC_RENDERED_LINES)
+    front = _toc_texts_before_intro(out)
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single СОДЕРЖАНИЕ, got front={front!r}")
+    canonical_idx = front.index("СОДЕРЖАНИЕ")
+    # Old soft-break TOC paragraphs (the ones containing soft-break content)
+    # must not appear above the canonical heading. The title is OK.
+    for above in front[:canonical_idx]:
+        if above.startswith("ПРИЛОЖЕНИЕ ") or "\n" in above or "СПИСОК" in above:
+            return _result(False, f"old TOC content survived above canonical: {front!r}")
+        # The soft-break para would contain multiple lines when read via p.text
+        if above.count("\n") > 0:
+            return _result(False, f"multi-line old TOC para survived: {front!r}")
+    return _result(True, "173-pattern: soft-break TOC with ПРИЛОЖЕНИЕ continuation removed")
+
+
+def test_autotoc_body_intro_preserved_after_softbreak_toc() -> tuple[bool, str]:
+    """
+    Real body ВВЕДЕНИЕ heading must not be deleted when the old soft-break TOC
+    block is removed. Only pre-body paragraphs up to (not including) the real
+    ВВЕДЕНИЕ should be removed.
+    """
+    doc = _make_softbreak_toc_doc_173_pattern()
+    out = _run_static_contents_rebuild(doc, _SOFTBREAK_TOC_RENDERED_LINES)
+    texts = [p.text for p in out.paragraphs]
+    if "ВВЕДЕНИЕ" not in texts:
+        return _result(False, f"real body ВВЕДЕНИЕ was deleted: {texts[:10]!r}")
+    # Verify body content follows ВВЕДЕНИЕ
+    intro_idx = texts.index("ВВЕДЕНИЕ")
+    if intro_idx + 1 >= len(texts) or not texts[intro_idx + 1]:
+        return _result(False, "nothing follows ВВЕДЕНИЕ — body may have been truncated")
+    return _result(True, "real body ВВЕДЕНИЕ preserved after soft-break TOC cleanup")
+
+
+def test_autotoc_no_duplicate_contents_after_rebuild() -> tuple[bool, str]:
+    """
+    After full rebuild on a 173-pattern doc, there must be exactly one СОДЕРЖАНИЕ
+    in the entire output document (no duplicate from old TOC + new canonical).
+    """
+    doc = _make_softbreak_toc_doc_173_pattern()
+    out = _run_static_contents_rebuild(doc, _SOFTBREAK_TOC_RENDERED_LINES)
+    all_texts = [p.text for p in out.paragraphs]
+    count = sum(1 for t in all_texts if "СОДЕРЖАНИЕ" in t and t.strip() == "СОДЕРЖАНИЕ")
+    if count != 1:
+        return _result(False, f"expected 1 СОДЕРЖАНИЕ in entire doc, found {count}: {all_texts[:20]!r}")
+    return _result(True, "no duplicate СОДЕРЖАНИЕ after rebuild on 173-pattern doc")
+
+
 def _paragraph_has_texts_in_order(doc: Document, expected: list[str]) -> bool:
     texts = [paragraph.text for paragraph in doc.paragraphs]
     pos = 0
@@ -5726,12 +5891,15 @@ def test_lists_manual_dash_block_normalized() -> tuple[bool, str]:
     p3 = doc.add_paragraph("- третий пункт")
     _normalize_plain_list_paragraphs([pre, p1, p2, p3])
     for p in (p1, p2, p3):
-        if not p.text.startswith("– "):
-            return _result(False, f"dash item not normalized: {p.text!r}")
+        # New behaviour: real KFU Word dash-list (numPr, no literal "– " prefix)
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"dash item not KFU Word dash-list: {p.text!r}")
+        if p.text.startswith("– ") or p.text.startswith("– "):
+            return _result(False, f"literal dash prefix should not appear in text: {p.text!r}")
         left, hang, right = _list_ind_attrs(p)
         if (left, hang, right) != ("906", "198", "0"):
             return _result(False, f"dash item bad indent: left={left} hang={hang} right={right}")
-    return _result(True, "ascii-hyphen block normalized to methodical dash")
+    return _result(True, "ascii-hyphen block normalized to real Word dash-list")
 
 
 def test_lists_manual_em_dash_block_normalized() -> tuple[bool, str]:
@@ -5743,9 +5911,11 @@ def test_lists_manual_em_dash_block_normalized() -> tuple[bool, str]:
     p2 = doc.add_paragraph("— второй пункт")
     _normalize_plain_list_paragraphs([pre, p1, p2])
     for p in (p1, p2):
-        if not p.text.startswith("– "):
-            return _result(False, f"em-dash item not normalized: {p.text!r}")
-    return _result(True, "em-dash block normalized to methodical en-dash")
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"em-dash item not KFU Word dash-list: {p.text!r}")
+        if p.text.startswith("– ") or p.text.startswith("– "):
+            return _result(False, f"literal dash prefix should not appear in text: {p.text!r}")
+    return _result(True, "em-dash block normalized to real Word dash-list")
 
 
 def test_lists_manual_black_bullets_normalized() -> tuple[bool, str]:
@@ -5758,9 +5928,11 @@ def test_lists_manual_black_bullets_normalized() -> tuple[bool, str]:
     p3 = doc.add_paragraph("● третий bullet")
     _normalize_plain_list_paragraphs([pre, p1, p2, p3])
     for p in (p1, p2, p3):
-        if not p.text.startswith("– "):
-            return _result(False, f"black bullet not normalized: {p.text!r}")
-    return _result(True, "black bullets normalized to methodical dash")
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"black bullet not KFU Word dash-list: {p.text!r}")
+        if p.text.startswith("– ") or p.text.startswith("– "):
+            return _result(False, f"literal dash prefix should not appear in text: {p.text!r}")
+    return _result(True, "black bullets normalized to real Word dash-list")
 
 
 def test_lists_singleton_dash_not_converted() -> tuple[bool, str]:
@@ -6060,6 +6232,496 @@ def test_lists_bibliography_section_not_normalized() -> tuple[bool, str]:
     if p1.text.startswith("а)") or p2.text.startswith("а)"):
         return _result(False, f"bibliography entry converted: {p1.text!r} / {p2.text!r}")
     return _result(True, "bibliography entries not converted")
+
+
+# ── Word dash-list normalization tests ───────────────────────────────────────
+# Covers: G2 (decimal→dash), plain manual dash, bullet chars, letter-list
+# preservation, singleton guards, references/appendix guards, idempotency.
+
+
+def _make_decimal_numbering_doc():
+    """
+    Return a Document() where numId='1' maps to decimal ilvl=0 via a proper
+    numbering part. Used by Word-decimal list tests.
+    """
+    import io
+    import zipfile as _zipfile
+
+    buf = io.BytesIO()
+    Document().save(buf)
+    buf.seek(0)
+    NUMBERING_XML = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        b'<w:abstractNum w:abstractNumId="0">'
+        b'<w:lvl w:ilvl="0">'
+        b'<w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+        b'<w:lvlText w:val="%1."/><w:lvlJc w:val="left"/>'
+        b'</w:lvl></w:abstractNum>'
+        b'<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+        b'</w:numbering>'
+    )
+    out = io.BytesIO()
+    with _zipfile.ZipFile(buf, "r") as zin, _zipfile.ZipFile(out, "w", _zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename == "word/numbering.xml":
+                zout.writestr(item, NUMBERING_XML)
+            else:
+                zout.writestr(item, zin.read(item.filename))
+    out.seek(0)
+    return Document(out)
+
+
+def _make_letter_numbering_doc():
+    """
+    Return a Document() where numId='1' maps to lowerLetter ilvl=0.
+    Used by letter-list preservation tests.
+    """
+    import io
+    import zipfile as _zipfile
+
+    buf = io.BytesIO()
+    Document().save(buf)
+    buf.seek(0)
+    NUMBERING_XML = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        b'<w:abstractNum w:abstractNumId="0">'
+        b'<w:lvl w:ilvl="0">'
+        b'<w:start w:val="1"/><w:numFmt w:val="lowerLetter"/>'
+        b'<w:lvlText w:val="%1)"/><w:lvlJc w:val="left"/>'
+        b'</w:lvl></w:abstractNum>'
+        b'<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+        b'</w:numbering>'
+    )
+    out = io.BytesIO()
+    with _zipfile.ZipFile(buf, "r") as zin, _zipfile.ZipFile(out, "w", _zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename == "word/numbering.xml":
+                zout.writestr(item, NUMBERING_XML)
+            else:
+                zout.writestr(item, zin.read(item.filename))
+    out.seek(0)
+    return Document(out)
+
+
+def _add_numpr(paragraph, num_id: str = "1", ilvl: str = "0") -> None:
+    """Attach a w:numPr pointing at numId with the given ilvl."""
+    pPr = paragraph._element.get_or_add_pPr()
+    numPr = OxmlElement("w:numPr")
+    ilvl_el = OxmlElement("w:ilvl")
+    ilvl_el.set(qn("w:val"), ilvl)
+    numId_el = OxmlElement("w:numId")
+    numId_el.set(qn("w:val"), num_id)
+    numPr.append(ilvl_el)
+    numPr.append(numId_el)
+    pPr.append(numPr)
+
+
+# Keep backward-compatible alias used in earlier tests in this file.
+_add_decimal_numpr = _add_numpr
+
+
+def _para_is_kfu_dash_list(p) -> bool:
+    """
+    Return True iff *p* has a real KFU Word dash-list numPr —
+    i.e. the abstractNum carries our internal NSID marker (FFFEFFFF)
+    OR has numFmt=bullet with lvlText=en-dash at ilvl=0.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        _KFU_DASH_NSID, paragraph_has_numbering, _get_num_fmt_for_paragraph,
+    )
+    if not paragraph_has_numbering(p):
+        return False
+    if _get_num_fmt_for_paragraph(p) != "bullet":
+        return False
+    try:
+        numbering_el = p.part.numbering_part._element
+        pPr = p._element.pPr
+        numPr = pPr.find(qn("w:numPr"))
+        num_id_val = numPr.find(qn("w:numId")).get(qn("w:val"))
+        for num_e in numbering_el.findall(qn("w:num")):
+            if num_e.get(qn("w:numId")) != num_id_val:
+                continue
+            ref = num_e.find(qn("w:abstractNumId"))
+            if ref is None:
+                return False
+            ab_id = ref.get(qn("w:val"))
+            for ab in numbering_el.findall(qn("w:abstractNum")):
+                if ab.get(qn("w:abstractNumId")) != ab_id:
+                    continue
+                # Check NSID marker
+                nsid = ab.find(qn("w:nsid"))
+                if nsid is not None and nsid.get(qn("w:val")) == _KFU_DASH_NSID:
+                    return True
+                # Fallback: check lvlText=– at ilvl=0
+                for lvl in ab.findall(qn("w:lvl")):
+                    if lvl.get(qn("w:ilvl")) != "0":
+                        continue
+                    lt = lvl.find(qn("w:lvlText"))
+                    if lt is not None and lt.get(qn("w:val")) == "–":
+                        return True
+        return False
+    except Exception:
+        return False
+
+
+# ── Test 1: G2 Pattern A — same numId block → real Word dash-list ─────────────
+
+def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
+    """
+    G2 Pattern A: 2+ contiguous decimal numPr paragraphs sharing the same numId
+    become real Word dash-list items (bullet numPr, lvlText=–, no literal dash prefix).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
+
+    doc = _make_decimal_numbering_doc()
+    pre = doc.add_paragraph("Вводный абзац.")
+    p1 = doc.add_paragraph("first Word numbered item")
+    p2 = doc.add_paragraph("second Word numbered item")
+    p3 = doc.add_paragraph("third Word numbered item")
+    for p in (p1, p2, p3):
+        _add_numpr(p, num_id="1")
+
+    _normalize_word_numbered_list_paragraphs([pre, p1, p2, p3])
+
+    for p in (p1, p2, p3):
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"item not converted to KFU dash-list: numFmt={p._element.pPr!r} text={p.text!r}")
+        if p.text.startswith("– ") or p.text.startswith("– "):
+            return _result(False, f"literal dash prefix found in text: {p.text!r}")
+    return _result(True, "Pattern A: 3-item block converted to real Word dash-list")
+
+
+# ── Test 2: G2 Pattern B — cross-numId block → real Word dash-list ───────────
+
+def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
+    """
+    G2 Pattern B: contiguous decimal numPr paragraphs with different numIds
+    (same abstractNum) are treated as one block and converted to real dash-list.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
+
+    doc = _make_decimal_numbering_doc()
+    pre = doc.add_paragraph("Вводный абзац.")
+    p1 = doc.add_paragraph("Reset-numbered item A")
+    p2 = doc.add_paragraph("Reset-numbered item B")
+    p3 = doc.add_paragraph("Reset-numbered item C")
+    for p in (p1, p2, p3):
+        _add_numpr(p, num_id="1")
+
+    _normalize_word_numbered_list_paragraphs([pre, p1, p2, p3])
+
+    for p in (p1, p2, p3):
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"Pattern B item not KFU dash-list: {p.text!r}")
+        if p.text.startswith("– ") or p.text.startswith("– "):
+            return _result(False, f"literal dash prefix in text: {p.text!r}")
+    return _result(True, "Pattern B: reset-numbered block converted to real Word dash-list")
+
+
+# ── Test 3: Plain manual "– text" blocks → real Word dash-list ───────────────
+
+def test_plain_dash_block_becomes_word_list() -> tuple[bool, str]:
+    """
+    normalize_plain_lists_in_document must convert a block of 2+ manual
+    '– text' paragraphs (no numPr) into real KFU Word dash-list items.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    p1 = doc.add_paragraph("– первый пункт")
+    p2 = doc.add_paragraph("– второй пункт")
+    p3 = doc.add_paragraph("– третий пункт")
+
+    normalize_plain_lists_in_document(doc, body_start=0)
+
+    for p in (p1, p2, p3):
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"plain dash item not KFU dash-list: text={p.text!r}")
+        if p.text.startswith("– ") or p.text.startswith("– "):
+            return _result(False, f"literal dash prefix still in text: {p.text!r}")
+    return _result(True, "plain manual dash block converted to real Word dash-list")
+
+
+# ── Test 4: Bullet chars → real Word dash-list ───────────────────────────────
+
+def test_bullet_chars_become_word_dash_list() -> tuple[bool, str]:
+    """
+    normalize_plain_lists_in_document must convert a block of 2+ bullet
+    paragraphs (•, ·, ●, -, —) into real KFU Word dash-list items.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    p1 = doc.add_paragraph("• первый")
+    p2 = doc.add_paragraph("· второй")
+    p3 = doc.add_paragraph("- третий")
+
+    normalize_plain_lists_in_document(doc, body_start=0)
+
+    for p in (p1, p2, p3):
+        if not _para_is_kfu_dash_list(p):
+            return _result(False, f"bullet item not KFU dash-list: {p.text!r}")
+    return _result(True, "bullet chars converted to real Word dash-list")
+
+
+# ── Test 5: Letter-list numPr preserved by format_body_list_item ─────────────
+
+def test_letter_numpr_preserved_in_body_list_item() -> tuple[bool, str]:
+    """
+    format_body_list_item must preserve numPr for lowerLetter Word lists
+    (Cyrillic а) б) в) autonumbering) rather than stripping it.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        format_body_list_item, _get_num_fmt_for_paragraph, paragraph_has_numbering,
+    )
+
+    doc = _make_letter_numbering_doc()
+    p = doc.add_paragraph("а) первый пункт списка")
+    _add_numpr(p, num_id="1")
+
+    format_body_list_item(p)
+
+    if not paragraph_has_numbering(p):
+        return _result(False, "numPr was removed from letter-list item")
+    nf = _get_num_fmt_for_paragraph(p)
+    if nf != "lowerLetter":
+        return _result(False, f"numFmt changed from lowerLetter to {nf!r}")
+    return _result(True, "lowerLetter numPr preserved by format_body_list_item")
+
+
+# ── Test 6: Singleton manual dash unchanged ───────────────────────────────────
+
+def test_singleton_plain_dash_unchanged() -> tuple[bool, str]:
+    """
+    A single isolated '– text' paragraph must NOT be converted (singleton guard).
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    solo = doc.add_paragraph("– одиночный пункт")
+    doc.add_paragraph("Обычный текст после.")
+
+    orig = solo.text
+    normalize_plain_lists_in_document(doc, body_start=0)
+
+    if solo.text != orig:
+        return _result(False, f"singleton was modified: {solo.text!r}")
+    if _para_is_kfu_dash_list(solo):
+        return _result(False, "singleton was unexpectedly converted to Word list")
+    return _result(True, "singleton manual dash left unchanged")
+
+
+# ── Test 7: Singleton Word-decimal unchanged ──────────────────────────────────
+
+def test_word_numbered_singleton_not_converted() -> tuple[bool, str]:
+    """
+    A single isolated decimal numPr paragraph (block size == 1) must not
+    be converted. Block I from autonumbering_kfu_input_cases.docx.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        _normalize_word_numbered_list_paragraphs, _get_num_fmt_for_paragraph,
+    )
+
+    doc = _make_decimal_numbering_doc()
+    pre = doc.add_paragraph("Вводный абзац.")
+    solo = doc.add_paragraph("Single Word numbered paragraph should remain.")
+    after = doc.add_paragraph("Обычный текст после.")
+    _add_numpr(solo, num_id="1")
+
+    orig_text = solo.text
+    _normalize_word_numbered_list_paragraphs([pre, solo, after])
+
+    if solo.text != orig_text:
+        return _result(False, f"singleton text changed: {solo.text!r}")
+    if _get_num_fmt_for_paragraph(solo) != "decimal":
+        return _result(False, "singleton numFmt changed away from decimal")
+    return _result(True, "singleton decimal numPr paragraph left unchanged")
+
+
+# ── Test 8: References block unchanged ───────────────────────────────────────
+
+def test_word_numbered_references_block_not_converted() -> tuple[bool, str]:
+    """
+    Decimal numPr paragraphs inside the references block must not be converted.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_word_numbered_lists_in_document
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    p1 = doc.add_paragraph("Иванов И.И. Учебное пособие. 2024.")
+    p2 = doc.add_paragraph("Петров П.П. Документооборот. 2023.")
+    _add_numpr(p1, num_id="1")
+    _add_numpr(p2, num_id="1")
+
+    t1, t2 = p1.text, p2.text
+    normalize_word_numbered_lists_in_document(doc, body_start=0)
+
+    if p1.text != t1 or p2.text != t2:
+        return _result(False, f"references items were converted: {p1.text!r} / {p2.text!r}")
+    return _result(True, "references decimal numPr items not converted")
+
+
+# ── Test 9: Appendices block unchanged ───────────────────────────────────────
+
+def test_word_numbered_appendix_block_not_converted() -> tuple[bool, str]:
+    """
+    Decimal numPr paragraphs inside the appendices section must not be converted.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_word_numbered_lists_in_document
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ПРИЛОЖЕНИЯ")
+    p1 = doc.add_paragraph("appendix item one")
+    p2 = doc.add_paragraph("appendix item two")
+    _add_numpr(p1, num_id="1")
+    _add_numpr(p2, num_id="1")
+
+    t1, t2 = p1.text, p2.text
+    normalize_word_numbered_lists_in_document(doc, body_start=0)
+
+    if p1.text != t1 or p2.text != t2:
+        return _result(False, f"appendix items were converted: {p1.text!r} / {p2.text!r}")
+    return _result(True, "appendix decimal numPr items not converted")
+
+
+# ── Test 10: Table-caption paragraphs not touched ────────────────────────────
+
+def test_table_caption_not_normalized() -> tuple[bool, str]:
+    """
+    _paragraph_blocks_list_conversion vetoes 'Таблица N …' paragraphs so
+    they are never converted to list items by either normalization pass.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_plain_lists_in_document, normalize_word_numbered_lists_in_document,
+    )
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    cap = doc.add_paragraph("Таблица 1 – Перечень показателей")
+    body1 = doc.add_paragraph("– первый пункт")
+    body2 = doc.add_paragraph("– второй пункт")
+
+    cap_orig = cap.text
+    normalize_plain_lists_in_document(doc, body_start=0)
+    normalize_word_numbered_lists_in_document(doc, body_start=0)
+
+    if cap.text != cap_orig:
+        return _result(False, f"table caption was changed: {cap.text!r}")
+    return _result(True, "table caption paragraph untouched by normalization")
+
+
+# ── Test 11: Heading paragraphs not converted ─────────────────────────────────
+
+def test_word_numbered_heading_style_not_converted() -> tuple[bool, str]:
+    """
+    Decimal numPr paragraphs with heading style or outlineLvl must not be
+    converted, regardless of block size.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
+
+    doc = _make_decimal_numbering_doc()
+    h1 = doc.add_paragraph("1. Первая глава")
+    h1.style = doc.styles["Heading 1"]
+    h2 = doc.add_paragraph("2. Вторая глава")
+    h2.style = doc.styles["Heading 1"]
+    _add_numpr(h1, num_id="1")
+    _add_numpr(h2, num_id="1")
+
+    t1, t2 = h1.text, h2.text
+    _normalize_word_numbered_list_paragraphs([h1, h2])
+
+    if h1.text != t1 or h2.text != t2:
+        return _result(False, f"heading was converted: {h1.text!r} / {h2.text!r}")
+    return _result(True, "heading-styled decimal numPr paragraphs not converted")
+
+
+# ── Test 12: Full idempotency ─────────────────────────────────────────────────
+
+def test_word_numbered_normalization_idempotent() -> tuple[bool, str]:
+    """
+    Running both normalization passes twice must produce identical output:
+    – same paragraph count
+    – no literal dash prefix duplication
+    – numPr count unchanged between run 1 and run 2
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_word_numbered_lists_in_document,
+        normalize_plain_lists_in_document,
+        paragraph_has_numbering,
+    )
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Текст введения.")
+    p1 = doc.add_paragraph("first item")
+    p2 = doc.add_paragraph("second item")
+    p3 = doc.add_paragraph("third item")
+    for p in (p1, p2, p3):
+        _add_numpr(p, num_id="1")
+
+    def _run_passes(d):
+        normalize_plain_lists_in_document(d, body_start=0)
+        normalize_word_numbered_lists_in_document(d, body_start=0)
+
+    _run_passes(doc)
+
+    after1_texts   = [p.text for p in doc.paragraphs]
+    after1_has_num = [paragraph_has_numbering(p) for p in doc.paragraphs]
+    after1_count   = len(doc.paragraphs)
+
+    _run_passes(doc)
+
+    after2_texts   = [p.text for p in doc.paragraphs]
+    after2_has_num = [paragraph_has_numbering(p) for p in doc.paragraphs]
+
+    if len(doc.paragraphs) != after1_count:
+        return _result(False, f"paragraph count changed: {after1_count} -> {len(doc.paragraphs)}")
+    if after1_texts != after2_texts:
+        diff = [(a, b) for a, b in zip(after1_texts, after2_texts) if a != b]
+        return _result(False, f"texts changed on second pass: {diff}")
+    if after1_has_num != after2_has_num:
+        return _result(False, "numPr presence changed on second pass")
+    # No paragraph should have a literal '– ' prefix duplicated in its text
+    for t in after2_texts:
+        if t.startswith("– – ") or t.startswith("– – "):
+            return _result(False, f"duplicated dash prefix: {t!r}")
+    return _result(True, "full normalization pipeline is idempotent")
+
+
+# ── Guard test: blank breaks G2 block ────────────────────────────────────────
+
+def test_word_numbered_block_broken_by_blank_not_converted() -> tuple[bool, str]:
+    """
+    A blank paragraph between two decimal numPr items breaks the block.
+    Neither orphan forms a 2+ block, so both must stay unchanged.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
+
+    doc = _make_decimal_numbering_doc()
+    p1 = doc.add_paragraph("item before blank")
+    blank = doc.add_paragraph("")
+    p2 = doc.add_paragraph("item after blank")
+    _add_numpr(p1, num_id="1")
+    _add_numpr(p2, num_id="1")
+
+    t1, t2 = p1.text, p2.text
+    _normalize_word_numbered_list_paragraphs([p1, blank, p2])
+
+    if p1.text != t1:
+        return _result(False, f"p1 before blank was changed: {p1.text!r}")
+    if p2.text != t2:
+        return _result(False, f"p2 after blank was changed: {p2.text!r}")
+    return _result(True, "blank-separated items stay unchanged")
+
 
 
 # ── Real body-start detection (skip fake/old TOC entries) ──────────────
@@ -13535,6 +14197,19 @@ def run_all() -> None:
         ("LIST | colon numeric-dot → letters preserved", test_lists_existing_colon_numeric_dot_letters_unchanged),
         ("LIST | appendix section NOT normalized",       test_lists_appendix_section_not_normalized),
         ("LIST | bibliography section NOT normalized",   test_lists_bibliography_section_not_normalized),
+        ("LIST | G2 Pattern A → real Word dash-list",        test_word_numbered_pattern_a_converted),
+        ("LIST | G2 Pattern B → real Word dash-list",        test_word_numbered_pattern_b_converted),
+        ("LIST | plain dash block → real Word dash-list",    test_plain_dash_block_becomes_word_list),
+        ("LIST | bullet chars → real Word dash-list",        test_bullet_chars_become_word_dash_list),
+        ("LIST | letter numPr preserved by body_list_item",  test_letter_numpr_preserved_in_body_list_item),
+        ("LIST | singleton plain dash unchanged",             test_singleton_plain_dash_unchanged),
+        ("LIST | G2 singleton Word-decimal unchanged",        test_word_numbered_singleton_not_converted),
+        ("LIST | G2 references guard",                        test_word_numbered_references_block_not_converted),
+        ("LIST | G2 appendix guard",                          test_word_numbered_appendix_block_not_converted),
+        ("LIST | table caption not normalized",               test_table_caption_not_normalized),
+        ("LIST | G2 heading guard",                           test_word_numbered_heading_style_not_converted),
+        ("LIST | full normalization idempotent",              test_word_numbered_normalization_idempotent),
+        ("LIST | G2 blank breaks block",                      test_word_numbered_block_broken_by_blank_not_converted),
         ("BODY | skip fake plain-TOC СОДЕРЖАНИЕ",        test_real_body_start_skips_fake_plain_toc_soderzhanie),
         ("BODY | skip fake Оглавление",                  test_real_body_start_skips_fake_oglavlenie_toc),
         ("BODY | skip fake TOC with appendix entries",   test_real_body_start_skips_fake_toc_with_appendix_entries),
@@ -13767,6 +14442,10 @@ def run_all() -> None:
         ("TOC | old TOC with appendix entries removed", test_autotoc_old_toc_with_appendix_entries_removed),
         ("TOC | old TOC heading with page number removed", test_autotoc_old_toc_heading_with_page_number_removed),
         ("TOC | standalone loose heading keeps body",  test_autotoc_standalone_loose_contents_paragraph_does_not_delete_body),
+        ("TOC | soft-break plain TOC removed",         test_autotoc_softbreak_plain_toc_removed),
+        ("TOC | soft-break TOC appendix continuation removed", test_autotoc_softbreak_toc_appendix_continuation_removed),
+        ("TOC | body ВВЕДЕНИЕ preserved after softbreak cleanup", test_autotoc_body_intro_preserved_after_softbreak_toc),
+        ("TOC | no duplicate СОДЕРЖАНИЕ after rebuild", test_autotoc_no_duplicate_contents_after_rebuild),
         # ── P2-a' relaxed row/page matcher tests — registered at tail to
         # avoid shifting the ordinal position of pre-existing E2 tests, which
         # exposed a latent order-sensitive failure in the suite. The matcher

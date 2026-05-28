@@ -17,6 +17,7 @@ from .table_continuation import (
     apply_rule6_figure_orphan,
     remove_empty_before_figure_captions,
     restore_docx_if_same_page_continuation_markers,
+    remove_same_page_continuation_markers_inplace,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
@@ -63,9 +64,7 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: phase2 failed, skipping (phase1 result preserved)")
 
-    # Phase 3: DOCX-only cleanup/normalisation, then rendered table split entry.
-    table_gate_backup_dir: Path | None = None
-    table_gate_backup_path: Path | None = None
+    # Phase 3: DOCX-only cleanup/normalisation.
     try:
         doc = Document(str(output_path))
         logger.info(
@@ -89,7 +88,43 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
         else:
             logger.info("format_docx: phase3 no changes")
+    except Exception:
+        logger.exception("format_docx: phase3 failed, skipping (phase2 result preserved)")
 
+    # Strip obsolete TOC artifacts (Word SDT TOC and plain-text old TOC block)
+    # BEFORE the rendered-continuation backup.  By stripping first the backup
+    # becomes: DOCX-only continuation markers + canonical TOC (rebuilt below).
+    # If the rendered-continuation gate fires and restores this backup the user
+    # always sees exactly one canonical СОДЕРЖАНИЕ — never a stale hand-made
+    # copy that was present in the source or from a prior formatting run.
+    try:
+        report_strip = strip_obsolete_toc_blocks_inplace(output_path)
+        if report_strip["sdt_removed"] or report_strip["plain_toc_removed"]:
+            logger.info(
+                "format_docx: pre-backup TOC strip sdt=%d plain_paragraphs=%d",
+                report_strip["sdt_removed"],
+                report_strip["plain_toc_removed"],
+            )
+    except Exception:
+        logger.exception("format_docx: pre-backup TOC strip failed, continuing")
+
+    # Rebuild the canonical contents page BEFORE taking the rendered-continuation
+    # backup.  The backup therefore contains a freshly resolved СОДЕРЖАНИЕ, so
+    # gate restoration gives the user a clean, correct document instead of one
+    # that either lacks a TOC or retains the old hand-made copy.
+    try:
+        if rebuild_static_contents_page(output_path):
+            logger.info("format_docx: pre-backup canonical TOC rebuilt")
+    except Exception:
+        logger.exception("format_docx: pre-backup canonical TOC rebuild failed, continuing")
+
+    # Rendered table continuation entry.  The backup is taken from the
+    # stripped + rebuilt state so that any gate restoration returns a document
+    # that already has exactly one canonical СОДЕРЖАНИЕ and zero same-page
+    # continuation violations.
+    table_gate_backup_dir: Path | None = None
+    table_gate_backup_path: Path | None = None
+    try:
         table_gate_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_format_table_gate_"))
         table_gate_backup_path = table_gate_backup_dir / output_path.name
         shutil.copy2(output_path, table_gate_backup_path)
@@ -97,33 +132,12 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         if n_rendered:
             logger.info("format_docx: rendered table continuation splits=%d", n_rendered)
     except Exception:
-        logger.exception("format_docx: phase3 failed, skipping (phase2 result preserved)")
+        logger.exception("format_docx: rendered table continuation failed")
 
-    # Always-safe pre-pass: strip obsolete TOC artifacts (Word SDT TOC and
-    # the plain-text old TOC block) BEFORE the page-resolving rebuild. The
-    # rebuild can fail (LibreOffice unavailable, degenerate page mapping)
-    # and historically would leave the source TOC visible in that case —
-    # producing two TOCs once the canonical insertion ran in a later run.
-    # This pre-pass is DOCX-only, has no PDF dependency, and saves directly,
-    # so even when the subsequent rebuild fails the user never sees the
-    # original TOC alongside a missing canonical one.
-    try:
-        report_strip = strip_obsolete_toc_blocks_inplace(output_path)
-        if report_strip["sdt_removed"] or report_strip["plain_toc_removed"]:
-            logger.info(
-                "format_docx: pre-rebuild TOC cleanup sdt=%d plain_paragraphs=%d",
-                report_strip["sdt_removed"],
-                report_strip["plain_toc_removed"],
-            )
-    except Exception:
-        logger.exception("format_docx: pre-rebuild TOC cleanup failed, continuing")
-
-    try:
-        if rebuild_static_contents_page(output_path):
-            logger.info("format_docx: static contents page rebuilt")
-    except Exception:
-        logger.exception("format_docx: contents rebuild failed, preserving phase3 result")
-
+    # Safety gate: if the rendered-continuation markers land on the same page
+    # as the surrounding table segments, revert to the pre-rendered backup
+    # (which already has the canonical TOC and zero same-page violations).
+    _gate_restored = False
     if table_gate_backup_path is not None:
         try:
             if restore_docx_if_same_page_continuation_markers(
@@ -132,6 +146,7 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
                 report=report,
                 context="format_docx_final",
             ):
+                _gate_restored = True
                 logger.warning(
                     "format_docx: final same-page continuation marker gate restored pre-rendered table state"
                 )
@@ -140,5 +155,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         finally:
             if table_gate_backup_dir is not None:
                 shutil.rmtree(table_gate_backup_dir, ignore_errors=True)
+
+    # When the gate restored the canonical backup, DOCX-only markers that were
+    # calibrated for the old student TOC layout may now be same-page in the
+    # canonical layout (old TOC was typically larger by 1 page).  Remove them:
+    # these markers are stale artefacts of the old layout — the table actually
+    # fits on one page with the canonical TOC, so no continuation header is
+    # needed.
+    if _gate_restored:
+        try:
+            n_removed = remove_same_page_continuation_markers_inplace(output_path)
+            if n_removed:
+                logger.info(
+                    "format_docx: removed %d same-page DOCX-only markers from canonical backup after gate",
+                    n_removed,
+                )
+        except Exception:
+            logger.exception(
+                "format_docx: failed to remove same-page markers from canonical backup"
+            )
 
     return str(output_path), report.warnings

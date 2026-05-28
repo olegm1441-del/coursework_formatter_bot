@@ -109,10 +109,18 @@ def _is_toc_like_entry(text: str) -> bool:
     a numbered chapter or sub-chapter (`1. ...`, `1.1. ...`), or a specific
     appendix label (`ПРИЛОЖЕНИЕ 1/2/3`). Trailing dot leaders and a trailing
     page number are tolerated.
+
+    IMPORTANT: check appendix labels BEFORE stripping the page-tail because
+    "ПРИЛОЖЕНИЕ 1" would otherwise be misread as "ПРИЛОЖЕНИЕ" (the numeral "1"
+    stripped as a trailing page number), causing _APPENDIX_LOCAL_RE to reject it.
     """
     t = clean_spaces(text or "").strip()
     if not t:
         return False
+    low_raw = t.lower().rstrip(".").strip()
+    # Check appendix label on the raw text first (before page-tail stripping)
+    if _APPENDIX_LOCAL_RE.match(low_raw):
+        return True
     t = _TOC_PAGE_TAIL_RE.sub("", t).strip()
     if not t:
         return False

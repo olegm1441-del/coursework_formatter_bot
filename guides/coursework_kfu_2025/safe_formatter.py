@@ -1201,6 +1201,184 @@ def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
     pPr.append(ind)
 
 
+# ── KFU internal Word dash-list (real autonumbering) ─────────────────────────
+# The KFU internal dash-list abstractNum is identified by a custom NSID so that
+# repeated formatter runs find and reuse the same definition rather than
+# appending a new one each time.
+_KFU_DASH_NSID = "FFFEFFFF"
+
+
+def _ensure_kfu_dash_list_numid(paragraph) -> "str | None":
+    """
+    Return the w:numId string for the KFU internal dash-list numbering definition,
+    creating it in the document's numbering part if absent.
+
+    The definition is identified by the NSID marker ``FFFEFFFF`` on the
+    abstractNum element, so repeated calls always reuse the same numId.
+    Returns ``None`` if the numbering part is not accessible (safe fallback).
+    """
+    try:
+        numbering_part = paragraph.part.numbering_part
+    except Exception:
+        return None
+    if numbering_part is None:
+        return None
+
+    numbering_el = numbering_part._element
+
+    # ── 1. Look for existing KFU dash abstractNum by NSID ──────────────────
+    kfu_abstract_num_id: "str | None" = None
+    for ab in numbering_el.findall(qn("w:abstractNum")):
+        nsid_el = ab.find(qn("w:nsid"))
+        if nsid_el is not None and nsid_el.get(qn("w:val")) == _KFU_DASH_NSID:
+            kfu_abstract_num_id = ab.get(qn("w:abstractNumId"))
+            break
+
+    if kfu_abstract_num_id is not None:
+        # Find the w:num that references it
+        for num_el in numbering_el.findall(qn("w:num")):
+            ref = num_el.find(qn("w:abstractNumId"))
+            if ref is not None and ref.get(qn("w:val")) == kfu_abstract_num_id:
+                return num_el.get(qn("w:numId"))
+        # abstractNum exists but no num points to it — fall through to create num
+    else:
+        # ── 2. Create new abstractNum ───────────────────────────────────────
+        existing_ab_ids = [
+            int(n.get(qn("w:abstractNumId"), "-1"))
+            for n in numbering_el.findall(qn("w:abstractNum"))
+        ]
+        new_ab_int = max(existing_ab_ids, default=-1) + 1
+        kfu_abstract_num_id = str(new_ab_int)
+
+        ab_el = OxmlElement("w:abstractNum")
+        ab_el.set(qn("w:abstractNumId"), kfu_abstract_num_id)
+
+        nsid_mk = OxmlElement("w:nsid")
+        nsid_mk.set(qn("w:val"), _KFU_DASH_NSID)
+        ab_el.append(nsid_mk)
+
+        ml_el = OxmlElement("w:multiLevelType")
+        ml_el.set(qn("w:val"), "singleLevel")
+        ab_el.append(ml_el)
+
+        lvl_el = OxmlElement("w:lvl")
+        lvl_el.set(qn("w:ilvl"), "0")
+
+        s_el = OxmlElement("w:start"); s_el.set(qn("w:val"), "1")
+        lvl_el.append(s_el)
+
+        nf_el = OxmlElement("w:numFmt"); nf_el.set(qn("w:val"), "bullet")
+        lvl_el.append(nf_el)
+
+        lt_el = OxmlElement("w:lvlText"); lt_el.set(qn("w:val"), "–")  # en-dash
+        lvl_el.append(lt_el)
+
+        jc_el = OxmlElement("w:lvlJc"); jc_el.set(qn("w:val"), "left")
+        lvl_el.append(jc_el)
+
+        pPr_lvl = OxmlElement("w:pPr")
+        ind_lvl = OxmlElement("w:ind")
+        ind_lvl.set(qn("w:left"), "906")
+        ind_lvl.set(qn("w:hanging"), "198")
+        pPr_lvl.append(ind_lvl)
+        lvl_el.append(pPr_lvl)
+
+        rPr_lvl = OxmlElement("w:rPr")
+        rFonts_lvl = OxmlElement("w:rFonts")
+        rFonts_lvl.set(qn("w:ascii"), FONT_NAME)
+        rFonts_lvl.set(qn("w:hAnsi"), FONT_NAME)
+        rFonts_lvl.set(qn("w:cs"), FONT_NAME)
+        rPr_lvl.append(rFonts_lvl)
+        sz_lvl = OxmlElement("w:sz"); sz_lvl.set(qn("w:val"), "28")
+        rPr_lvl.append(sz_lvl)
+        szCs_lvl = OxmlElement("w:szCs"); szCs_lvl.set(qn("w:val"), "28")
+        rPr_lvl.append(szCs_lvl)
+        lvl_el.append(rPr_lvl)
+
+        ab_el.append(lvl_el)
+
+        # Insert abstractNum before first w:num to maintain schema order
+        first_num = numbering_el.find(qn("w:num"))
+        if first_num is not None:
+            first_num.addprevious(ab_el)
+        else:
+            numbering_el.append(ab_el)
+
+    # ── 3. Create w:num referencing kfu_abstract_num_id ────────────────────
+    existing_num_ids = [
+        int(n.get(qn("w:numId"), "0"))
+        for n in numbering_el.findall(qn("w:num"))
+    ]
+    new_num_id = str(max(existing_num_ids, default=0) + 1)
+
+    new_num_el = OxmlElement("w:num")
+    new_num_el.set(qn("w:numId"), new_num_id)
+    ab_ref = OxmlElement("w:abstractNumId")
+    ab_ref.set(qn("w:val"), kfu_abstract_num_id)
+    new_num_el.append(ab_ref)
+    numbering_el.append(new_num_el)
+
+    return new_num_id
+
+
+def _format_word_dash_list_item(paragraph, body_text: str) -> None:
+    """
+    Format *paragraph* as a real Word KFU dash-list item:
+
+    * numPr → KFU internal dash-list definition (bullet, lvlText='–', NSID FFFEFFFF)
+    * Paragraph text  = *body_text* (no literal '– ' prefix; the dash is the
+      Word list marker rendered by numPr, not embedded in the run text)
+    * Times New Roman 14 pt · 1.5 line spacing · justified
+    * Explicit pPr/ind: left=906, hanging=198 (mirrors the abstractNum level so
+      the layout is correct even if a renderer ignores the abstractNum indent)
+
+    Falls back to literal '– body_text' (no numPr) if the numbering part is
+    inaccessible.
+    """
+    num_id = _ensure_kfu_dash_list_numid(paragraph)
+
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    # Paragraph text — no literal dash prefix when numPr is available
+    if num_id is None:
+        replace_paragraph_text(paragraph, f"– {body_text}")
+    else:
+        replace_paragraph_text(paragraph, body_text)
+
+    # Replace numPr with KFU dash-list numPr (or remove it for fallback)
+    pPr = paragraph._element.get_or_add_pPr()
+    for old_np in list(pPr.findall(qn("w:numPr"))):
+        pPr.remove(old_np)
+    if num_id is not None:
+        numPr_el = OxmlElement("w:numPr")
+        ilvl_new = OxmlElement("w:ilvl"); ilvl_new.set(qn("w:val"), "0")
+        numId_new = OxmlElement("w:numId"); numId_new.set(qn("w:val"), num_id)
+        numPr_el.append(ilvl_new)
+        numPr_el.append(numId_new)
+        pPr.append(numPr_el)
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Explicit hanging indent (overrides abstractNum when pPr/ind is present,
+    # and serves as the sole indent when falling back to literal dash)
+    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+
+# ── End KFU internal Word dash-list ──────────────────────────────────────────
+
+
 def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
     """Format a paragraph as level-1 Cyrillic list item."""
     remove_paragraph_numbering(paragraph)
@@ -1252,28 +1430,11 @@ def _format_level2_list_item(paragraph, number: int, body_text: str):
 
 
 def _format_dash_list_item(paragraph, body_text: str):
-    """Format a paragraph as methodical first-level dash list item (`– text`)."""
-    remove_paragraph_numbering(paragraph)
-    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
-    clear_paragraph_outline_level(paragraph)
-
-    replace_paragraph_text(paragraph, f"– {body_text}")
-
-    fmt = paragraph.paragraph_format
-    fmt.space_before = Pt(0)
-    fmt.space_after = Pt(0)
-    fmt.line_spacing = LINE_SPACING_BODY
-    fmt.keep_together = False
-    fmt.keep_with_next = False
-    fmt.page_break_before = False
-    fmt.widow_control = False
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-
-    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
-    force_paragraph_xml_spacing(paragraph, line_rule="auto")
-
-    for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+    """Format a paragraph as a KFU dash-list item (real Word list via numPr).
+    Delegates to _format_word_dash_list_item; kept as named entry point so
+    internal callers do not need to be updated.
+    """
+    _format_word_dash_list_item(paragraph, body_text)
 
 
 def _paragraph_blocks_list_conversion(paragraph, text: str) -> bool:
@@ -1555,6 +1716,91 @@ def normalize_plain_lists_in_document(document, body_start):
         body_paras.append(p)
 
     _normalize_plain_list_paragraphs(body_paras)
+
+
+# ── Word-decimal autonumbering normalization ──────────────────────────────────
+
+def _is_convertible_word_decimal_item(paragraph) -> bool:
+    """
+    True when paragraph carries Word decimal-numbered list formatting at ilvl=0
+    and is safe to convert to a methodical dash list item.
+    """
+    if not paragraph_has_numbering(paragraph):
+        return False
+    num_fmt = _get_num_fmt_for_paragraph(paragraph)
+    if num_fmt not in NUMERIC_NUM_FMTS:
+        return False
+    pPr = paragraph._element.pPr
+    if pPr is None:
+        return False
+    numPr = pPr.find(qn("w:numPr"))
+    if numPr is None:
+        return False
+    ilvl_el = numPr.find(qn("w:ilvl"))
+    ilvl = int(ilvl_el.get(qn("w:val"), "0")) if ilvl_el is not None else 0
+    if ilvl != 0:
+        return False
+    if paragraph_has_heading_style_or_outline(paragraph):
+        return False
+    return True
+
+
+def _normalize_word_numbered_list_paragraphs(paragraphs: list) -> None:
+    """
+    Convert contiguous blocks of Word decimal numPr (ilvl=0) paragraphs to
+    methodical dash items (– text, left=906 hanging=198).
+    Singletons (block size == 1) are left unchanged.
+    """
+    block: list = []  # [(paragraph, body_text), ...]
+
+    def _flush() -> None:
+        if len(block) >= 2:
+            for p, body_text in block:
+                _format_dash_list_item(p, body_text)
+        block.clear()
+
+    for p in paragraphs:
+        text = clean_spaces(p.text)
+        if not text:
+            _flush()
+            continue
+        if _paragraph_blocks_list_conversion(p, text):
+            _flush()
+            continue
+        if not _is_convertible_word_decimal_item(p):
+            _flush()
+            continue
+        body_text = BULLET_CHARS_RE.sub("", text).strip() or text
+        block.append((p, body_text))
+
+    _flush()
+
+
+def normalize_word_numbered_lists_in_document(document, body_start) -> None:
+    """
+    Normalize Word decimal-numbered list blocks in the document body.
+    Skips the bibliography block and appendices (same contract as
+    normalize_plain_lists_in_document).
+    """
+    in_ref = False
+    in_appendix = False
+    body_paras: list = []
+    for idx, p in enumerate(document.paragraphs):
+        if idx < (body_start or 0):
+            continue
+        t = clean_spaces(p.text)
+        if is_appendix_heading_text(t):
+            in_appendix = True
+        if is_references_heading_text(t):
+            in_ref = True
+        if in_ref and is_appendix_heading_text(t):
+            in_ref = False
+        if in_ref or in_appendix:
+            continue
+        body_paras.append(p)
+    _normalize_word_numbered_list_paragraphs(body_paras)
+
+# ── End Word-decimal autonumbering normalization ──────────────────────────────
 
 
 def canonical_reference_subheading_text(text: str):
@@ -2469,6 +2715,11 @@ def format_reference_entry(paragraph) -> None:
 
 NUMERIC_NUM_FMTS = {"decimal", "decimalZero", "ordinal", "decimalEnclosedParen", "decimalEnclosedCircle"}
 
+# numFmt values for letter / roman lists — preserved via
+# format_body(preserve_numbering=True) rather than converted to KFU dash.
+LETTER_NUM_FMTS = {"lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
+                   "aiueo", "iroha", "arabicAbjad", "arabicAlpha"}
+
 BULLET_CHARS_RE = re.compile(r'^[•·▪■◆►→◦●○\u2013\u2014\-]+\s*')
 
 
@@ -2527,60 +2778,32 @@ def _get_num_fmt_for_paragraph(paragraph):
 
 
 def format_body_list_item(paragraph):
-    """Format a list item paragraph: numeric lists stay as-is; bullet lists become en-dash."""
+    """
+    Format a list-item paragraph.
+
+    * Numeric Word lists (decimal, ordinal, ...): preserved via
+      format_body(preserve_numbering=True).
+    * Letter / roman Word lists (lowerLetter, upperLetter, lowerRoman, ...):
+      also preserved via format_body(preserve_numbering=True) so that
+      Cyrillic-letter autonumbering is not stripped.
+    * Everything else (bullet numPr or no numPr): converted to the KFU real
+      Word dash-list via _format_word_dash_list_item (bullet numPr,
+      lvlText='–', no literal dash prefix in run text).
+    """
     num_fmt = _get_num_fmt_for_paragraph(paragraph)
     is_numeric = num_fmt in NUMERIC_NUM_FMTS
+    is_letter  = num_fmt in LETTER_NUM_FMTS
 
-    if is_numeric:
+    if is_numeric or is_letter:
         format_body(paragraph, preserve_numbering=True)
         return
 
-    # Маркированный список -> дефисный формат
+    # Bullet numPr (or no numPr) -> KFU real Word dash-list
     remove_page_break_artifacts_from_paragraph(paragraph)
-    force_paragraph_xml_spacing(paragraph, line_rule="auto")
-
     text = clean_spaces(paragraph.text)
-    text = BULLET_CHARS_RE.sub('', text)
-    text = clean_spaces(text)
-
-    remove_paragraph_numbering(paragraph)
-    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
-    clear_paragraph_outline_level(paragraph)
-
-    new_text = f"\u2013 {text}"
-    replace_paragraph_text(paragraph, new_text)
-
-    fmt = paragraph.paragraph_format
-    fmt.space_before = Pt(0)
-    fmt.space_after = Pt(0)
-    fmt.line_spacing = LINE_SPACING_BODY
-    fmt.keep_together = False
-    fmt.keep_with_next = False
-    fmt.page_break_before = False
-    fmt.widow_control = False
-    fmt.right_indent = Cm(0)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-
-    # Hanging indent через XML: маркер на ~1.25cm, текст на ~1.25cm + ширина "– "
-    pPr = paragraph._element.get_or_add_pPr()
-    ind = pPr.find(qn("w:ind"))
-    if ind is None:
-        ind = OxmlElement("w:ind")
-        pPr.append(ind)
-
-    if ind.get(qn("w:firstLine")) is not None:
-        del ind.attrib[qn("w:firstLine")]
-
-    # left = 906 twips (≈1.60cm): маркер начинается на 906-198=708 twips (≈1.25cm)
-    # hanging = 198 twips (≈0.35cm): ширина "– "
-    ind.set(qn("w:left"), "906")
-    ind.set(qn("w:hanging"), "198")
-    ind.set(qn("w:right"), "0")
-
-    force_paragraph_xml_spacing(paragraph, line_rule="auto")
-
-    for run in paragraph.runs:
-        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+    body_text = BULLET_CHARS_RE.sub('', text)
+    body_text = clean_spaces(body_text) or text
+    _format_word_dash_list_item(paragraph, body_text)
 
 
 def format_heading1(paragraph):
@@ -5560,6 +5783,12 @@ def _looks_like_toc_entry_text(text: str) -> bool:
     t = clean_spaces(text or "").strip()
     if not t:
         return False
+    low_raw = t.lower().rstrip(".").strip()
+    # Check appendix label BEFORE stripping page tail: "ПРИЛОЖЕНИЕ 1" would be
+    # mistakenly reduced to "ПРИЛОЖЕНИЕ" by the page-tail RE (treating " 1" as
+    # a page number), causing the appendix regex to reject it.
+    if _TOC_ENTRY_APPENDIX_RE.match(low_raw):
+        return True
     t = _TOC_ENTRY_PAGE_TAIL_RE.sub("", t).strip()
     if not t:
         return False
@@ -5675,6 +5904,7 @@ def process_document(input_path: Path, output_path: Path):
     normalize_semicolons_in_document(doc, body_start)
     normalize_citations_in_document(doc, body_start)
     normalize_plain_lists_in_document(doc, body_start)
+    normalize_word_numbered_lists_in_document(doc, body_start)
     run_with_pass_limit(
         "split_body_structural_soft_breaks",
         split_body_structural_soft_breaks,

@@ -2736,6 +2736,62 @@ def restore_docx_if_same_page_continuation_markers(
     return True
 
 
+def remove_same_page_continuation_markers_inplace(docx_path: Path) -> int:
+    """
+    Render *docx_path*, find any "Продолжение таблицы" markers that land on the
+    same page as both their preceding and following table segments, and remove
+    those marker paragraphs from the document.
+
+    Such markers arise when a DOCX-only split (from `apply_table_continuation`)
+    is no longer valid after the TOC size changes: the surrounding table now fits
+    on one page and the marker is a stale artefact.  Removing it is correct —
+    the table no longer straddles a page boundary, so no continuation header is
+    needed.
+
+    Returns the number of markers removed.  The document is saved only when at
+    least one marker is removed.  If rendering fails the function logs and returns 0.
+    """
+    try:
+        violations = _same_page_continuation_marker_violations_for_docx(Path(docx_path))
+    except Exception as exc:
+        logger.info(
+            "remove_same_page_markers_skip path=%s reason=render_failed error=%s",
+            docx_path, exc,
+        )
+        return 0
+
+    if not violations:
+        return 0
+
+    violation_texts = {v.marker_text.strip() for v in violations}
+    doc = Document(str(docx_path))
+    body = doc.element.body
+
+    removed = 0
+    for child in list(body):
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag != "p":
+            continue
+        # Get text of the paragraph (concatenate all w:t elements)
+        raw = "".join(
+            t.text or ""
+            for t in child.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+        ).strip()
+        if raw in violation_texts and _STRICT_CONTINUATION_MARKER_RE.match(raw):
+            body.remove(child)
+            removed += 1
+            logger.info("remove_same_page_markers: removed %r from %s", raw, docx_path)
+
+    if removed:
+        doc.save(str(docx_path))
+        logger.info(
+            "remove_same_page_markers_done path=%s removed=%d",
+            docx_path, removed,
+        )
+
+    return removed
+
+
 # E1 — Phase 3 marker-split candidate classification (logging-only, no behavior change).
 # Cheap predicate that selects which tables WOULD be diagnosed under future E2.
 # Does not render. Does not mutate. Does not call LibreOffice or any PDF tool.
