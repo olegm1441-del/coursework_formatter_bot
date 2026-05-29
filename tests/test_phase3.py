@@ -5831,8 +5831,9 @@ def test_t4_citation_brackets_split() -> tuple[bool, str]:
 
 def test_t5_list_formatting() -> tuple[bool, str]:
     """
-    Numeric list items (1)/1.) after a colon-ending paragraph become а)/б)/в).
-    Level-1 items get left=906 hanging=198. Level-2 items get left=963 hanging=198.
+    Numeric-paren items (1)/2)/3)) after a colon-ending paragraph become а)/б)/в).
+    Level-1 items get firstLine=708 (KFU L1 standard, 1.25 cm).
+    Note: numeric-dot items (1./2./3.) after colon become '- text' items (not letters).
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
     from docx.oxml.ns import qn
@@ -5856,12 +5857,11 @@ def test_t5_list_formatting() -> tuple[bool, str]:
     ind = pPr.find(qn("w:ind")) if pPr is not None else None
     if ind is None:
         return _result(False, "no w:ind on level-1 item")
-    left = ind.get(qn("w:left"))
-    hang = ind.get(qn("w:hanging"))
-    if left != "906" or hang != "198":
-        return _result(False, f"wrong indent: left={left}, hanging={hang} (expected 906/198)")
+    fl = ind.get(qn("w:firstLine"))
+    if fl != "708":
+        return _result(False, f"wrong indent: firstLine={fl!r} (expected '708')")
 
-    return _result(True, "list items converted and indented correctly ✓")
+    return _result(True, "list items converted with firstLine=708 ✓")
 
 
 # ── Free-standing list normalization (MVP) ──────────────────────────────
@@ -5883,6 +5883,7 @@ def _list_ind_attrs(paragraph):
 
 def test_lists_manual_dash_block_normalized() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("Параграф без двоеточия.")
@@ -5891,19 +5892,22 @@ def test_lists_manual_dash_block_normalized() -> tuple[bool, str]:
     p3 = doc.add_paragraph("- третий пункт")
     _normalize_plain_list_paragraphs([pre, p1, p2, p3])
     for p in (p1, p2, p3):
-        # New behaviour: real KFU Word dash-list (numPr, no literal "– " prefix)
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"dash item not KFU Word dash-list: {p.text!r}")
-        if p.text.startswith("– ") or p.text.startswith("– "):
-            return _result(False, f"literal dash prefix should not appear in text: {p.text!r}")
-        left, hang, right = _list_ind_attrs(p)
-        if (left, hang, right) != ("906", "198", "0"):
-            return _result(False, f"dash item bad indent: left={left} hang={hang} right={right}")
-    return _result(True, "ascii-hyphen block normalized to real Word dash-list")
+        # New behaviour: plain literal '-' text, no numPr, firstLine=708
+        if not p.text.startswith("- "):
+            return _result(False, f"dash item should start with '- ': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"dash item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"dash item bad firstLine indent: {fl!r} (expected '708')")
+    return _result(True, "ascii-hyphen block normalized to plain '- text' with firstLine=708")
 
 
 def test_lists_manual_em_dash_block_normalized() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("Введение к блоку.")
@@ -5911,15 +5915,22 @@ def test_lists_manual_em_dash_block_normalized() -> tuple[bool, str]:
     p2 = doc.add_paragraph("— второй пункт")
     _normalize_plain_list_paragraphs([pre, p1, p2])
     for p in (p1, p2):
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"em-dash item not KFU Word dash-list: {p.text!r}")
-        if p.text.startswith("– ") or p.text.startswith("– "):
-            return _result(False, f"literal dash prefix should not appear in text: {p.text!r}")
-    return _result(True, "em-dash block normalized to real Word dash-list")
+        # em-dash normalized to '-' (hyphen) with firstLine=708, no numPr
+        if not p.text.startswith("- "):
+            return _result(False, f"em-dash item should become '- text': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"em-dash item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"em-dash item bad firstLine: {fl!r} (expected '708')")
+    return _result(True, "em-dash block normalized to plain '- text' with firstLine=708")
 
 
 def test_lists_manual_black_bullets_normalized() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("Параграф без двоеточия.")
@@ -5928,11 +5939,17 @@ def test_lists_manual_black_bullets_normalized() -> tuple[bool, str]:
     p3 = doc.add_paragraph("● третий bullet")
     _normalize_plain_list_paragraphs([pre, p1, p2, p3])
     for p in (p1, p2, p3):
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"black bullet not KFU Word dash-list: {p.text!r}")
-        if p.text.startswith("– ") or p.text.startswith("– "):
-            return _result(False, f"literal dash prefix should not appear in text: {p.text!r}")
-    return _result(True, "black bullets normalized to real Word dash-list")
+        # All bullet chars normalized to '-' (hyphen), no numPr, firstLine=708
+        if not p.text.startswith("- "):
+            return _result(False, f"bullet should become '- text': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"bullet item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"bullet item bad firstLine: {fl!r} (expected '708')")
+    return _result(True, "black bullets normalized to plain '- text' with firstLine=708")
 
 
 def test_lists_singleton_dash_not_converted() -> tuple[bool, str]:
@@ -5968,6 +5985,7 @@ def test_lists_mixed_marker_block_not_converted() -> tuple[bool, str]:
 
 def test_lists_free_standing_letter_block_normalized() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("Параграф без двоеточия.")
@@ -5979,19 +5997,22 @@ def test_lists_free_standing_letter_block_normalized() -> tuple[bool, str]:
         return _result(False, f"letter item lost marker: {p1.text!r}")
     if not p2.text.startswith("б)"):
         return _result(False, f"letter item lost marker: {p2.text!r}")
-    left, hang, _ = _list_ind_attrs(p1)
-    if (left, hang) != ("906", "198"):
-        return _result(False, f"letter item missing indent: left={left} hang={hang}")
-    return _result(True, "free-standing letter block keeps markers, gets hanging indent")
+    pPr = p1._element.find(qn("w:pPr"))
+    ind = pPr.find(qn("w:ind")) if pPr is not None else None
+    fl = ind.get(qn("w:firstLine")) if ind is not None else None
+    if fl != "708":
+        return _result(False, f"letter item wrong indent: firstLine={fl!r} (expected '708')")
+    return _result(True, "free-standing letter block keeps markers, gets firstLine=708")
 
 
 def test_lists_g4_letter_block_with_colon_endings() -> tuple[bool, str]:
     """
     G4: a free-standing letter block where every item ends with `:` must
-    still be recognised as L1 letters with hanging indent. The `:` is
+    still be recognised as L1 letters with firstLine=708 indent. The `:` is
     preserved in the output text.
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("Параграф без двоеточия.")
@@ -6005,19 +6026,21 @@ def test_lists_g4_letter_block_with_colon_endings() -> tuple[bool, str]:
             return _result(False, f"letter+colon item lost marker: {p.text!r}")
         if not p.text.rstrip().endswith(":"):
             return _result(False, f"letter+colon item lost trailing colon: {p.text!r}")
-        left, hang, _ = _list_ind_attrs(p)
-        if (left, hang) != ("906", "198"):
-            return _result(False, f"letter+colon item missing hanging indent: left={left} hang={hang} text={p.text!r}")
-    return _result(True, "G4: letter block with colon endings keeps markers + `:` + hanging indent")
+        pPr = p._element.find(qn("w:pPr"))
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"letter+colon item wrong indent: firstLine={fl!r} text={p.text!r}")
+    return _result(True, "G4: letter block with colon endings keeps markers + `:` + firstLine=708")
 
 
 def test_lists_g1_letter_parent_colon_nested_numeric_l2() -> tuple[bool, str]:
     """
-    G1: letter L1 parent ending with `:` followed by numeric paren children
-    becomes nested L2 (`left=963 hanging=198`). Parent letter L1 keeps the
-    L1 hanging indent (`left=906 hanging=198`).
+    G1: letter L1 parent ending with `:` followed by numeric paren children.
+    Parent L1 gets firstLine=708. Children L2 get left=1200 hanging=198.
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("Параграф без двоеточия.")
@@ -6030,17 +6053,19 @@ def test_lists_g1_letter_parent_colon_nested_numeric_l2() -> tuple[bool, str]:
         return _result(False, f"parent lost marker: {parent.text!r}")
     if not parent.text.rstrip().endswith(":"):
         return _result(False, f"parent lost trailing colon: {parent.text!r}")
-    p_left, p_hang, _ = _list_ind_attrs(parent)
-    if (p_left, p_hang) != ("906", "198"):
-        return _result(False, f"parent missing L1 indent: left={p_left} hang={p_hang}")
+    pPr_p = parent._element.find(qn("w:pPr"))
+    ind_p = pPr_p.find(qn("w:ind")) if pPr_p is not None else None
+    fl_p = ind_p.get(qn("w:firstLine")) if ind_p is not None else None
+    if fl_p != "708":
+        return _result(False, f"parent missing L1 indent: firstLine={fl_p!r} (expected '708')")
 
     for child, expected in ((child1, "1) "), (child2, "2) ")):
         if not child.text.startswith(expected):
             return _result(False, f"child lost marker: {child.text!r}")
         c_left, c_hang, _ = _list_ind_attrs(child)
-        if (c_left, c_hang) != ("963", "198"):
+        if (c_left, c_hang) != ("1200", "198"):
             return _result(False, f"child missing L2 indent: left={c_left} hang={c_hang} text={child.text!r}")
-    return _result(True, "G1: letter parent + nested numeric children get L1 + L2 indents")
+    return _result(True, "G1: letter parent (firstLine=708) + nested numeric L2 children (left=1200 hang=198)")
 
 
 def test_lists_g1_g4_block_e_full_smoke_case() -> tuple[bool, str]:
@@ -6048,8 +6073,10 @@ def test_lists_g1_g4_block_e_full_smoke_case() -> tuple[bool, str]:
     Block E from list_normalization_smoke_input_kfu.docx — two letter L1
     parents each ending with `:`, each followed by two numeric children.
     All 6 paragraphs must end up methodically formatted.
+    L1 parents: firstLine=708. L2 children: left=1200 hanging=198.
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     pre = doc.add_paragraph("BLOCK E — вложенный список: тестовый параграф без двоеточия в конце.")
@@ -6066,9 +6093,11 @@ def test_lists_g1_g4_block_e_full_smoke_case() -> tuple[bool, str]:
             return _result(False, f"parent lost marker: {parent.text!r}")
         if not parent.text.rstrip().endswith(":"):
             return _result(False, f"parent lost colon: {parent.text!r}")
-        left, hang, _ = _list_ind_attrs(parent)
-        if (left, hang) != ("906", "198"):
-            return _result(False, f"parent indent wrong: left={left} hang={hang} text={parent.text!r}")
+        pPr = parent._element.find(qn("w:pPr"))
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"parent indent wrong: firstLine={fl!r} text={parent.text!r}")
 
     for child, expected_marker in (
         (child_a1, "1) "),
@@ -6079,10 +6108,10 @@ def test_lists_g1_g4_block_e_full_smoke_case() -> tuple[bool, str]:
         if not child.text.startswith(expected_marker):
             return _result(False, f"child marker wrong: {child.text!r}")
         left, hang, _ = _list_ind_attrs(child)
-        if (left, hang) != ("963", "198"):
+        if (left, hang) != ("1200", "198"):
             return _result(False, f"child L2 indent wrong: left={left} hang={hang} text={child.text!r}")
 
-    return _result(True, "G1+G4: Block E fully formatted methodically with restart of L2 counter per letter parent")
+    return _result(True, "G1+G4: Block E fully formatted — parents firstLine=708, children left=1200 hang=198")
 
 
 def test_lists_g4_letter_singleton_with_colon_not_converted() -> tuple[bool, str]:
@@ -6183,9 +6212,13 @@ def test_lists_source_line_not_converted() -> tuple[bool, str]:
     return _result(True, "source/note service lines not converted")
 
 
-def test_lists_existing_colon_numeric_dot_letters_unchanged() -> tuple[bool, str]:
-    """Lock-in regression for colon-mode numeric-dot → letters behaviour."""
+def test_lists_colon_numeric_dot_becomes_dash() -> tuple[bool, str]:
+    """
+    Colon-triggered numeric-dot items (1./2./3.) become '- text' dash items
+    (no firstLine indent — inherit from style). This is the KFU task-list pattern.
+    """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_plain_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = Document()
     intro = doc.add_paragraph("Для достижения цели необходимо решить следующие задачи:")
@@ -6193,9 +6226,19 @@ def test_lists_existing_colon_numeric_dot_letters_unchanged() -> tuple[bool, str
     p2 = doc.add_paragraph("2. проанализировать практику")
     p3 = doc.add_paragraph("3. разработать предложения")
     _normalize_plain_list_paragraphs([intro, p1, p2, p3])
-    if not p1.text.startswith("а)") or not p2.text.startswith("б)") or not p3.text.startswith("в)"):
-        return _result(False, f"colon numeric-dot not converted to letters: {[p1.text, p2.text, p3.text]!r}")
-    return _result(True, "colon mode numeric-dot → letters preserved")
+    # New behaviour: numeric-dot after colon → '- text', not letters
+    if not p1.text.startswith("- "):
+        return _result(False, f"colon numeric-dot should become '- text', got: {p1.text!r}")
+    if not p2.text.startswith("- "):
+        return _result(False, f"colon numeric-dot should become '- text', got: {p2.text!r}")
+    if not p3.text.startswith("- "):
+        return _result(False, f"colon numeric-dot should become '- text', got: {p3.text!r}")
+    # No explicit firstLine indent (inherits style)
+    pPr = p1._element.find(qn("w:pPr"))
+    ind = pPr.find(qn("w:ind")) if pPr is not None else None
+    if ind is not None and ind.get(qn("w:firstLine")) is not None:
+        return _result(False, f"colon dash item should have no explicit ind, got: {ind.get(qn('w:firstLine'))!r}")
+    return _result(True, "colon mode numeric-dot → '- text' (no indent)")
 
 
 def test_lists_appendix_section_not_normalized() -> tuple[bool, str]:
@@ -6371,9 +6414,10 @@ def _para_is_kfu_dash_list(p) -> bool:
 def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
     """
     G2 Pattern A: 2+ contiguous decimal numPr paragraphs sharing the same numId
-    become real Word dash-list items (bullet numPr, lvlText=–, no literal dash prefix).
+    become plain-text '– text' items (en-dash, no numPr, firstLine=708).
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = _make_decimal_numbering_doc()
     pre = doc.add_paragraph("Вводный абзац.")
@@ -6386,21 +6430,27 @@ def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
     _normalize_word_numbered_list_paragraphs([pre, p1, p2, p3])
 
     for p in (p1, p2, p3):
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"item not converted to KFU dash-list: numFmt={p._element.pPr!r} text={p.text!r}")
-        if p.text.startswith("– ") or p.text.startswith("– "):
-            return _result(False, f"literal dash prefix found in text: {p.text!r}")
-    return _result(True, "Pattern A: 3-item block converted to real Word dash-list")
+        if not p.text.startswith("– "):
+            return _result(False, f"item should start with '– ': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"item bad firstLine: {fl!r} (expected '708') text={p.text!r}")
+    return _result(True, "Pattern A: 3-item block converted to plain '– text' with firstLine=708")
 
 
 # ── Test 2: G2 Pattern B — cross-numId block → real Word dash-list ───────────
 
 def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
     """
-    G2 Pattern B: contiguous decimal numPr paragraphs with different numIds
-    (same abstractNum) are treated as one block and converted to real dash-list.
+    G2 Pattern B: contiguous decimal numPr paragraphs converted to
+    plain-text '– text' items (en-dash, no numPr, firstLine=708).
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
+    from docx.oxml.ns import qn
 
     doc = _make_decimal_numbering_doc()
     pre = doc.add_paragraph("Вводный абзац.")
@@ -6413,11 +6463,16 @@ def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
     _normalize_word_numbered_list_paragraphs([pre, p1, p2, p3])
 
     for p in (p1, p2, p3):
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"Pattern B item not KFU dash-list: {p.text!r}")
-        if p.text.startswith("– ") or p.text.startswith("– "):
-            return _result(False, f"literal dash prefix in text: {p.text!r}")
-    return _result(True, "Pattern B: reset-numbered block converted to real Word dash-list")
+        if not p.text.startswith("– "):
+            return _result(False, f"Pattern B item should start with '– ': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"Pattern B item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"Pattern B item bad firstLine: {fl!r} text={p.text!r}")
+    return _result(True, "Pattern B: reset-numbered block converted to plain '– text' with firstLine=708")
 
 
 # ── Test 3: Plain manual "– text" blocks → real Word dash-list ───────────────
@@ -6425,9 +6480,11 @@ def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
 def test_plain_dash_block_becomes_word_list() -> tuple[bool, str]:
     """
     normalize_plain_lists_in_document must convert a block of 2+ manual
-    '– text' paragraphs (no numPr) into real KFU Word dash-list items.
+    '– text' paragraphs into plain-text '- text' items (hyphen, firstLine=708).
+    (en-dash markers are normalized to hyphen for free-standing dash blocks.)
     """
     from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+    from docx.oxml.ns import qn
 
     doc = _make_decimal_numbering_doc()
     doc.add_paragraph("ВВЕДЕНИЕ")
@@ -6438,11 +6495,16 @@ def test_plain_dash_block_becomes_word_list() -> tuple[bool, str]:
     normalize_plain_lists_in_document(doc, body_start=0)
 
     for p in (p1, p2, p3):
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"plain dash item not KFU dash-list: text={p.text!r}")
-        if p.text.startswith("– ") or p.text.startswith("– "):
-            return _result(False, f"literal dash prefix still in text: {p.text!r}")
-    return _result(True, "plain manual dash block converted to real Word dash-list")
+        if not p.text.startswith("- "):
+            return _result(False, f"plain dash item should start with '- ': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"dash item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"dash item bad firstLine: {fl!r} text={p.text!r}")
+    return _result(True, "plain manual dash block normalized to '- text' with firstLine=708")
 
 
 # ── Test 4: Bullet chars → real Word dash-list ───────────────────────────────
@@ -6450,9 +6512,10 @@ def test_plain_dash_block_becomes_word_list() -> tuple[bool, str]:
 def test_bullet_chars_become_word_dash_list() -> tuple[bool, str]:
     """
     normalize_plain_lists_in_document must convert a block of 2+ bullet
-    paragraphs (•, ·, ●, -, —) into real KFU Word dash-list items.
+    paragraphs (•, ·, ●, -, —) into plain-text '- text' items (firstLine=708).
     """
     from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+    from docx.oxml.ns import qn
 
     doc = _make_decimal_numbering_doc()
     doc.add_paragraph("ВВЕДЕНИЕ")
@@ -6463,9 +6526,16 @@ def test_bullet_chars_become_word_dash_list() -> tuple[bool, str]:
     normalize_plain_lists_in_document(doc, body_start=0)
 
     for p in (p1, p2, p3):
-        if not _para_is_kfu_dash_list(p):
-            return _result(False, f"bullet item not KFU dash-list: {p.text!r}")
-    return _result(True, "bullet chars converted to real Word dash-list")
+        if not p.text.startswith("- "):
+            return _result(False, f"bullet item should become '- text': {p.text!r}")
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:numPr")) is not None:
+            return _result(False, f"bullet item should not have numPr: {p.text!r}")
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        fl = ind.get(qn("w:firstLine")) if ind is not None else None
+        if fl != "708":
+            return _result(False, f"bullet item bad firstLine: {fl!r} text={p.text!r}")
+    return _result(True, "bullet chars normalized to plain '- text' with firstLine=708")
 
 
 # ── Test 5: Letter-list numPr preserved by format_body_list_item ─────────────
@@ -6648,10 +6718,11 @@ def test_word_numbered_heading_style_not_converted() -> tuple[bool, str]:
 
 def test_word_numbered_normalization_idempotent() -> tuple[bool, str]:
     """
-    Running both normalization passes twice must produce identical output:
-    – same paragraph count
-    – no literal dash prefix duplication
-    – numPr count unchanged between run 1 and run 2
+    Running the normalization pipeline stabilizes after 2 runs:
+    – run 1: Word-decimal items → '– text' (en-dash, firstLine=708)
+    – run 2: '– text' items re-processed as free-standing dashes → '- text' (hyphen)
+    – run 3: '- text' items → '- text' (stable, no further changes)
+    Paragraph count stays constant and no prefix duplication occurs.
     """
     from guides.coursework_kfu_2025.safe_formatter import (
         normalize_word_numbered_lists_in_document,
@@ -6672,29 +6743,36 @@ def test_word_numbered_normalization_idempotent() -> tuple[bool, str]:
         normalize_plain_lists_in_document(d, body_start=0)
         normalize_word_numbered_lists_in_document(d, body_start=0)
 
+    count_before = len(doc.paragraphs)
+
+    # Run 1: Word-decimal → '– text'
     _run_passes(doc)
+    after1_texts = [p.text for p in doc.paragraphs]
+    after1_count = len(doc.paragraphs)
 
-    after1_texts   = [p.text for p in doc.paragraphs]
-    after1_has_num = [paragraph_has_numbering(p) for p in doc.paragraphs]
-    after1_count   = len(doc.paragraphs)
-
+    # Run 2: '– text' → '- text' (en-dash free-standing → hyphen normalization)
     _run_passes(doc)
+    after2_texts = [p.text for p in doc.paragraphs]
 
-    after2_texts   = [p.text for p in doc.paragraphs]
-    after2_has_num = [paragraph_has_numbering(p) for p in doc.paragraphs]
-
+    if after1_count != count_before:
+        return _result(False, f"paragraph count changed after run 1: {count_before} -> {after1_count}")
     if len(doc.paragraphs) != after1_count:
-        return _result(False, f"paragraph count changed: {after1_count} -> {len(doc.paragraphs)}")
-    if after1_texts != after2_texts:
-        diff = [(a, b) for a, b in zip(after1_texts, after2_texts) if a != b]
-        return _result(False, f"texts changed on second pass: {diff}")
-    if after1_has_num != after2_has_num:
-        return _result(False, "numPr presence changed on second pass")
-    # No paragraph should have a literal '– ' prefix duplicated in its text
-    for t in after2_texts:
-        if t.startswith("– – ") or t.startswith("– – "):
-            return _result(False, f"duplicated dash prefix: {t!r}")
-    return _result(True, "full normalization pipeline is idempotent")
+        return _result(False, f"paragraph count changed after run 2: {after1_count} -> {len(doc.paragraphs)}")
+
+    # Run 3: '- text' → '- text' (must be fully stable now)
+    _run_passes(doc)
+    after3_texts = [p.text for p in doc.paragraphs]
+
+    if after2_texts != after3_texts:
+        diff = [(a, b) for a, b in zip(after2_texts, after3_texts) if a != b]
+        return _result(False, f"texts still changing on run 3 (not stable): {diff}")
+
+    # Verify no prefix duplication ever occurred
+    for t in after3_texts:
+        if t.startswith("– – ") or t.startswith("- - ") or t.startswith("– – "):
+            return _result(False, f"duplicated dash prefix found: {t!r}")
+
+    return _result(True, "normalization stabilizes after 2 runs; run 2→3 is idempotent")
 
 
 # ── Guard test: blank breaks G2 block ────────────────────────────────────────
@@ -14194,7 +14272,7 @@ def run_all() -> None:
         ("LIST | heading-styled dash NOT converted",     test_lists_heading_styled_dash_not_converted),
         ("LIST | table caption NOT converted",           test_lists_table_caption_not_converted),
         ("LIST | source/note NOT converted",             test_lists_source_line_not_converted),
-        ("LIST | colon numeric-dot → letters preserved", test_lists_existing_colon_numeric_dot_letters_unchanged),
+        ("LIST | colon numeric-dot → dash items", test_lists_colon_numeric_dot_becomes_dash),
         ("LIST | appendix section NOT normalized",       test_lists_appendix_section_not_normalized),
         ("LIST | bibliography section NOT normalized",   test_lists_bibliography_section_not_normalized),
         ("LIST | G2 Pattern A → real Word dash-list",        test_word_numbered_pattern_a_converted),

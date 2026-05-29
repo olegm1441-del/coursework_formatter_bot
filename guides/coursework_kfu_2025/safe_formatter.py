@@ -1171,6 +1171,22 @@ _DASH_BULLET_LIST_RE = re.compile(
     re.DOTALL,
 )
 
+# Custom XML attribute key for marking KFU-converted list items so that a
+# second pass of _normalize_plain_list_paragraphs can re-apply the correct
+# formatting (e.g. restore {} ind for colon items, preserve – for en-dash items)
+# without re-normalising them as free-standing dash blocks.
+_KFU_LIST_TYPE_KEY = "{http://kfu.ru/formatter}listType"
+
+
+def _mark_kfu_list_type(paragraph, list_type: str) -> None:
+    """Stamp paragraph._element with the KFU list type for idempotent re-runs."""
+    paragraph._element.set(_KFU_LIST_TYPE_KEY, list_type)
+
+
+def _get_kfu_list_type(paragraph) -> str:
+    """Return the KFU list type marker, or '' if not set."""
+    return paragraph._element.get(_KFU_LIST_TYPE_KEY, "")
+
 
 def _is_level1_list_text(text: str) -> bool:
     t = clean_spaces(text)
@@ -1199,6 +1215,23 @@ def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
     ind.set(qn("w:hanging"), str(hanging_twips))
     ind.set(qn("w:right"),   "0")
     pPr.append(ind)
+
+
+def _apply_list_firstline_xml(paragraph, first_line_twips: int = 708):
+    """Set firstLine-only indent directly via XML (KFU L1 standard: 1.25 cm ≈ 708 twips)."""
+    pPr = paragraph._element.get_or_add_pPr()
+    for old in list(pPr.findall(qn("w:ind"))):
+        pPr.remove(old)
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:firstLine"), str(first_line_twips))
+    pPr.append(ind)
+
+
+def _clear_paragraph_ind(paragraph):
+    """Remove any explicit w:ind element from the paragraph's pPr."""
+    pPr = paragraph._element.get_or_add_pPr()
+    for old in list(pPr.findall(qn("w:ind"))):
+        pPr.remove(old)
 
 
 # ── KFU internal Word dash-list (real autonumbering) ─────────────────────────
@@ -1321,42 +1354,22 @@ def _ensure_kfu_dash_list_numid(paragraph) -> "str | None":
     return new_num_id
 
 
-def _format_word_dash_list_item(paragraph, body_text: str) -> None:
+def _format_word_dash_list_item(paragraph, body_text: str, marker: str = "–") -> None:
     """
-    Format *paragraph* as a real Word KFU dash-list item:
+    Format *paragraph* as a KFU plain-text dash-list item.
 
-    * numPr → KFU internal dash-list definition (bullet, lvlText='–', NSID FFFEFFFF)
-    * Paragraph text  = *body_text* (no literal '– ' prefix; the dash is the
-      Word list marker rendered by numPr, not embedded in the run text)
+    * Text = '{marker} {body_text}' (literal marker embedded in run text, no numPr)
+    * firstLine indent = 708 twips (≈ 1.25 cm, KFU L1 standard)
     * Times New Roman 14 pt · 1.5 line spacing · justified
-    * Explicit pPr/ind: left=906, hanging=198 (mirrors the abstractNum level so
-      the layout is correct even if a renderer ignores the abstractNum indent)
 
-    Falls back to literal '– body_text' (no numPr) if the numbering part is
-    inaccessible.
+    ``marker`` defaults to '–' (en-dash, KFU standard for formal/converted items).
+    Pass '-' for informal/manual items (free-standing or colon-triggered).
     """
-    num_id = _ensure_kfu_dash_list_numid(paragraph)
-
+    remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
 
-    # Paragraph text — no literal dash prefix when numPr is available
-    if num_id is None:
-        replace_paragraph_text(paragraph, f"– {body_text}")
-    else:
-        replace_paragraph_text(paragraph, body_text)
-
-    # Replace numPr with KFU dash-list numPr (or remove it for fallback)
-    pPr = paragraph._element.get_or_add_pPr()
-    for old_np in list(pPr.findall(qn("w:numPr"))):
-        pPr.remove(old_np)
-    if num_id is not None:
-        numPr_el = OxmlElement("w:numPr")
-        ilvl_new = OxmlElement("w:ilvl"); ilvl_new.set(qn("w:val"), "0")
-        numId_new = OxmlElement("w:numId"); numId_new.set(qn("w:val"), num_id)
-        numPr_el.append(ilvl_new)
-        numPr_el.append(numId_new)
-        pPr.append(numPr_el)
+    replace_paragraph_text(paragraph, f"{marker} {body_text}")
 
     fmt = paragraph.paragraph_format
     fmt.space_before = Pt(0)
@@ -1368,9 +1381,7 @@ def _format_word_dash_list_item(paragraph, body_text: str) -> None:
     fmt.widow_control = False
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-    # Explicit hanging indent (overrides abstractNum when pPr/ind is present,
-    # and serves as the sole indent when falling back to literal dash)
-    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
+    _apply_list_firstline_xml(paragraph, 708)
     force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
     for run in paragraph.runs:
@@ -1380,7 +1391,7 @@ def _format_word_dash_list_item(paragraph, body_text: str) -> None:
 
 
 def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
-    """Format a paragraph as level-1 Cyrillic list item."""
+    """Format a paragraph as level-1 Cyrillic list item (firstLine=708 twips)."""
     remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
@@ -1397,7 +1408,7 @@ def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
     fmt.widow_control = False
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-    _apply_list_indent_xml(paragraph, left_twips=906, hanging_twips=198)
+    _apply_list_firstline_xml(paragraph, 708)
     force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
     for run in paragraph.runs:
@@ -1405,7 +1416,7 @@ def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
 
 
 def _format_level2_list_item(paragraph, number: int, body_text: str):
-    """Format a paragraph as level-2 (1)/2)/3)) list item."""
+    """Format a paragraph as level-2 (1)/2)/3)) list item (left=1200 hanging=198)."""
     remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
@@ -1422,7 +1433,7 @@ def _format_level2_list_item(paragraph, number: int, body_text: str):
     fmt.widow_control = False
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-    _apply_list_indent_xml(paragraph, left_twips=963, hanging_twips=198)
+    _apply_list_indent_xml(paragraph, left_twips=1200, hanging_twips=198)
     force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
     for run in paragraph.runs:
@@ -1430,11 +1441,53 @@ def _format_level2_list_item(paragraph, number: int, body_text: str):
 
 
 def _format_dash_list_item(paragraph, body_text: str):
-    """Format a paragraph as a KFU dash-list item (real Word list via numPr).
-    Delegates to _format_word_dash_list_item; kept as named entry point so
-    internal callers do not need to be updated.
+    """Format a paragraph as a KFU dash-list item with hyphen '-' marker.
+    Used for manual/free-standing dash blocks and colon-triggered numeric-dot.
+    Applies firstLine=708 indent.
     """
-    _format_word_dash_list_item(paragraph, body_text)
+    _format_word_dash_list_item(paragraph, body_text, marker="-")
+
+
+def _format_endash_list_item(paragraph, body_text: str):
+    """Format a paragraph as a KFU dash-list item with en-dash '–' marker.
+    Used for converted Word-decimal blocks (more formal/structured items).
+    Applies firstLine=708 indent.
+    """
+    _format_word_dash_list_item(paragraph, body_text, marker="–")
+    # Mark for idempotent second-pass recognition (preserves – on re-run)
+    _mark_kfu_list_type(paragraph, "endash")
+
+
+def _format_colon_dash_item(paragraph, body_text: str):
+    """Format a paragraph as a colon-triggered dash item with hyphen '-' marker.
+    No explicit firstLine indent (inherits style default). Used when a colon
+    lead-in opens a numeric-dot task list (e.g. '1. задача' after 'задачи:').
+    """
+    remove_paragraph_numbering(paragraph)
+    set_paragraph_style_safe(paragraph, "Normal", "Обычный")
+    clear_paragraph_outline_level(paragraph)
+
+    replace_paragraph_text(paragraph, f"- {body_text}")
+
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = LINE_SPACING_BODY
+    fmt.keep_together = False
+    fmt.keep_with_next = False
+    fmt.page_break_before = False
+    fmt.widow_control = False
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Remove any explicit ind element (inherit from style — no extra firstLine)
+    _clear_paragraph_ind(paragraph)
+    force_paragraph_xml_spacing(paragraph, line_rule="auto")
+
+    # Mark for idempotent second-pass recognition
+    _mark_kfu_list_type(paragraph, "colon")
+
+    for run in paragraph.runs:
+        set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
 
 
 def _paragraph_blocks_list_conversion(paragraph, text: str) -> bool:
@@ -1537,6 +1590,31 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
             _reset_free_blocks()
             continue
 
+        # ── Idempotency fast-path ────────────────────────────────────────────────
+        # Paragraphs already converted by a prior pass carry a kfuListType marker.
+        # Re-apply the correct formatter directly so the second pass (line ~6475)
+        # doesn't over-write their special geometry.
+        _kfu_type = _get_kfu_list_type(p)
+        if _kfu_type == "colon":
+            # Restore {} ind (format_body resets it to firstLine=709)
+            body = text[2:].strip() if text.startswith('- ') else text
+            _format_colon_dash_item(p, body)
+            # Keep in_list state intact — colon items extend the colon sequence
+            continue
+        if _kfu_type == "endash":
+            # Restore firstLine=708 and preserve '–' marker
+            body = text[2:].strip() if text.startswith('– ') else text
+            _format_endash_list_item(p, body)
+            # End any colon/free-block context
+            in_list = False
+            level1_counter = 0
+            level2_counter = 0
+            prev_was_level1 = False
+            prev_was_level2 = False
+            _reset_free_blocks()
+            continue
+        # ── End fast-path ────────────────────────────────────────────────────────
+
         if text.endswith(':') and not _is_level1_list_text(text):
             in_list = True
             level1_counter = 0
@@ -1561,10 +1639,19 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
                 prev_was_level2 = False
                 continue
 
-            if m_num_paren or m_num_dot:
-                m = m_num_paren or m_num_dot
-                body = m.group(2).strip()
-                num = int(m.group(1))
+            if m_num_dot:
+                # Numeric-dot (1. 2. 3.) after a colon lead-in → hyphen dash items
+                # (no firstLine indent; inherit from style — matches KFU task-list style)
+                body = m_num_dot.group(2).strip()
+                _format_colon_dash_item(p, body)
+                level1_counter += 1
+                prev_was_level1 = False
+                prev_was_level2 = False
+                continue
+
+            if m_num_paren:
+                body = m_num_paren.group(2).strip()
+                num = int(m_num_paren.group(1))
 
                 if prev_was_level1 and num == 1:
                     level2_counter = 1
@@ -1756,7 +1843,7 @@ def _normalize_word_numbered_list_paragraphs(paragraphs: list) -> None:
     def _flush() -> None:
         if len(block) >= 2:
             for p, body_text in block:
-                _format_dash_list_item(p, body_text)
+                _format_endash_list_item(p, body_text)
         block.clear()
 
     for p in paragraphs:
@@ -2786,9 +2873,8 @@ def format_body_list_item(paragraph):
     * Letter / roman Word lists (lowerLetter, upperLetter, lowerRoman, ...):
       also preserved via format_body(preserve_numbering=True) so that
       Cyrillic-letter autonumbering is not stripped.
-    * Everything else (bullet numPr or no numPr): converted to the KFU real
-      Word dash-list via _format_word_dash_list_item (bullet numPr,
-      lvlText='–', no literal dash prefix in run text).
+    * Everything else (bullet numPr or no numPr): converted to plain-text
+      '– body_text' with firstLine=708 via _format_word_dash_list_item.
     """
     num_fmt = _get_num_fmt_for_paragraph(paragraph)
     is_numeric = num_fmt in NUMERIC_NUM_FMTS
