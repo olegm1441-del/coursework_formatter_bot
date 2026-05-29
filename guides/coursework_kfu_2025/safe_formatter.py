@@ -1232,12 +1232,17 @@ def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
 
 
 def _apply_list_firstline_xml(paragraph, first_line_twips: int = 708):
-    """Set firstLine-only indent directly via XML (KFU L1 standard: 1.25 cm ≈ 708 twips)."""
+    """Set left-indent directly via XML (KFU L1 standard: 1.25 cm ≈ 708 twips).
+
+    Uses w:left so that BOTH the first line and all continuation (wrapped) lines
+    start at the same 1.25 cm position.  A pure w:firstLine would leave
+    continuation lines at 0 cm.
+    """
     pPr = paragraph._element.get_or_add_pPr()
     for old in list(pPr.findall(qn("w:ind"))):
         pPr.remove(old)
     ind = OxmlElement("w:ind")
-    ind.set(qn("w:firstLine"), str(first_line_twips))
+    ind.set(qn("w:left"), str(first_line_twips))
     pPr.append(ind)
 
 
@@ -1497,8 +1502,8 @@ def _format_colon_dash_item(paragraph, body_text: str):
     fmt.widow_control = False
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
-    # Remove any explicit ind element (inherit from style — no extra firstLine)
-    _clear_paragraph_ind(paragraph)
+    # Set left=708 so continuation lines also start at 1.25 cm (not 0 cm)
+    _apply_list_firstline_xml(paragraph, 708)
     force_paragraph_xml_spacing(paragraph, line_rule="auto")
 
     # Mark for idempotent second-pass recognition
