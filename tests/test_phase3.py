@@ -6414,7 +6414,7 @@ def _para_is_kfu_dash_list(p) -> bool:
 def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
     """
     G2 Pattern A: 2+ contiguous decimal numPr paragraphs sharing the same numId
-    become plain-text '– text' items (en-dash, no numPr, firstLine=708).
+    become plain-text '- text' items (hyphen, no numPr, firstLine=708).
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
     from docx.oxml.ns import qn
@@ -6430,8 +6430,8 @@ def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
     _normalize_word_numbered_list_paragraphs([pre, p1, p2, p3])
 
     for p in (p1, p2, p3):
-        if not p.text.startswith("– "):
-            return _result(False, f"item should start with '– ': {p.text!r}")
+        if not p.text.startswith("- "):
+            return _result(False, f"item should start with '- ': {p.text!r}")
         pPr = p._element.find(qn("w:pPr"))
         if pPr is not None and pPr.find(qn("w:numPr")) is not None:
             return _result(False, f"item should not have numPr: {p.text!r}")
@@ -6439,7 +6439,7 @@ def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
         fl = ind.get(qn("w:firstLine")) if ind is not None else None
         if fl != "708":
             return _result(False, f"item bad firstLine: {fl!r} (expected '708') text={p.text!r}")
-    return _result(True, "Pattern A: 3-item block converted to plain '– text' with firstLine=708")
+    return _result(True, "Pattern A: 3-item block converted to plain '- text' with firstLine=708")
 
 
 # ── Test 2: G2 Pattern B — cross-numId block → real Word dash-list ───────────
@@ -6447,7 +6447,7 @@ def test_word_numbered_pattern_a_converted() -> tuple[bool, str]:
 def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
     """
     G2 Pattern B: contiguous decimal numPr paragraphs converted to
-    plain-text '– text' items (en-dash, no numPr, firstLine=708).
+    plain-text '- text' items (hyphen, no numPr, firstLine=708).
     """
     from guides.coursework_kfu_2025.safe_formatter import _normalize_word_numbered_list_paragraphs
     from docx.oxml.ns import qn
@@ -6463,8 +6463,8 @@ def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
     _normalize_word_numbered_list_paragraphs([pre, p1, p2, p3])
 
     for p in (p1, p2, p3):
-        if not p.text.startswith("– "):
-            return _result(False, f"Pattern B item should start with '– ': {p.text!r}")
+        if not p.text.startswith("- "):
+            return _result(False, f"Pattern B item should start with '- ': {p.text!r}")
         pPr = p._element.find(qn("w:pPr"))
         if pPr is not None and pPr.find(qn("w:numPr")) is not None:
             return _result(False, f"Pattern B item should not have numPr: {p.text!r}")
@@ -6472,7 +6472,7 @@ def test_word_numbered_pattern_b_converted() -> tuple[bool, str]:
         fl = ind.get(qn("w:firstLine")) if ind is not None else None
         if fl != "708":
             return _result(False, f"Pattern B item bad firstLine: {fl!r} text={p.text!r}")
-    return _result(True, "Pattern B: reset-numbered block converted to plain '– text' with firstLine=708")
+    return _result(True, "Pattern B: reset-numbered block converted to plain '- text' with firstLine=708")
 
 
 # ── Test 3: Plain manual "– text" blocks → real Word dash-list ───────────────
@@ -6718,11 +6718,11 @@ def test_word_numbered_heading_style_not_converted() -> tuple[bool, str]:
 
 def test_word_numbered_normalization_idempotent() -> tuple[bool, str]:
     """
-    Running the normalization pipeline stabilizes after 2 runs:
-    – run 1: Word-decimal items → '– text' (en-dash, firstLine=708)
-    – run 2: '– text' items re-processed as free-standing dashes → '- text' (hyphen)
-    – run 3: '- text' items → '- text' (stable, no further changes)
-    Paragraph count stays constant and no prefix duplication occurs.
+    Running the normalization pipeline stabilizes after 1 run:
+    – run 1: Word-decimal items → '- text' (hyphen, firstLine=708) via kfuListType='endash'
+    – run 2: kfuListType fast-path restores geometry without changing text → '- text'
+    – run 3: same — fully stable, no prefix duplication.
+    Paragraph count stays constant throughout.
     """
     from guides.coursework_kfu_2025.safe_formatter import (
         normalize_word_numbered_lists_in_document,
@@ -6745,21 +6745,31 @@ def test_word_numbered_normalization_idempotent() -> tuple[bool, str]:
 
     count_before = len(doc.paragraphs)
 
-    # Run 1: Word-decimal → '– text'
+    # Run 1: Word-decimal → '- text' (hyphen, uniform)
     _run_passes(doc)
     after1_texts = [p.text for p in doc.paragraphs]
     after1_count = len(doc.paragraphs)
 
-    # Run 2: '– text' → '- text' (en-dash free-standing → hyphen normalization)
+    if after1_count != count_before:
+        return _result(False, f"paragraph count changed after run 1: {count_before} -> {after1_count}")
+
+    # Verify run 1 produced hyphen markers, not en-dash
+    list_texts = [t for t in after1_texts if t.startswith("- ")]
+    if len(list_texts) != 3:
+        return _result(False, f"run 1 did not produce 3 '- text' items; got: {after1_texts}")
+
+    # Run 2: fast-path restores geometry; text must stay identical
     _run_passes(doc)
     after2_texts = [p.text for p in doc.paragraphs]
 
-    if after1_count != count_before:
-        return _result(False, f"paragraph count changed after run 1: {count_before} -> {after1_count}")
+    if after1_texts != after2_texts:
+        diff = [(a, b) for a, b in zip(after1_texts, after2_texts) if a != b]
+        return _result(False, f"texts changed between run 1 and run 2 (not idempotent): {diff}")
+
     if len(doc.paragraphs) != after1_count:
         return _result(False, f"paragraph count changed after run 2: {after1_count} -> {len(doc.paragraphs)}")
 
-    # Run 3: '- text' → '- text' (must be fully stable now)
+    # Run 3: must be fully stable
     _run_passes(doc)
     after3_texts = [p.text for p in doc.paragraphs]
 
@@ -6772,7 +6782,99 @@ def test_word_numbered_normalization_idempotent() -> tuple[bool, str]:
         if t.startswith("– – ") or t.startswith("- - ") or t.startswith("– – "):
             return _result(False, f"duplicated dash prefix found: {t!r}")
 
-    return _result(True, "normalization stabilizes after 2 runs; run 2→3 is idempotent")
+    return _result(True, "normalization stable from run 1; run 1→2→3 all idempotent with hyphen marker")
+
+
+# ── New test: colon+numeric-dot soft-break split ─────────────────────────────
+
+def _add_run_with_br(paragraph, text: str, *, add_br: bool = True) -> None:
+    """Append a run to paragraph, preceded by a w:br type='textWrapping' inside a run.
+
+    Word stores soft line-breaks as <w:r><w:br w:type="textWrapping"/></w:r> followed
+    by additional runs. python-docx's .text yields '\\n' for w:br elements inside runs.
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    if add_br:
+        # Insert a dedicated run that contains only the soft line-break
+        br_run = OxmlElement("w:r")
+        br = OxmlElement("w:br")
+        br.set(qn("w:type"), "textWrapping")
+        br_run.append(br)
+        paragraph._element.append(br_run)
+    paragraph.add_run(text)
+
+
+def test_split_colon_numeric_dot_br_paragraph() -> tuple[bool, str]:
+    """
+    A single paragraph whose text ends with ':' and is followed by numeric-dot
+    items joined by w:br type='textWrapping' (soft line breaks) must be split
+    into separate paragraphs by split_manual_dash_lists.
+
+    Real-world example: Рыбаков 220 — 'Для достижения цели необходимо решить
+    задачи:' followed by '1. Изучить...', '2. Рассмотреть...' all in ONE <w:p>.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import split_manual_dash_lists
+
+    doc = Document()
+    # Build one paragraph: "Для достижения цели:\n1. Изучить\n2. Рассмотреть"
+    p = doc.add_paragraph("Для достижения цели:")
+    _add_run_with_br(p, "1. Изучить теоретические основы")
+    _add_run_with_br(p, "2. Рассмотреть практические аспекты")
+
+    count_before = len(doc.paragraphs)
+    split_manual_dash_lists(doc, body_start=0)
+    count_after = len(doc.paragraphs)
+
+    if count_after != count_before + 2:
+        return _result(
+            False,
+            f"expected {count_before + 2} paragraphs after split, got {count_after}; "
+            f"texts={[p.text for p in doc.paragraphs]}"
+        )
+
+    texts = [p.text for p in doc.paragraphs]
+    if "Для достижения цели:" not in texts:
+        return _result(False, f"intro colon paragraph missing after split; texts={texts}")
+    if "1. Изучить теоретические основы" not in texts:
+        return _result(False, f"first numeric item missing; texts={texts}")
+    if "2. Рассмотреть практические аспекты" not in texts:
+        return _result(False, f"second numeric item missing; texts={texts}")
+
+    return _result(True, "colon+numeric-dot soft-break paragraph split into separate paragraphs")
+
+
+# ── New test: list body first letter lowercased ───────────────────────────────
+
+def test_list_body_first_letter_lowercased() -> tuple[bool, str]:
+    """
+    All list formatters must lowercase the first letter of body text unless
+    the word is an acronym (both first and second character are uppercase).
+
+    Covers: free-standing dash (hyphen), cyrillic-letter, level-2 numeric-paren,
+    colon-triggered dash items.  Acronyms like 'ПАО', 'IBM', 'СБИС' must not
+    be lowercased.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import _lowercase_first
+
+    cases = [
+        # (input, expected, description)
+        ("Раскрыть понятие",   "раскрыть понятие",   "Capitalised Russian word"),
+        ("Изучить методы",     "изучить методы",     "Capitalised Russian verb"),
+        ("Describe the task",  "describe the task",  "Capitalised English word"),
+        ("ПАО Сбербанк",       "ПАО Сбербанк",       "Russian acronym — untouched"),
+        ("IBM Watson",         "IBM Watson",          "English acronym — untouched"),
+        ("СБИС система",       "СБИС система",        "Russian all-caps acronym"),
+        ("",                   "",                    "Empty string — no error"),
+        ("а) уже строчная",    "а) уже строчная",    "Already lowercase — untouched"),
+    ]
+
+    for inp, expected, desc in cases:
+        got = _lowercase_first(inp)
+        if got != expected:
+            return _result(False, f"_lowercase_first({inp!r}) = {got!r}, want {expected!r} [{desc}]")
+
+    return _result(True, "_lowercase_first works for all cases: capitalised words lowercased, acronyms protected")
 
 
 # ── Guard test: blank breaks G2 block ────────────────────────────────────────
@@ -14287,6 +14389,8 @@ def run_all() -> None:
         ("LIST | table caption not normalized",               test_table_caption_not_normalized),
         ("LIST | G2 heading guard",                           test_word_numbered_heading_style_not_converted),
         ("LIST | full normalization idempotent",              test_word_numbered_normalization_idempotent),
+        ("LIST | colon+numeric-dot w:br split into paras",   test_split_colon_numeric_dot_br_paragraph),
+        ("LIST | list body first letter lowercased",          test_list_body_first_letter_lowercased),
         ("LIST | G2 blank breaks block",                      test_word_numbered_block_broken_by_blank_not_converted),
         ("BODY | skip fake plain-TOC СОДЕРЖАНИЕ",        test_real_body_start_skips_fake_plain_toc_soderzhanie),
         ("BODY | skip fake Оглавление",                  test_real_body_start_skips_fake_oglavlenie_toc),

@@ -1205,6 +1205,20 @@ def _is_letter_list_text(text: str) -> bool:
     return bool(_CYRILLIC_LETTER_LIST_RE.match(clean_spaces(text)))
 
 
+def _lowercase_first(text: str) -> str:
+    """Lowercase the first character of list body text.
+
+    Only acts when text[0] is uppercase AND text[1] is lowercase (i.e. a
+    capitalised word like "Раскрыть", not an acronym like "ПАО" or "IBM"
+    whose second character is also uppercase).
+    """
+    if not text or not text[0].isupper():
+        return text
+    if len(text) > 1 and text[1].isupper():
+        return text  # acronym — leave untouched
+    return text[0].lower() + text[1:]
+
+
 def _apply_list_indent_xml(paragraph, left_twips: int, hanging_twips: int):
     """Set list hanging indent directly via XML."""
     pPr = paragraph._element.get_or_add_pPr()
@@ -1354,7 +1368,7 @@ def _ensure_kfu_dash_list_numid(paragraph) -> "str | None":
     return new_num_id
 
 
-def _format_word_dash_list_item(paragraph, body_text: str, marker: str = "–") -> None:
+def _format_word_dash_list_item(paragraph, body_text: str, marker: str = "-") -> None:
     """
     Format *paragraph* as a KFU plain-text dash-list item.
 
@@ -1362,9 +1376,9 @@ def _format_word_dash_list_item(paragraph, body_text: str, marker: str = "–") 
     * firstLine indent = 708 twips (≈ 1.25 cm, KFU L1 standard)
     * Times New Roman 14 pt · 1.5 line spacing · justified
 
-    ``marker`` defaults to '–' (en-dash, KFU standard for formal/converted items).
-    Pass '-' for informal/manual items (free-standing or colon-triggered).
+    ``marker`` defaults to '-' (hyphen, uniform KFU standard for all list items).
     """
+    body_text = _lowercase_first(body_text)
     remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
@@ -1392,6 +1406,7 @@ def _format_word_dash_list_item(paragraph, body_text: str, marker: str = "–") 
 
 def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
     """Format a paragraph as level-1 Cyrillic list item (firstLine=708 twips)."""
+    body_text = _lowercase_first(body_text)
     remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
@@ -1417,6 +1432,7 @@ def _format_cyrillic_list_item(paragraph, letter: str, body_text: str):
 
 def _format_level2_list_item(paragraph, number: int, body_text: str):
     """Format a paragraph as level-2 (1)/2)/3)) list item (left=1200 hanging=198)."""
+    body_text = _lowercase_first(body_text)
     remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
@@ -1449,12 +1465,13 @@ def _format_dash_list_item(paragraph, body_text: str):
 
 
 def _format_endash_list_item(paragraph, body_text: str):
-    """Format a paragraph as a KFU dash-list item with en-dash '–' marker.
-    Used for converted Word-decimal blocks (more formal/structured items).
+    """Format a paragraph as a KFU dash-list item with hyphen '-' marker.
+    Previously used en-dash '–' for Word-decimal blocks; now unified to
+    hyphen for consistency with all other list types.
     Applies firstLine=708 indent.
     """
-    _format_word_dash_list_item(paragraph, body_text, marker="–")
-    # Mark for idempotent second-pass recognition (preserves – on re-run)
+    _format_word_dash_list_item(paragraph, body_text, marker="-")
+    # Mark for idempotent second-pass recognition
     _mark_kfu_list_type(paragraph, "endash")
 
 
@@ -1463,6 +1480,7 @@ def _format_colon_dash_item(paragraph, body_text: str):
     No explicit firstLine indent (inherits style default). Used when a colon
     lead-in opens a numeric-dot task list (e.g. '1. задача' after 'задачи:').
     """
+    body_text = _lowercase_first(body_text)
     remove_paragraph_numbering(paragraph)
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
@@ -1602,8 +1620,8 @@ def _normalize_plain_list_paragraphs(paragraphs: list):
             # Keep in_list state intact — colon items extend the colon sequence
             continue
         if _kfu_type == "endash":
-            # Restore firstLine=708 and preserve '–' marker
-            body = text[2:].strip() if text.startswith('– ') else text
+            # Restore firstLine=708; marker is now '-' (uniform hyphen)
+            body = text[2:].strip() if text.startswith('- ') else text
             _format_endash_list_item(p, body)
             # End any colon/free-block context
             in_list = False
@@ -3909,7 +3927,12 @@ def split_manual_dash_lists(document, body_start):
             if len(parts) < 2:
                 continue
 
-            if not all(DASH_LINE_RE.match(x) for x in parts[1:]):
+            _is_dash_split = all(DASH_LINE_RE.match(x) for x in parts[1:])
+            _is_colon_numdot_split = (
+                parts[0].endswith(":")
+                and all(_NUMERIC_DOT_LIST_RE.match(x) for x in parts[1:])
+            )
+            if not (_is_dash_split or _is_colon_numdot_split):
                 continue
 
             replace_paragraph_text(p, parts[0])
