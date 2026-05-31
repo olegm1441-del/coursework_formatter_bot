@@ -13475,6 +13475,352 @@ def test_tm_continuation_marker_report_includes_page_and_violation() -> tuple[bo
     return _result(True, "continuation marker report includes marker page and violation flag")
 
 
+def _rv_line(text: str, page: int, top: float):
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import PdfLine
+
+    return PdfLine(text=text, page_num=page, top=top, bottom=top + 10.0)
+
+
+def test_tm_rendered_fragment_without_marker_is_flagged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    identity = RenderedTableIdentity(
+        table_index=7,
+        body_order_index=7,
+        caption_num="2.2.3",
+        preceding_marker=None,
+        following_marker="Продолжение таблицы 2.2.3",
+        header_fingerprint=("уровень показатель источник бенчмарк цель",),
+        numeric_row_fingerprint="1 2 3 4 5 6",
+        row_fingerprints=("intention сделать заказ ночью",),
+    )
+    violations = validate_rendered_continuations(
+        [
+            _rv_line("Таблица 2.2.3", 45, 492.9),
+            _rv_line("Уровень Показатель Источник Бенчмарк/цель", 46, 59.2),
+            _rv_line("1 2 3 4 5 6", 46, 88.8),
+            _rv_line("Продолжение таблицы 2.2.3", 47, 58.2),
+        ],
+        [identity],
+    )
+
+    if len(violations) != 1:
+        return _result(False, f"expected one missing-marker violation, got {violations!r}")
+    v = violations[0]
+    if v.violation_type != "missing_continuation_marker" or v.table_num != "2.2.3" or v.page != 46:
+        return _result(False, f"unexpected violation: {v!r}")
+    if not v.evidence.get("repeated_header") or not v.evidence.get("repeated_numeric_row"):
+        return _result(False, f"missing repeated header/numeric evidence: {v!r}")
+    if v.evidence.get("marker_page") != 47 or v.evidence.get("previous_caption_page") != 45:
+        return _result(False, f"missing page evidence: {v!r}")
+    return _result(True, "rendered continuation fragment without marker is flagged")
+
+
+def test_tm_rendered_fragment_with_marker_before_it_passes() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    identity = RenderedTableIdentity(
+        table_index=0,
+        body_order_index=0,
+        caption_num="1.1.1",
+        preceding_marker=None,
+        following_marker="Продолжение таблицы 1.1.1",
+        header_fingerprint=("показатель как влияет",),
+        numeric_row_fingerprint="1 2 3",
+        row_fingerprints=("оперативность повышение",),
+    )
+    violations = validate_rendered_continuations(
+        [
+            _rv_line("Таблица 1.1.1", 6, 430.2),
+            _rv_line("Продолжение таблицы 1.1.1", 7, 58.2),
+            _rv_line("Показатель Как влияет", 7, 95.0),
+            _rv_line("1 2 3", 7, 122.1),
+        ],
+        [identity],
+    )
+
+    if violations:
+        return _result(False, f"valid continuation marker produced violations: {violations!r}")
+    return _result(True, "marker before rendered continuation fragment passes")
+
+
+def test_tm_inline_prose_is_not_rendered_continuation_marker() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        classify_continuation_marker_line,
+    )
+
+    marker = classify_continuation_marker_line(
+        "В тексте встречается Продолжение таблицы 1.2.3 как пример."
+    )
+    if marker.marker_kind != "source_inline_marker_text" or marker.table_num != "1.2.3":
+        return _result(False, f"inline prose marker misclassified: {marker!r}")
+    return _result(True, "inline prose continuation text is not a strict marker")
+
+
+def test_tm_stable_manual_chain_identity_survives_save_reload() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        build_rendered_table_identities,
+    )
+    from guides.coursework_kfu_2025.table_continuation import (
+        _valid_manual_continuation_table_indexes,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.2.1")
+    table1 = doc.add_table(rows=3, cols=2)
+    table1.rows[0].cells[0].text = "Показатель"
+    table1.rows[0].cells[1].text = "Значение"
+    table1.rows[1].cells[0].text = "1"
+    table1.rows[1].cells[1].text = "2"
+    table1.rows[2].cells[0].text = "A"
+    table1.rows[2].cells[1].text = "B"
+    marker = doc.add_paragraph("Продолжение таблицы 1.2.1")
+    marker.alignment = 2
+    marker.paragraph_format.keep_with_next = True
+    table2 = doc.add_table(rows=2, cols=2)
+    table2.rows[0].cells[0].text = "1"
+    table2.rows[0].cells[1].text = "2"
+    table2.rows[1].cells[0].text = "C"
+    table2.rows[1].cells[1].text = "D"
+
+    before_indexes = _valid_manual_continuation_table_indexes(doc)
+    before_ids = build_rendered_table_identities(doc)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chain.docx"
+        doc.save(path)
+        reloaded = Document(str(path))
+
+    after_indexes = _valid_manual_continuation_table_indexes(reloaded)
+    after_ids = build_rendered_table_identities(reloaded)
+
+    if before_indexes != {0, 1} or after_indexes != {0, 1}:
+        return _result(False, f"manual chain indexes unstable: before={before_indexes}, after={after_indexes}")
+    before_core = [
+        (i.table_index, i.body_order_index, i.caption_num, i.numeric_row_fingerprint)
+        for i in before_ids
+    ]
+    after_core = [
+        (i.table_index, i.body_order_index, i.caption_num, i.numeric_row_fingerprint)
+        for i in after_ids
+    ]
+    if before_core != after_core:
+        return _result(False, f"stable identity changed after reload: before={before_core}, after={after_core}")
+    return _result(True, "manual chain identity is stable across save/reload")
+
+
+def test_tm_real_fixture_rendered_missing_marker_diagnostics() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.formatter_service import format_docx
+    from guides.coursework_kfu_2025.layout_render import render_docx_to_pdf
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import analyze_pdf_lines
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        build_rendered_table_identities,
+        validate_rendered_continuations,
+    )
+
+    fixtures = {
+        "208": Path("/Users/mac/Downloads/208_курсовая пример 1.docx"),
+        "210": Path("/Users/mac/Downloads/210_неиромаркетинг_Рыбаков.docx"),
+        "ref": Path("/Users/mac/Downloads/Рыбаков_Олег_Дмитриевич_курсовая_3_курс.docx"),
+    }
+    missing = [str(path) for path in fixtures.values() if not path.exists()]
+    if missing:
+        return _result(True, f"fixture(s) not present; skipped: {missing!r}")
+
+    old_env = {
+        "KPFU_ENABLE_MARKER_SPLIT": os.environ.get("KPFU_ENABLE_MARKER_SPLIT"),
+        "KPFU_APPLY_MARKER_SPLIT": os.environ.get("KPFU_APPLY_MARKER_SPLIT"),
+        "KPFU_MARKER_SPLIT_MODE": os.environ.get("KPFU_MARKER_SPLIT_MODE"),
+    }
+    os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_MARKER_SPLIT_MODE"] = "candidate"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            results: dict[str, list] = {}
+            for key, fixture in fixtures.items():
+                out = Path(tmp) / f"{key}.docx"
+                format_docx(str(fixture), str(out))
+                pdf = render_docx_to_pdf(out, timeout=180)
+                doc = Document(str(out))
+                results[key] = validate_rendered_continuations(
+                    analyze_pdf_lines(pdf),
+                    build_rendered_table_identities(doc),
+                )
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    r208 = [(v.table_num, v.page, v.violation_type) for v in results["208"]]
+    if ("2.2.3", 46, "missing_continuation_marker") not in r208:
+        return _result(False, f"208 missing page-46 violation: {r208!r}")
+
+    r210 = [(v.table_num, v.page, v.violation_type) for v in results["210"]]
+    if not any(t == "2.1.1" and p == 37 and vt in {"missing_continuation_marker", "suspected_missing_continuation_marker"} for t, p, vt in r210):
+        return _result(False, f"210 missing page-37 violation: {r210!r}")
+
+    rref = [(v.table_num, v.page, v.violation_type) for v in results["ref"]]
+    hard_ref = [item for item in rref if item[2] == "missing_continuation_marker"]
+    if hard_ref:
+        return _result(False, f"reference Рыбаков got hard false positives: {hard_ref!r}")
+    return _result(True, f"real fixture rendered diagnostics: 208={r208}, 210={r210}, ref={rref}")
+
+
+def test_tm_formatter_surfaces_rendered_continuation_warnings() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.formatter_service as fs
+    from guides.coursework_kfu_2025.rendered_table_validation import RenderedContinuationViolation
+
+    if not hasattr(fs, "_rendered_continuation_violations_for_docx"):
+        return _result(False, "formatter has no rendered-continuation final validator")
+
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Таблица 2.2.3")
+    table = doc.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].text = "Header"
+    table.rows[0].cells[1].text = "Header"
+    table.rows[1].cells[0].text = "1"
+    table.rows[1].cells[1].text = "2"
+
+    high = RenderedContinuationViolation(
+        table_num="2.2.3",
+        table_index=18,
+        page=46,
+        violation_type="missing_continuation_marker",
+        confidence="high",
+        evidence={"repeated_numeric_row": True},
+    )
+    medium = RenderedContinuationViolation(
+        table_num="2.2.1",
+        table_index=11,
+        page=48,
+        violation_type="suspected_missing_continuation_marker",
+        confidence="medium",
+        evidence={"repeated_row": True},
+    )
+
+    old_process = fs.process_document
+    old_pagination = fs.apply_pagination_rules
+    old_merging = fs.apply_table_merging
+    old_continuation = fs.apply_table_continuation
+    old_rule3 = fs.apply_rule3_table_orphan
+    old_rule4 = fs.apply_rule4_empty_first_lines
+    old_rule6 = fs.apply_rule6_figure_orphan
+    old_gap = fs.remove_empty_before_figure_captions
+    old_strip = fs.strip_obsolete_toc_blocks_inplace
+    old_rebuild = fs.rebuild_static_contents_page
+    old_rendered = fs.apply_rendered_table_continuation
+    old_restore = fs.restore_docx_if_same_page_continuation_markers
+    old_remove = fs.remove_same_page_continuation_markers_inplace
+    old_validator = fs._rendered_continuation_violations_for_docx
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = Path(tmp) / "input.docx"
+        out = Path(tmp) / "output.docx"
+        doc.save(inp)
+        try:
+            fs.process_document = lambda _src, dst: doc.save(dst)
+            fs.apply_pagination_rules = lambda _doc: None
+            fs.apply_table_merging = lambda _doc: 0
+            fs.apply_table_continuation = lambda _doc, report=None: 0
+            fs.apply_rule3_table_orphan = lambda _doc: 0
+            fs.apply_rule4_empty_first_lines = lambda _doc: 0
+            fs.apply_rule6_figure_orphan = lambda _doc: 0
+            fs.remove_empty_before_figure_captions = lambda _doc: 0
+            fs.strip_obsolete_toc_blocks_inplace = lambda _path: {"sdt_removed": 0, "plain_toc_removed": 0}
+            fs.rebuild_static_contents_page = lambda _path: False
+            fs.apply_rendered_table_continuation = lambda _path, report=None: 0
+            fs.restore_docx_if_same_page_continuation_markers = (
+                lambda _output, _backup, report=None, context="": False
+            )
+            fs.remove_same_page_continuation_markers_inplace = lambda _path: 0
+            fs._rendered_continuation_violations_for_docx = lambda _path: [high, medium]
+            _, warnings = fs.format_docx(str(inp), str(out))
+        finally:
+            fs.process_document = old_process
+            fs.apply_pagination_rules = old_pagination
+            fs.apply_table_merging = old_merging
+            fs.apply_table_continuation = old_continuation
+            fs.apply_rule3_table_orphan = old_rule3
+            fs.apply_rule4_empty_first_lines = old_rule4
+            fs.apply_rule6_figure_orphan = old_rule6
+            fs.remove_empty_before_figure_captions = old_gap
+            fs.strip_obsolete_toc_blocks_inplace = old_strip
+            fs.rebuild_static_contents_page = old_rebuild
+            fs.apply_rendered_table_continuation = old_rendered
+            fs.restore_docx_if_same_page_continuation_markers = old_restore
+            fs.remove_same_page_continuation_markers_inplace = old_remove
+            fs._rendered_continuation_violations_for_docx = old_validator
+
+    joined = "\n".join(warnings)
+    if "таблицы 2.2.3" not in joined or "стр. 46" not in joined:
+        return _result(False, f"high-confidence missing marker warning absent: {warnings!r}")
+    if "таблицы 2.2.1" not in joined or "стр. 48" not in joined:
+        return _result(False, f"medium-confidence suspected marker warning absent: {warnings!r}")
+    return _result(True, "formatter surfaces high and medium rendered-continuation warnings")
+
+
+def test_tm_real_fixture_formatter_rendered_warnings() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.formatter_service import format_docx
+
+    fixtures = {
+        "208": Path("/Users/mac/Downloads/208_курсовая пример 1.docx"),
+        "210": Path("/Users/mac/Downloads/210_неиромаркетинг_Рыбаков.docx"),
+        "207": Path("/Users/mac/Downloads/207_Гаянов_Амир_Ленарович_Разработка_проектного_решения_по_автом.docx"),
+        "209": Path("/Users/mac/Downloads/209_курсовая_Бондарев_Никита_2_курс.docx"),
+        "ref": Path("/Users/mac/Downloads/Рыбаков_Олег_Дмитриевич_курсовая_3_курс.docx"),
+    }
+    missing = [str(path) for path in fixtures.values() if not path.exists()]
+    if missing:
+        return _result(True, f"fixture(s) not present; skipped: {missing!r}")
+
+    old_env = {
+        "KPFU_ENABLE_MARKER_SPLIT": os.environ.get("KPFU_ENABLE_MARKER_SPLIT"),
+        "KPFU_APPLY_MARKER_SPLIT": os.environ.get("KPFU_APPLY_MARKER_SPLIT"),
+        "KPFU_MARKER_SPLIT_MODE": os.environ.get("KPFU_MARKER_SPLIT_MODE"),
+    }
+    os.environ["KPFU_ENABLE_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_APPLY_MARKER_SPLIT"] = "1"
+    os.environ["KPFU_MARKER_SPLIT_MODE"] = "candidate"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            warnings_by_key: dict[str, list[str]] = {}
+            for key, fixture in fixtures.items():
+                out = Path(tmp) / f"{key}.docx"
+                _, warnings = format_docx(str(fixture), str(out))
+                warnings_by_key[key] = warnings
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    if not any("таблицы 2.2.3" in warning and "стр. 46" in warning for warning in warnings_by_key["208"]):
+        return _result(False, f"208 warning missing: {warnings_by_key['208']!r}")
+    if not any("таблицы 2.1.1" in warning and "стр. 37" in warning for warning in warnings_by_key["210"]):
+        return _result(False, f"210 high-confidence warning missing: {warnings_by_key['210']!r}")
+    if not any("таблицы 2.2.1" in warning and "стр. 48" in warning for warning in warnings_by_key["210"]):
+        return _result(False, f"210 medium-confidence warning missing: {warnings_by_key['210']!r}")
+    for clean_key in ("207", "209", "ref"):
+        unexpected = [
+            warning for warning in warnings_by_key[clean_key]
+            if "без маркера продолжения" in warning
+        ]
+        if unexpected:
+            return _result(False, f"{clean_key} got rendered-continuation false positive: {unexpected!r}")
+    return _result(True, f"real fixture formatter warnings: {warnings_by_key!r}")
+
+
 def test_tm_post_render_gate_rejects_same_page_marker_output() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
 
@@ -14564,6 +14910,13 @@ def run_all() -> None:
         ("TM | inline continuation prose classified", test_tm_inline_prose_continuation_text_is_not_valid_marker),
         ("TM | unknown continuation relation not pass", test_tm_unknown_marker_relation_is_not_pass),
         ("TM | continuation marker report page+flag", test_tm_continuation_marker_report_includes_page_and_violation),
+        ("TM | rendered missing marker flagged", test_tm_rendered_fragment_without_marker_is_flagged),
+        ("TM | rendered marker before fragment passes", test_tm_rendered_fragment_with_marker_before_it_passes),
+        ("TM | inline prose not rendered marker", test_tm_inline_prose_is_not_rendered_continuation_marker),
+        ("TM | stable manual chain identity reload", test_tm_stable_manual_chain_identity_survives_save_reload),
+        ("TM | real fixture rendered missing-marker diagnostics", test_tm_real_fixture_rendered_missing_marker_diagnostics),
+        ("TM | formatter surfaces rendered continuation warnings", test_tm_formatter_surfaces_rendered_continuation_warnings),
+        ("TM | real fixture formatter rendered warnings", test_tm_real_fixture_formatter_rendered_warnings),
         ("TM | post-render same-page marker rejected", test_tm_post_render_gate_rejects_same_page_marker_output),
         ("TM | post-render gate restores backup", test_tm_post_render_gate_restores_backup_on_same_page_marker),
         ("TM | post-render gate preserves clean marker", test_tm_post_render_gate_preserves_clean_next_page_marker),

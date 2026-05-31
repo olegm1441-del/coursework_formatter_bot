@@ -1082,9 +1082,9 @@ def _collect_table_signatures(doc: Document) -> list[TableSignature]:
     return out
 
 
-def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
+def _valid_manual_continuation_table_indexes(doc: Document) -> set[int]:
     """
-    Return table XML ids that are already part of a valid continuation chain
+    Return stable table indexes that are already part of a valid continuation chain
     (manual student-authored OR auto-inserted by an earlier marker-split run).
 
     Accepted chain shapes (both must be preserved across re-runs):
@@ -1095,6 +1095,7 @@ def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
     children = list(body)
     skip: set[int] = set()
     para_by_xml = {p._element: p for p in doc.paragraphs}
+    table_index_by_xml = {table._tbl: idx for idx, table in enumerate(doc.tables)}
 
     def _is_empty_p(elem) -> bool:
         if elem.tag != qn("w:p"):
@@ -1134,12 +1135,19 @@ def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
             _is_valid_manual_continuation_chain(doc, prev_node, node, next_node)
             or _is_structurally_valid_student_chain(doc, prev_node, node, next_node)
         ):
-            skip.add(id(prev_node))
-            skip.add(id(next_node))
+            if prev_node in table_index_by_xml:
+                skip.add(table_index_by_xml[prev_node])
+            if next_node in table_index_by_xml:
+                skip.add(table_index_by_xml[next_node])
 
         i += 1
 
     return skip
+
+
+def _valid_manual_continuation_table_ids(doc: Document) -> set[int]:
+    """Compatibility wrapper: manual-chain protection is now index-based."""
+    return _valid_manual_continuation_table_indexes(doc)
 
 
 def _repair_manual_continuation_numeric_rows(doc: Document) -> int:
@@ -1842,12 +1850,12 @@ def _find_rendered_whole_table_move_candidate(
     pdf_lines: list[PdfLine],
     diagnostics: dict[str, bool] | None = None,
 ) -> RenderedWholeTableMoveCandidate | None:
-    manual_skip = _valid_manual_continuation_table_ids(doc)
+    manual_skip = _valid_manual_continuation_table_indexes(doc)
     inspected = 0
 
     for table_sig in _collect_table_signatures(doc):
         inspected += 1
-        if id(table_sig.tbl_xml) in manual_skip:
+        if table_sig.table_idx in manual_skip:
             logger.info(
                 "rendered_whole_table_candidate table_idx=%s skip=valid_manual_continuation",
                 table_sig.table_idx,
@@ -1929,12 +1937,12 @@ def _find_rendered_split_candidate(
     pdf_lines: list[PdfLine],
     diagnostics: dict[str, bool] | None = None,
 ) -> RenderedSplitCandidate | None:
-    manual_skip = _valid_manual_continuation_table_ids(doc)
+    manual_skip = _valid_manual_continuation_table_indexes(doc)
     inspected = 0
 
     for table_sig in _collect_table_signatures(doc):
         inspected += 1
-        if id(table_sig.tbl_xml) in manual_skip:
+        if table_sig.table_idx in manual_skip:
             logger.info(
                 "rendered_split_candidate table_idx=%s skip=valid_manual_continuation",
                 table_sig.table_idx,
@@ -2815,7 +2823,7 @@ def _classify_marker_split_candidates(doc: Document) -> dict:
     from . import table_markers
 
     total_tables = len(doc.tables)
-    manual_skip_ids = _valid_manual_continuation_table_ids(doc)
+    manual_skip_ids = _valid_manual_continuation_table_indexes(doc)
 
     try:
         contexts = table_markers._iter_body_tables_with_context(doc)
@@ -2828,7 +2836,7 @@ def _classify_marker_split_candidates(doc: Document) -> dict:
     candidate_pairs: list[tuple[int, int]] = []
 
     for idx, table in enumerate(doc.tables):
-        if id(table._element) in manual_skip_ids:
+        if idx in manual_skip_ids:
             manual_continuation_skipped.append(idx)
             continue
 
@@ -3181,7 +3189,7 @@ def _apply_marker_split_candidate(
     decision: _MarkerSplitDecision,
 ):
     doc = Document(str(docx_path))
-    manual_skip = _valid_manual_continuation_table_ids(doc)
+    manual_skip = _valid_manual_continuation_table_indexes(doc)
     if diagnostic.table_index in manual_skip:
         return None, "valid_manual_continuation"
     if diagnostic.appendix_table and _is_generated_appendix_continuation_table(
@@ -3597,7 +3605,7 @@ def _collect_source_note_detachment_candidates(
     for table_index, table in enumerate(doc.tables):
         tbl_xml = table._tbl
 
-        if id(tbl_xml) in manual_chain_ids:
+        if table_index in manual_chain_ids or id(tbl_xml) in manual_chain_ids:
             skips.append((table_index, "already_in_manual_chain"))
             continue
 
@@ -3705,7 +3713,7 @@ def _apply_source_note_detachment_split(
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
-    manual_chain_ids = _valid_manual_continuation_table_ids(doc)
+    manual_chain_ids = _valid_manual_continuation_table_indexes(doc)
     candidates, skips = _collect_source_note_detachment_candidates(
         doc, pdf_lines, manual_chain_ids,
     )
@@ -3860,7 +3868,7 @@ def _collect_appendix_table_continuation_candidates(
             skips.append((table_index, "not_appendix"))
             continue
 
-        if id(tbl_xml) in manual_chain_ids:
+        if table_index in manual_chain_ids or id(tbl_xml) in manual_chain_ids:
             skips.append((table_index, "already_in_manual_chain"))
             continue
 
@@ -3980,7 +3988,7 @@ def _apply_appendix_table_continuation_split(
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
-    manual_chain_ids = _valid_manual_continuation_table_ids(doc)
+    manual_chain_ids = _valid_manual_continuation_table_indexes(doc)
     candidates, skips = _collect_appendix_table_continuation_candidates(
         doc, pdf_lines, manual_chain_ids,
     )

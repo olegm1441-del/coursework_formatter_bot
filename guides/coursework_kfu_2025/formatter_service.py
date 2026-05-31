@@ -21,12 +21,77 @@ from .table_continuation import (
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
+from .layout_render import render_docx_to_pdf
+from .pdf_layout_analyzer import analyze_pdf_lines
+from .rendered_table_validation import (
+    RenderedContinuationViolation,
+    build_rendered_table_identities,
+    validate_rendered_continuations,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _flag_value(name: str) -> str:
     return os.getenv(name, "<unset>")
+
+
+def _rendered_continuation_violations_for_docx(
+    docx_path: Path,
+) -> list[RenderedContinuationViolation]:
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        identities = build_rendered_table_identities(doc)
+        return validate_rendered_continuations(pdf_lines, identities)
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+
+def _rendered_continuation_warning(
+    violation: RenderedContinuationViolation,
+) -> str | None:
+    table_num = violation.table_num or f"#{violation.table_index}"
+    if (
+        violation.violation_type == "missing_continuation_marker"
+        and violation.confidence == "high"
+    ):
+        return (
+            f"Проверьте перенос таблицы {table_num}: "
+            f"стр. {violation.page} без маркера продолжения."
+        )
+    if (
+        violation.violation_type == "suspected_missing_continuation_marker"
+        and violation.confidence == "medium"
+    ):
+        return (
+            f"Проверьте возможный перенос таблицы {table_num}: "
+            f"стр. {violation.page} без маркера продолжения."
+        )
+    return None
+
+
+def _append_rendered_continuation_warnings(
+    report: FormattingReport,
+    violations: list[RenderedContinuationViolation],
+) -> None:
+    for violation in violations:
+        message = _rendered_continuation_warning(violation)
+        if message is None:
+            continue
+        report.warn(message)
+        logger.warning(
+            "rendered_continuation_violation table_num=%s table_index=%s page=%s type=%s confidence=%s evidence=%s",
+            violation.table_num,
+            violation.table_index,
+            violation.page,
+            violation.violation_type,
+            violation.confidence,
+            violation.evidence,
+        )
 
 
 def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
@@ -174,5 +239,32 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             logger.exception(
                 "format_docx: failed to remove same-page markers from canonical backup"
             )
+
+    try:
+        rendered_violations = _rendered_continuation_violations_for_docx(output_path)
+        if rendered_violations:
+            _append_rendered_continuation_warnings(report, rendered_violations)
+            hard_count = sum(
+                1
+                for violation in rendered_violations
+                if violation.violation_type == "missing_continuation_marker"
+                and violation.confidence == "high"
+            )
+            suspected_count = sum(
+                1
+                for violation in rendered_violations
+                if violation.violation_type == "suspected_missing_continuation_marker"
+                and violation.confidence == "medium"
+            )
+            logger.warning(
+                "format_docx: final rendered continuation validation review_needed hard=%d suspected=%d",
+                hard_count,
+                suspected_count,
+            )
+    except Exception:
+        logger.exception("format_docx: final rendered continuation validation failed")
+        report.warn(
+            "Автопроверка переносов таблиц по PDF не выполнена. Проверьте таблицы вручную."
+        )
 
     return str(output_path), report.warnings
