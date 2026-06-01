@@ -5,6 +5,10 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Pt
 FORMULA_NUMBER_RE = re.compile(r"\((\d+\.\d+\.\d+|\d+\.\d+)\)\s*$")
+FORMULA_REFERENCE_RE = re.compile(
+    r"\bформул[аеуы]\s+(\d+\.\d+(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
 FORMULA_EXPLANATION_RE = re.compile(r"^\s*где\b", re.IGNORECASE)
 
 MATH_TOKEN_RE = re.compile(r"[=+\-*/×÷^(){}\[\]<>]|[A-Za-zА-Яа-яЁё]\s*=")
@@ -25,6 +29,15 @@ def is_formula_paragraph_text(text: str) -> bool:
 
     # Формула должна содержать математический маркер
     return bool(MATH_TOKEN_RE.search(left))
+
+
+def is_unnumbered_formula_paragraph_text(text: str) -> bool:
+    t = clean_spaces(text)
+    if not t or FORMULA_NUMBER_RE.search(t):
+        return False
+    if len(t) > 120:
+        return False
+    return bool(MATH_TOKEN_RE.search(t))
 
 
 def is_formula_explanation_start(text: str) -> bool:
@@ -64,17 +77,60 @@ def is_formula_block_paragraph_text(text: str) -> bool:
 
 def normalize_formula_explanation_text(text: str, is_first=False) -> str:
     t = clean_spaces(text)
+    t = re.sub(r"\s*,?\s*_\s*$", "", t)
 
     if is_first:
         t = re.sub(r"^\s*где\s*:\s*", "где ", t, flags=re.IGNORECASE)
         t = re.sub(r"^\s*где\s+", "где ", t, flags=re.IGNORECASE)
+        t = re.sub(
+            r"^где\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*[-–—=]\s*",
+            r"где \1 — ",
+            t,
+            flags=re.IGNORECASE,
+        )
 
     # Нормализуем пробелы вокруг дефиса/тире после обозначения символа:
     # V- -> V – ; R –цена -> R – цена
-    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*-\s*", r"\1 – ", t)
-    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*[—–]\s*", r"\1 – ", t)
+    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*[-–—=]\s*", r"\1 — ", t)
 
     return t
+
+
+def _normalize_formula_expression(text: str) -> str:
+    expr = clean_spaces(text)
+    expr = re.sub(r"\s*([=+\-*/×÷^])\s*", r" \1 ", expr)
+    expr = re.sub(r"\s+", " ", expr).strip()
+    return expr
+
+
+def _normalize_formula_explanation_punctuation(text: str, *, is_last: bool) -> str:
+    cleaned = clean_spaces(text)
+    cleaned = re.sub(r"\s*[,;._]\s*$", "", cleaned)
+    return cleaned + ("." if is_last else ";")
+
+
+def _find_formula_number_from_preceding_prose(paragraphs, idx: int, body_start: int) -> str | None:
+    seen = 0
+    j = idx - 1
+    while j >= body_start and seen < 4:
+        text = clean_spaces(paragraphs[j].text)
+        if text:
+            seen += 1
+            match = FORMULA_REFERENCE_RE.search(text)
+            if match:
+                return match.group(1)
+        j -= 1
+    return None
+
+
+def _next_nonempty_paragraph_starts_formula_explanation(paragraphs, idx: int) -> bool:
+    j = idx + 1
+    while j < len(paragraphs):
+        text = clean_spaces(paragraphs[j].text)
+        if text:
+            return is_formula_explanation_start(text)
+        j += 1
+    return False
 
 
 def split_formula_explanations_in_paragraph(paragraph, is_first=False):
@@ -119,12 +175,9 @@ def format_formula_paragraph(paragraph):
         return
 
     number = m.group(0)
-    expr = text[:m.start()].rstrip()
+    expr = _normalize_formula_expression(text[:m.start()].rstrip())
 
-    if expr and not expr.endswith(","):
-        expr = expr + ","
-
-    replace_paragraph_text(paragraph, f"{expr}\t{number}")
+    replace_paragraph_text(paragraph, f"\t{expr}\t{number}")
 
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -132,6 +185,7 @@ def format_formula_paragraph(paragraph):
 
     tabs = paragraph.paragraph_format.tab_stops
     tabs.clear_all()
+    tabs.add_tab_stop(Cm(8), WD_TAB_ALIGNMENT.CENTER)
     tabs.add_tab_stop(Cm(16), WD_TAB_ALIGNMENT.RIGHT)
 
     for run in paragraph.runs:
@@ -157,6 +211,23 @@ def normalize_formula_blocks(document, body_start):
         paragraphs = document.paragraphs
         p = paragraphs[idx]
         text = clean_spaces(p.text)
+
+        if not is_formula_paragraph_text(text):
+            if (
+                is_unnumbered_formula_paragraph_text(text)
+                and _next_nonempty_paragraph_starts_formula_explanation(paragraphs, idx)
+            ):
+                formula_number = _find_formula_number_from_preceding_prose(paragraphs, idx, body_start)
+                if formula_number:
+                    replace_paragraph_text(p, f"{text} ({formula_number})")
+                    text = clean_spaces(p.text)
+                    changed = True
+                else:
+                    idx += 1
+                    continue
+            else:
+                idx += 1
+                continue
 
         if not is_formula_paragraph_text(text):
             idx += 1
@@ -188,6 +259,7 @@ def normalize_formula_blocks(document, body_start):
         paragraphs = document.paragraphs
         j = idx + 1
         first_expl = True
+        explanation_paragraphs = []
 
         while j < len(paragraphs):
             t = clean_spaces(paragraphs[j].text)
@@ -197,9 +269,9 @@ def normalize_formula_blocks(document, body_start):
 
             if first_expl and is_formula_explanation_start(t):
                 inserted = split_formula_explanations_in_paragraph(paragraphs[j], is_first=True)
-                format_formula_explanation_paragraph(paragraphs[j], is_first=True)
+                explanation_paragraphs.append((paragraphs[j], True))
                 for new_p in inserted:
-                    format_formula_explanation_paragraph(new_p, is_first=False)
+                    explanation_paragraphs.append((new_p, False))
 
                 if inserted:
                     changed = True
@@ -211,9 +283,9 @@ def normalize_formula_blocks(document, body_start):
 
             if not first_expl and is_formula_explanation_continuation(t):
                 inserted = split_formula_explanations_in_paragraph(paragraphs[j], is_first=False)
-                format_formula_explanation_paragraph(paragraphs[j], is_first=False)
+                explanation_paragraphs.append((paragraphs[j], False))
                 for new_p in inserted:
-                    format_formula_explanation_paragraph(new_p, is_first=False)
+                    explanation_paragraphs.append((new_p, False))
 
                 if inserted:
                     changed = True
@@ -223,6 +295,16 @@ def normalize_formula_blocks(document, body_start):
                 continue
 
             break
+
+        for pos, (expl_p, is_first) in enumerate(explanation_paragraphs):
+            format_formula_explanation_paragraph(expl_p, is_first=is_first)
+            normalized = _normalize_formula_explanation_punctuation(
+                expl_p.text,
+                is_last=pos == len(explanation_paragraphs) - 1,
+            )
+            replace_paragraph_text(expl_p, normalized)
+            for run in expl_p.runs:
+                set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False)
 
         # 4. После формулы/пояснений должна быть ровно одна пустая строка
         tail_idx = j - 1 if j > idx + 1 else idx
@@ -3066,6 +3148,80 @@ def clear_cell_borders(cell):
         tcPr.remove(tcBorders)
 
 
+TABLE_BORDER_EDGES = ("top", "left", "bottom", "right", "insideH", "insideV")
+
+
+def _get_or_add_tbl_pr(table):
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+    return tblPr
+
+
+def _set_border_element_single(element, *, color="000000", size="4", space="0") -> None:
+    element.set(qn("w:val"), "single")
+    element.set(qn("w:sz"), size)
+    element.set(qn("w:space"), space)
+    element.set(qn("w:color"), color)
+
+
+def _ensure_tbl_borders_single(table, *, color="000000", size="4", space="0") -> None:
+    tblPr = _get_or_add_tbl_pr(table)
+    tblBorders = tblPr.find(qn("w:tblBorders"))
+    if tblBorders is None:
+        tblBorders = OxmlElement("w:tblBorders")
+        tblPr.append(tblBorders)
+
+    for edge in TABLE_BORDER_EDGES:
+        element = tblBorders.find(qn(f"w:{edge}"))
+        if element is None:
+            element = OxmlElement(f"w:{edge}")
+            tblBorders.append(element)
+        _set_border_element_single(element, color=color, size=size, space=space)
+
+
+def _normalize_existing_cell_borders_single(table, *, color="000000", size="4", space="0") -> None:
+    for tc in table._tbl.findall(".//" + qn("w:tc")):
+        tcPr = tc.find(qn("w:tcPr"))
+        if tcPr is None:
+            continue
+        tcBorders = tcPr.find(qn("w:tcBorders"))
+        if tcBorders is None:
+            continue
+        for edge in TABLE_BORDER_EDGES:
+            element = tcBorders.find(qn(f"w:{edge}"))
+            if element is not None:
+                _set_border_element_single(element, color=color, size=size, space=space)
+
+
+def _normalize_table_borders_preserve_geometry(table, *, color="000000", size="4", space="0") -> None:
+    """
+    Border-only cleanup for preserve-mode tables.
+
+    It removes cell spacing and normalizes visible border style, but intentionally
+    avoids width/layout/topology nodes such as tblGrid, gridCol, tcW, gridSpan,
+    vMerge, row heights, and tblCellMar.
+    """
+    tblPr = _get_or_add_tbl_pr(table)
+
+    tblCellSpacing = tblPr.find(qn("w:tblCellSpacing"))
+    if tblCellSpacing is not None:
+        tblPr.remove(tblCellSpacing)
+
+    for row in table.rows:
+        trPr = row._tr.trPr
+        if trPr is None:
+            continue
+        trCellSpacing = trPr.find(qn("w:tblCellSpacing"))
+        if trCellSpacing is not None:
+            trPr.remove(trCellSpacing)
+
+    _ensure_tbl_borders_single(table, color=color, size=size, space=space)
+    _normalize_existing_cell_borders_single(table, color=color, size=size, space=space)
+
+
 def _safe_formatter_table_geometry_policy(table) -> str:
     """
     Classify table geometry before Phase 1 width/border normalization.
@@ -3099,11 +3255,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
     if _safe_formatter_preserve_table_geometry(table):
         return
 
-    tbl = table._tbl
-    tblPr = tbl.tblPr
-    if tblPr is None:
-        tblPr = OxmlElement("w:tblPr")
-        tbl.insert(0, tblPr)
+    tblPr = _get_or_add_tbl_pr(table)
 
     # Убираем style/look-метаданные таблицы
     for tag in (
@@ -3138,21 +3290,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
     if node is not None:
         tblPr.remove(node)
 
-    tblBorders = tblPr.find(qn("w:tblBorders"))
-    if tblBorders is None:
-        tblBorders = OxmlElement("w:tblBorders")
-        tblPr.append(tblBorders)
-
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        element = tblBorders.find(qn(f"w:{edge}"))
-        if element is None:
-            element = OxmlElement(f"w:{edge}")
-            tblBorders.append(element)
-
-        element.set(qn("w:val"), "single")
-        element.set(qn("w:sz"), size)
-        element.set(qn("w:space"), space)
-        element.set(qn("w:color"), color)
+    _ensure_tbl_borders_single(table, color=color, size=size, space=space)
 
     # Убираем row-level overrides и row-level spacing, если они приехали из исходника.
     for row in table.rows:
@@ -3181,6 +3319,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 
 def apply_table_borders(table):
     if _safe_formatter_preserve_table_geometry(table):
+        _normalize_table_borders_preserve_geometry(table, size="4")
         return
 
     # Один источник истины для рамок — tblBorders на уровне таблицы.
@@ -3453,10 +3592,9 @@ def ensure_all_table_rows_cant_split(document):
 def format_tables(document):
     for table in document.tables:
         preserve_geometry = _safe_formatter_preserve_table_geometry(table)
+        apply_table_borders(table)
 
         if not preserve_geometry:
-            apply_table_borders(table)
-
             try:
                 table.autofit = False
             except Exception:

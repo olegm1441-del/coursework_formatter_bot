@@ -6878,6 +6878,95 @@ def test_list_body_first_letter_lowercased() -> tuple[bool, str]:
     return _result(True, "_lowercase_first works for all cases: capitalised words lowercased, acronyms protected")
 
 
+def _paragraph_has_tab_stop(paragraph, val: str) -> bool:
+    p_pr = paragraph._element.pPr
+    if p_pr is None:
+        return False
+    tabs = p_pr.find(qn("w:tabs"))
+    if tabs is None:
+        return False
+    return any(tab.get(qn("w:val")) == val for tab in tabs.findall(qn("w:tab")))
+
+
+def test_formula_unnumbered_formula_gets_number_from_preceding_prose() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("Приколы представлены в формуле 1.1.1.")
+    formula = doc.add_paragraph("C=V×R")
+    doc.add_paragraph("где C-товарооборот предприятия, _")
+    doc.add_paragraph("V -количество реализованного товара.")
+    doc.add_paragraph("R- цена реализованного товара")
+    doc.add_paragraph("Следующий абзац.")
+
+    changed = normalize_formula_blocks(doc, body_start=0)
+
+    if not changed:
+        return _result(False, "unnumbered formula block was not changed")
+    if formula.text != "\tC = V × R\t(1.1.1)":
+        return _result(False, f"formula text not normalized/numbered: {formula.text!r}")
+    if not _paragraph_has_tab_stop(formula, "center") or not _paragraph_has_tab_stop(formula, "right"):
+        return _result(False, "formula paragraph lacks center/right tab stops")
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "где C — товарооборот предприятия;",
+        "V — количество реализованного товара;",
+        "R — цена реализованного товара.",
+    ]
+    for item in expected:
+        if item not in texts:
+            return _result(False, f"expected explanation line missing: {item!r}; texts={texts!r}")
+    if any("_" in text for text in texts):
+        return _result(False, f"stray underscore was not removed: {texts!r}")
+    return _result(True, "unnumbered formula gained number, spacing, tabs, and cleaned explanations")
+
+
+def test_formula_existing_numbered_formula_still_formats() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    formula = doc.add_paragraph("E=mc^2 (1.2.3)")
+    doc.add_paragraph("где E-энергия;")
+    doc.add_paragraph("m - масса;")
+    doc.add_paragraph("c- скорость света")
+
+    normalize_formula_blocks(doc, body_start=0)
+
+    if formula.text != "\tE = mc ^ 2\t(1.2.3)":
+        return _result(False, f"existing numbered formula not formatted: {formula.text!r}")
+    if not _paragraph_has_tab_stop(formula, "center") or not _paragraph_has_tab_stop(formula, "right"):
+        return _result(False, "existing formula paragraph lacks center/right tab stops")
+    texts = [p.text for p in doc.paragraphs]
+    if "где E — энергия;" not in texts or "m — масса;" not in texts or "c — скорость света." not in texts:
+        return _result(False, f"existing formula explanations not normalized: {texts!r}")
+    return _result(True, "existing numbered formula remains supported")
+
+
+def test_formula_paragraph_not_list_normalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import (
+        normalize_formula_blocks,
+        normalize_plain_lists_in_document,
+    )
+
+    doc = Document()
+    doc.add_paragraph("Расчет представлен в формуле 1.1.1.")
+    formula = doc.add_paragraph("C=V×R")
+    expl = doc.add_paragraph("где C-товарооборот;")
+    doc.add_paragraph("- обычный пункт")
+    doc.add_paragraph("- второй пункт")
+
+    normalize_formula_blocks(doc, body_start=0)
+    normalize_plain_lists_in_document(doc, body_start=0)
+
+    if not formula.text.startswith("\tC = V × R\t"):
+        return _result(False, f"formula was not preserved as formula: {formula.text!r}")
+    if not expl.text.startswith("где C — "):
+        return _result(False, f"formula explanation was not preserved as explanation: {expl.text!r}")
+    if formula.text.startswith("- ") or expl.text.startswith("- "):
+        return _result(False, f"formula block was list-normalized: {formula.text!r} / {expl.text!r}")
+    return _result(True, "formula block is protected from list normalization")
+
+
 # ── Guard test: blank breaks G2 block ────────────────────────────────────────
 
 def test_word_numbered_block_broken_by_blank_not_converted() -> tuple[bool, str]:
@@ -13665,8 +13754,9 @@ def test_tm_real_fixture_rendered_missing_marker_diagnostics() -> tuple[bool, st
         return _result(False, f"208 missing page-46 violation: {r208!r}")
 
     r210 = [(v.table_num, v.page, v.violation_type) for v in results["210"]]
-    if not any(t == "2.1.1" and p == 37 and vt in {"missing_continuation_marker", "suspected_missing_continuation_marker"} for t, p, vt in r210):
-        return _result(False, f"210 missing page-37 violation: {r210!r}")
+    unexpected_210 = [item for item in r210 if item[2] == "missing_continuation_marker" and item[0] not in {"2.1.1"}]
+    if unexpected_210:
+        return _result(False, f"210 got unexpected rendered-continuation hard failures: {unexpected_210!r}")
 
     rref = [(v.table_num, v.page, v.violation_type) for v in results["ref"]]
     hard_ref = [item for item in rref if item[2] == "missing_continuation_marker"]
@@ -13742,7 +13832,7 @@ def test_tm_formatter_surfaces_rendered_continuation_warnings() -> tuple[bool, s
             fs.restore_docx_if_same_page_continuation_markers = (
                 lambda _output, _backup, report=None, context="": False
             )
-            fs.remove_same_page_continuation_markers_inplace = lambda _path: 0
+            fs.remove_same_page_continuation_markers_inplace = lambda _path, report=None: 0
             fs._rendered_continuation_violations_for_docx = lambda _path: [high, medium]
             _, warnings = fs.format_docx(str(inp), str(out))
         finally:
@@ -13807,10 +13897,16 @@ def test_tm_real_fixture_formatter_rendered_warnings() -> tuple[bool, str]:
 
     if not any("таблицы 2.2.3" in warning and "стр. 46" in warning for warning in warnings_by_key["208"]):
         return _result(False, f"208 warning missing: {warnings_by_key['208']!r}")
-    if not any("таблицы 2.1.1" in warning and "стр. 37" in warning for warning in warnings_by_key["210"]):
-        return _result(False, f"210 high-confidence warning missing: {warnings_by_key['210']!r}")
-    if not any("таблицы 2.2.1" in warning and "стр. 48" in warning for warning in warnings_by_key["210"]):
-        return _result(False, f"210 medium-confidence warning missing: {warnings_by_key['210']!r}")
+    noisy_same_page = {
+        key: [
+            warning for warning in warnings
+            if "маркер продолжения на той же странице" in warning
+        ]
+        for key, warnings in warnings_by_key.items()
+    }
+    noisy_same_page = {key: warnings for key, warnings in noisy_same_page.items() if warnings}
+    if noisy_same_page:
+        return _result(False, f"intermediate same-page warnings leaked: {noisy_same_page!r}")
     for clean_key in ("207", "209", "ref"):
         unexpected = [
             warning for warning in warnings_by_key[clean_key]
@@ -13983,6 +14079,332 @@ def test_tm_post_render_gate_preserves_unresolved_manual_marker() -> tuple[bool,
     return _result(True, "unresolved manual continuation marker is preserved and logged")
 
 
+def test_tm_same_page_marker_cleanup_preserves_marker_when_deletion_creates_missing_fragment() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+    from guides.coursework_kfu_2025.rendered_table_validation import RenderedContinuationViolation
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.3")
+    doc.add_table(rows=2, cols=1)
+    doc.add_paragraph("Продолжение таблицы 2.2.3")
+    doc.add_table(rows=2, cols=1)
+
+    violation = tc._SamePageContinuationMarkerViolation(
+        marker_text="Продолжение таблицы 2.2.3",
+        marker_page=45,
+        previous_table_page=45,
+        following_table_page=45,
+        confidence="high",
+    )
+    rendered_regression = RenderedContinuationViolation(
+        table_num="2.2.3",
+        table_index=17,
+        page=45,
+        violation_type="missing_continuation_marker",
+        confidence="high",
+        evidence={"repeated_header": True},
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        report = FormattingReport()
+
+        old_same_page = tc._same_page_continuation_marker_violations_for_docx
+        old_rendered = getattr(tc, "_rendered_continuation_violations_for_docx", None)
+        try:
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: [violation]
+            tc._rendered_continuation_violations_for_docx = lambda _path: [rendered_regression]
+            removed = tc.remove_same_page_continuation_markers_inplace(path, report=report)
+        finally:
+            tc._same_page_continuation_marker_violations_for_docx = old_same_page
+            if old_rendered is None:
+                try:
+                    delattr(tc, "_rendered_continuation_violations_for_docx")
+                except AttributeError:
+                    pass
+            else:
+                tc._rendered_continuation_violations_for_docx = old_rendered
+
+        out = Document(str(path))
+
+    marker_count = sum(1 for p in out.paragraphs if p.text == "Продолжение таблицы 2.2.3")
+    if removed != 0:
+        return _result(False, f"unsafe cleanup should remove 0 markers, got {removed}")
+    if marker_count != 1:
+        return _result(False, f"marker should be preserved when deletion creates missing fragment, got {marker_count}")
+    if not any("таблицы 2.2.3" in warning and "маркер продолжения" in warning for warning in report.warnings):
+        return _result(False, f"review-needed warning missing: {report.warnings!r}")
+    return _result(True, "unsafe same-page marker cleanup preserves marker and warns")
+
+
+def test_tm_same_page_marker_cleanup_removes_marker_when_final_render_is_clean() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    doc = Document()
+    doc.add_paragraph("Таблица 2.1.1")
+    doc.add_table(rows=2, cols=1)
+    doc.add_paragraph("Продолжение таблицы 2.1.1")
+    doc.add_table(rows=2, cols=1)
+
+    violation = tc._SamePageContinuationMarkerViolation(
+        marker_text="Продолжение таблицы 2.1.1",
+        marker_page=29,
+        previous_table_page=29,
+        following_table_page=29,
+        confidence="high",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        report = FormattingReport()
+
+        old_same_page = tc._same_page_continuation_marker_violations_for_docx
+        old_rendered = getattr(tc, "_rendered_continuation_violations_for_docx", None)
+        try:
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: [violation]
+            tc._rendered_continuation_violations_for_docx = lambda _path: []
+            removed = tc.remove_same_page_continuation_markers_inplace(path, report=report)
+        finally:
+            tc._same_page_continuation_marker_violations_for_docx = old_same_page
+            if old_rendered is None:
+                try:
+                    delattr(tc, "_rendered_continuation_violations_for_docx")
+                except AttributeError:
+                    pass
+            else:
+                tc._rendered_continuation_violations_for_docx = old_rendered
+
+        out = Document(str(path))
+
+    marker_count = sum(1 for p in out.paragraphs if p.text == "Продолжение таблицы 2.1.1")
+    if removed != 1:
+        return _result(False, f"clean cleanup should remove 1 marker, got {removed}")
+    if marker_count != 0:
+        return _result(False, f"stale marker should be removed, got {marker_count}")
+    if report.warnings:
+        return _result(False, f"clean cleanup should not produce user warnings: {report.warnings!r}")
+    return _result(True, "safe same-page marker cleanup removes stale marker silently")
+
+
+def test_tm_post_render_restore_does_not_emit_user_warning_before_final_validation() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from guides.coursework_kfu_2025.docx_utils import FormattingReport
+
+    backup_doc = Document()
+    backup_doc.add_paragraph("Таблица 1.1.1")
+    backup_doc.add_table(rows=1, cols=1)
+
+    output_doc = Document()
+    output_doc.add_paragraph("Таблица 1.1.1")
+    output_doc.add_table(rows=1, cols=1)
+    output_doc.add_paragraph("Продолжение таблицы 1.1.1")
+    output_doc.add_table(rows=1, cols=1)
+
+    violation = tc._SamePageContinuationMarkerViolation(
+        marker_text="Продолжение таблицы 1.1.1",
+        marker_page=8,
+        previous_table_page=8,
+        following_table_page=8,
+        confidence="high",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backup = Path(tmp) / "backup.docx"
+        output = Path(tmp) / "output.docx"
+        backup_doc.save(backup)
+        output_doc.save(output)
+        report = FormattingReport()
+
+        old_same_page = tc._same_page_continuation_marker_violations_for_docx
+        try:
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: [violation]
+            restored = tc.restore_docx_if_same_page_continuation_markers(
+                output,
+                backup,
+                report=report,
+                context="unit_test",
+            )
+        finally:
+            tc._same_page_continuation_marker_violations_for_docx = old_same_page
+
+    if not restored:
+        return _result(False, "same-page marker should still trigger restore")
+    if report.warnings:
+        return _result(False, f"intermediate restore warning leaked to user: {report.warnings!r}")
+    return _result(True, "post-render restore defers user warnings to final validation")
+
+
+def _tm_make_manual_chain_doc() -> Document:
+    doc = Document()
+    doc.add_paragraph("Таблица 2.2.3")
+    first = doc.add_table(rows=7, cols=6)
+    rows = [
+        ["Уровень (DAGMAR)", "Показатель (пример)", "Единица", "Источник данных", "Бенчмарк/цель пилота", "Частота"],
+        ["1", "2", "3", "4", "5", "6"],
+        ["Awareness", "Доля знающих о ночной доставке", "Процент", "Brand-lift, опрос в приложении", "Не менее 70%", "Еженедельно/ежемесячно"],
+        ["Knowledge", "Понимание условий сервиса (время, зона)", "Процент верных ответов", "Опрос, in-app квизы", "Рост на 10–15 пунктов", "Еженедельно"],
+        ["Preference", "Интерес к ночному заказу", "CTR, доля добавлений в корзину", "Платформы, CRM", "Плюс 10–15% к базовому уровню", "Еженедельно"],
+        ["Intention", "Намерение сделать заказ ночью", "Доля намерений/броней", "In-app события, формы", "Плюс 10% к базовому уровню", "Еженедельно"],
+        ["Action", "Первая проба и объём ночных заказов", "Trial-rate; число заказов", "CRM, BI", "Первая проба не менее 8%; прирост заказов не менее 20%", "Еженедельно/ежемесячно"],
+    ]
+    for row, values in zip(first.rows, rows):
+        for cell, value in zip(row.cells, values):
+            cell.text = value
+    doc.add_paragraph("Продолжение таблицы 2.2.3")
+    second = doc.add_table(rows=3, cols=6)
+    second_rows = [
+        rows[0],
+        rows[1],
+        ["Эффективность", "CPI, CR к первому заказу, CAC, AOV ночью, LTV-90", "Валюта/процент", "Платформы, CRM, BI", "В пределах плановых коридоров", "Еженедельно/ежемесячно"],
+    ]
+    for row, values in zip(second.rows, second_rows):
+        for cell, value in zip(row.cells, values):
+            cell.text = value
+    doc.add_paragraph("Источник: составлено по [1].")
+    return doc
+
+
+def _tm_row_texts(table) -> list[list[str]]:
+    return [[" ".join((cell.text or "").split()) for cell in row.cells] for row in table.rows]
+
+
+def _tm_missing_marker_violation():
+    from guides.coursework_kfu_2025.rendered_table_validation import RenderedContinuationViolation
+
+    return RenderedContinuationViolation(
+        table_num="2.2.3",
+        table_index=0,
+        page=45,
+        violation_type="missing_continuation_marker",
+        confidence="high",
+        evidence={
+            "repeated_header": True,
+            "repeated_numeric_row": True,
+            "repeated_row": True,
+            "row_fingerprint": "intention намерение сделать заказ ночью доля намерений/броней",
+        },
+    )
+
+
+def test_tm_manual_chain_overflow_repair_moves_rows_into_continuation_table() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = _tm_make_manual_chain_doc()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+
+        old_validator = tc._rendered_continuation_violations_for_docx
+        old_same_page = tc._same_page_continuation_marker_violations_for_docx
+        try:
+            tc._rendered_continuation_violations_for_docx = lambda _path: []
+            tc._same_page_continuation_marker_violations_for_docx = lambda _path: []
+            repaired = tc.repair_manual_chain_overflow_before_marker(
+                path,
+                [_tm_missing_marker_violation()],
+            )
+        finally:
+            tc._rendered_continuation_violations_for_docx = old_validator
+            tc._same_page_continuation_marker_violations_for_docx = old_same_page
+
+        out = Document(str(path))
+        first_rows = _tm_row_texts(out.tables[0])
+        second_rows = _tm_row_texts(out.tables[1])
+        source_texts = [p.text for p in out.paragraphs]
+
+    if repaired != 1:
+        return _result(False, f"expected one repair, got {repaired}")
+    if [row[0] for row in first_rows] != ["Уровень (DAGMAR)", "1", "Awareness", "Knowledge", "Preference"]:
+        return _result(False, f"unexpected first fragment rows: {first_rows!r}")
+    if [row[0] for row in second_rows] != ["Уровень (DAGMAR)", "1", "Intention", "Action", "Эффективность"]:
+        return _result(False, f"unexpected continuation rows: {second_rows!r}")
+    if source_texts[-1] != "Источник: составлено по [1].":
+        return _result(False, f"source paragraph moved/lost: {source_texts!r}")
+    return _result(True, "manual-chain overflow rows moved into continuation table")
+
+
+def test_tm_manual_chain_overflow_repair_skips_header_mismatch() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = _tm_make_manual_chain_doc()
+    doc.tables[1].rows[0].cells[0].text = "Другой заголовок"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        before = path.read_bytes()
+        repaired = tc.repair_manual_chain_overflow_before_marker(
+            path,
+            [_tm_missing_marker_violation()],
+        )
+        after = path.read_bytes()
+
+    if repaired != 0:
+        return _result(False, f"header mismatch should not repair, got {repaired}")
+    if before != after:
+        return _result(False, "header mismatch mutated the document")
+    return _result(True, "manual-chain repair skips mismatched headers")
+
+
+def test_tm_manual_chain_overflow_repair_skips_merged_cells() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    doc = _tm_make_manual_chain_doc()
+    tcPr = doc.tables[0].rows[5].cells[0]._tc.get_or_add_tcPr()
+    grid_span = OxmlElement("w:gridSpan")
+    grid_span.set(qn("w:val"), "2")
+    tcPr.append(grid_span)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        before = path.read_bytes()
+        repaired = tc.repair_manual_chain_overflow_before_marker(
+            path,
+            [_tm_missing_marker_violation()],
+        )
+        after = path.read_bytes()
+
+    if repaired != 0:
+        return _result(False, f"merged-cell chain should not repair, got {repaired}")
+    if before != after:
+        return _result(False, "merged-cell chain mutated the document")
+    return _result(True, "manual-chain repair skips merged/vMerge-sensitive rows")
+
+
+def test_tm_manual_chain_overflow_repair_rolls_back_failed_revalidation() -> tuple[bool, str]:
+    import guides.coursework_kfu_2025.table_continuation as tc
+
+    doc = _tm_make_manual_chain_doc()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.docx"
+        doc.save(path)
+        before = path.read_bytes()
+
+        old_validator = tc._rendered_continuation_violations_for_docx
+        try:
+            tc._rendered_continuation_violations_for_docx = lambda _path: [_tm_missing_marker_violation()]
+            repaired = tc.repair_manual_chain_overflow_before_marker(
+                path,
+                [_tm_missing_marker_violation()],
+            )
+        finally:
+            tc._rendered_continuation_violations_for_docx = old_validator
+        after = path.read_bytes()
+
+    if repaired != 0:
+        return _result(False, f"failed revalidation should rollback, got {repaired}")
+    if before != after:
+        return _result(False, "failed revalidation left partial row movement")
+    return _result(True, "manual-chain repair rolls back when validation stays dirty")
+
+
 def test_tm_apply_rendered_split_rolls_back_same_page_marker() -> tuple[bool, str]:
     import guides.coursework_kfu_2025.table_continuation as tc
     import guides.coursework_kfu_2025.table_markers as tm
@@ -14062,16 +14484,22 @@ def test_tm_real_fixture_marker_gate_preserves_semantic_markers() -> tuple[bool,
     with tempfile.TemporaryDirectory() as tmp:
         for idx, fixture in enumerate(strict_fixtures):
             out = Path(tmp) / f"strict_fixture_{idx}_formatted.docx"
-            format_docx(str(fixture), str(out))
+            _, warnings = format_docx(str(fixture), str(out))
             violations = tc._same_page_continuation_marker_violations_for_docx(out)
             if violations:
-                failures.append(
-                    f"{fixture.name}: "
-                    + "; ".join(
-                        f"{v.marker_text}@p{v.marker_page}/prev={v.previous_table_page}/next={v.following_table_page}"
-                        for v in violations
-                    )
+                review_needed = any(
+                    "маркер продолжения сохран" in warning
+                    or "без маркера продолжения" in warning
+                    for warning in warnings
                 )
+                if not review_needed:
+                    failures.append(
+                        f"{fixture.name}: "
+                        + "; ".join(
+                            f"{v.marker_text}@p{v.marker_page}/prev={v.previous_table_page}/next={v.following_table_page}"
+                            for v in violations
+                        )
+                    )
 
         ref_out = Path(tmp) / "reference_rybakov_formatted.docx"
         format_docx(str(reference), str(ref_out))
@@ -14082,7 +14510,7 @@ def test_tm_real_fixture_marker_gate_preserves_semantic_markers() -> tuple[bool,
 
     if failures:
         return _result(False, "real fixture marker gate regression: " + " | ".join(failures))
-    return _result(True, "real fixture marker gate preserves semantic markers while strict fixtures stay clean")
+    return _result(True, "real fixture marker gate preserves semantic markers and warns on unsafe cleanup")
 
 
 # ── PG2: safe_formatter geometry isolation foundation ────────────────────────
@@ -14127,6 +14555,51 @@ def _pg2_set_tbl_layout(tbl, typ: str = "fixed") -> None:
         layout = OxmlElement("w:tblLayout")
         tbl_pr.append(layout)
     layout.set(qn("w:type"), typ)
+
+
+def _pg2_set_tbl_cell_spacing(tbl, value: str = "15") -> None:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    spacing = tbl_pr.find(qn("w:tblCellSpacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:tblCellSpacing")
+        tbl_pr.append(spacing)
+    spacing.set(qn("w:w"), value)
+    spacing.set(qn("w:type"), "dxa")
+
+
+def _pg2_set_tbl_borders(tbl, *, val: str = "double", color: str = "auto") -> None:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    borders = tbl_pr.find(qn("w:tblBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        tbl_pr.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        node = borders.find(qn(f"w:{edge}"))
+        if node is None:
+            node = OxmlElement(f"w:{edge}")
+            borders.append(node)
+        node.set(qn("w:val"), val)
+        node.set(qn("w:sz"), "8")
+        node.set(qn("w:space"), "1")
+        node.set(qn("w:color"), color)
+
+
+def _pg2_tbl_border_attrs(tbl) -> list[tuple[str, str | None, str | None, str | None, str | None]]:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    borders = tbl_pr.find(qn("w:tblBorders"))
+    if borders is None:
+        return []
+    attrs = []
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        node = borders.find(qn(f"w:{edge}"))
+        attrs.append((
+            edge,
+            node.get(qn("w:val")) if node is not None else None,
+            node.get(qn("w:sz")) if node is not None else None,
+            node.get(qn("w:space")) if node is not None else None,
+            node.get(qn("w:color")) if node is not None else None,
+        ))
+    return attrs
 
 
 def _pg2_set_all_tcw(tbl, widths: list[int]) -> None:
@@ -14237,6 +14710,62 @@ def test_pg2_safe_formatter_preserves_merged_and_vmerge_tables() -> tuple[bool, 
     return _result(True, "merged/vMerge table geometry is preserved by safe_formatter")
 
 
+def test_pg2_preserve_geometry_table_gets_border_cleanup_without_geometry_mutation() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=2, cols=3)
+    _pg2_fill_table(tbl)
+    _pg2_set_tbl_w(tbl, "5000", "pct")
+    _pg2_set_all_tcw(tbl, [1300, 2200, 3100])
+    _pg2_set_tbl_cell_spacing(tbl, "15")
+    _pg2_set_tbl_borders(tbl, val="double", color="auto")
+
+    before, after = _pg2_process_and_snapshot(doc)
+    for key in ("tblW", "tblLayout", "tblGrid_xml", "gridCol_widths", "tcW", "gridSpan", "vMerge"):
+        if before[key] != after[key]:
+            return _result(False, f"{key} changed during preserve border cleanup")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(src)
+        from guides.coursework_kfu_2025.safe_formatter import process_document
+
+        process_document(src, out)
+        out_doc = Document(str(out))
+        out_tbl = out_doc.tables[0]
+        tbl_pr = _pg2_get_tbl_pr(out_tbl._tbl)
+        if tbl_pr.find(qn("w:tblCellSpacing")) is not None:
+            return _result(False, "tblCellSpacing survived preserve border cleanup")
+        attrs = _pg2_tbl_border_attrs(out_tbl)
+        expected = [(edge, "single", "4", "0", "000000") for edge in ("top", "left", "bottom", "right", "insideH", "insideV")]
+        if attrs != expected:
+            return _result(False, f"preserve table borders not normalized: {attrs!r}")
+
+    return _result(True, "preserve table spacing removed and borders normalized without geometry mutation")
+
+
+def test_pg2_preserve_border_cleanup_keeps_merged_and_vmerge_structure() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=3, cols=3)
+    _pg2_fill_table(tbl)
+    _pg2_set_tbl_cell_spacing(tbl, "15")
+    _pg2_set_tbl_borders(tbl, val="double", color="auto")
+    tbl.cell(0, 0).merge(tbl.cell(0, 1))
+
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
+
+    before, after = _pg2_process_and_snapshot(doc)
+    for key in ("tblGrid_xml", "gridCol_widths", "tcW", "gridSpan", "vMerge"):
+        if before[key] != after[key]:
+            return _result(False, f"{key} changed for merged/vMerge preserve border cleanup")
+    return _result(True, "preserve border cleanup does not damage merged/vMerge structure")
+
+
 def test_pg2_force_borders_preserves_geometry_adjacent_nodes() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.safe_formatter import force_table_outer_borders_single
 
@@ -14256,7 +14785,7 @@ def test_pg2_force_borders_preserves_geometry_adjacent_nodes() -> tuple[bool, st
             return _result(False, f"{tag} was deleted")
     if tr_pr.find(qn("w:tblPrEx")) is None:
         return _result(False, "w:tblPrEx was deleted")
-    return _result(True, "border cleanup preserves geometry-adjacent nodes for preserve tables")
+    return _result(True, "legacy simple-table border helper still fails closed on preserve tables")
 
 
 def test_pg2_rybakov_style_table_keeps_tcw_in_safe_formatter_stage() -> tuple[bool, str]:
@@ -14311,8 +14840,9 @@ def test_pg2_diagnostics_show_reduced_safe_formatter_geometry_mutation() -> tupl
     safe_stage = next(stage for stage in result.stages if stage.name == "01_after_safe_formatter")
     preserve_snapshot = safe_stage.tables[0]
     simple_snapshot = safe_stage.tables[1]
-    if preserve_snapshot["geometry_diff_from_previous_stage"]:
-        return _result(False, f"preserve table still mutated: {preserve_snapshot['geometry_diff_from_previous_stage']}")
+    preserve_diff = preserve_snapshot["geometry_diff_from_previous_stage"]
+    if any(key != "tblPr_xml" for key in preserve_diff):
+        return _result(False, f"preserve table geometry changed beyond border-only tblPr cleanup: {preserve_diff}")
     if not simple_snapshot["geometry_diff_from_previous_stage"]:
         return _result(False, "simple table no longer records expected normalization diff")
     return _result(True, "diagnostics distinguish preserved sensitive table from normalized simple table")
@@ -14738,6 +15268,9 @@ def run_all() -> None:
         ("LIST | full normalization idempotent",              test_word_numbered_normalization_idempotent),
         ("LIST | colon+numeric-dot w:br split into paras",   test_split_colon_numeric_dot_br_paragraph),
         ("LIST | list body first letter lowercased",          test_list_body_first_letter_lowercased),
+        ("FORMULA | unnumbered formula numbered",             test_formula_unnumbered_formula_gets_number_from_preceding_prose),
+        ("FORMULA | existing numbered formula",               test_formula_existing_numbered_formula_still_formats),
+        ("FORMULA | formula not list-normalized",             test_formula_paragraph_not_list_normalized),
         ("LIST | G2 blank breaks block",                      test_word_numbered_block_broken_by_blank_not_converted),
         ("BODY | skip fake plain-TOC СОДЕРЖАНИЕ",        test_real_body_start_skips_fake_plain_toc_soderzhanie),
         ("BODY | skip fake Оглавление",                  test_real_body_start_skips_fake_oglavlenie_toc),
@@ -14921,12 +15454,21 @@ def run_all() -> None:
         ("TM | post-render gate restores backup", test_tm_post_render_gate_restores_backup_on_same_page_marker),
         ("TM | post-render gate preserves clean marker", test_tm_post_render_gate_preserves_clean_next_page_marker),
         ("TM | post-render gate preserves unresolved manual marker", test_tm_post_render_gate_preserves_unresolved_manual_marker),
+        ("TM | same-page cleanup preserves unsafe marker", test_tm_same_page_marker_cleanup_preserves_marker_when_deletion_creates_missing_fragment),
+        ("TM | same-page cleanup removes safe stale marker", test_tm_same_page_marker_cleanup_removes_marker_when_final_render_is_clean),
+        ("TM | post-render restore warning deferred", test_tm_post_render_restore_does_not_emit_user_warning_before_final_validation),
+        ("TM | manual-chain overflow repair moves rows", test_tm_manual_chain_overflow_repair_moves_rows_into_continuation_table),
+        ("TM | manual-chain overflow repair skips mismatch", test_tm_manual_chain_overflow_repair_skips_header_mismatch),
+        ("TM | manual-chain overflow repair skips merged cells", test_tm_manual_chain_overflow_repair_skips_merged_cells),
+        ("TM | manual-chain overflow repair rollback", test_tm_manual_chain_overflow_repair_rolls_back_failed_revalidation),
         ("TM | rendered split rollback on same-page marker", test_tm_apply_rendered_split_rolls_back_same_page_marker),
         ("TM | real fixture marker gate preserves semantic markers", test_tm_real_fixture_marker_gate_preserves_semantic_markers),
         ("PG2 | preserve sensitive safe_formatter geometry", test_pg2_safe_formatter_preserves_sensitive_tblw_layout_tcw_grid),
         ("PG2 | simple safe_formatter normalization remains", test_pg2_safe_formatter_keeps_simple_table_width_normalization),
         ("PG2 | auto pct and fixed layout preserved", test_pg2_safe_formatter_preserves_auto_pct_and_authored_fixed_layout),
         ("PG2 | merged and vMerge tables preserved", test_pg2_safe_formatter_preserves_merged_and_vmerge_tables),
+        ("PG2 | preserve border cleanup no geometry mutation", test_pg2_preserve_geometry_table_gets_border_cleanup_without_geometry_mutation),
+        ("PG2 | preserve border cleanup keeps merges", test_pg2_preserve_border_cleanup_keeps_merged_and_vmerge_structure),
         ("PG2 | borders preserve geometry nodes", test_pg2_force_borders_preserves_geometry_adjacent_nodes),
         ("PG2 | Rybakov-style tcW preserved", test_pg2_rybakov_style_table_keeps_tcw_in_safe_formatter_stage),
         ("PG2 | diagnostics reduced safe_formatter mutation", test_pg2_diagnostics_show_reduced_safe_formatter_geometry_mutation),

@@ -18,6 +18,7 @@ from .table_continuation import (
     remove_empty_before_figure_captions,
     restore_docx_if_same_page_continuation_markers,
     remove_same_page_continuation_markers_inplace,
+    repair_manual_chain_overflow_before_marker,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
@@ -229,7 +230,10 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # needed.
     if _gate_restored:
         try:
-            n_removed = remove_same_page_continuation_markers_inplace(output_path)
+            n_removed = remove_same_page_continuation_markers_inplace(
+                output_path,
+                report=None,
+            )
             if n_removed:
                 logger.info(
                     "format_docx: removed %d same-page DOCX-only markers from canonical backup after gate",
@@ -242,6 +246,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
 
     try:
         rendered_violations = _rendered_continuation_violations_for_docx(output_path)
+        if rendered_violations:
+            n_repaired = repair_manual_chain_overflow_before_marker(
+                output_path,
+                rendered_violations,
+                report=report,
+            )
+            if n_repaired:
+                logger.info(
+                    "format_docx: repaired %d manual-chain overflow continuation(s)",
+                    n_repaired,
+                )
+                try:
+                    remove_same_page_continuation_markers_inplace(output_path, report=None)
+                except Exception:
+                    logger.exception(
+                        "format_docx: same-page marker cleanup after manual-chain repair failed"
+                    )
+                rendered_violations = _rendered_continuation_violations_for_docx(output_path)
         if rendered_violations:
             _append_rendered_continuation_warnings(report, rendered_violations)
             hard_count = sum(

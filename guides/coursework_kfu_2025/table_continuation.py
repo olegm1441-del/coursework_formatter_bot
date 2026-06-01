@@ -2693,6 +2693,383 @@ def _same_page_continuation_marker_violations_for_docx(
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
 
+def _rendered_continuation_violations_for_docx(docx_path: Path):
+    pdf_path: Path | None = None
+    try:
+        from .rendered_table_validation import (
+            build_rendered_table_identities,
+            validate_rendered_continuations,
+        )
+
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        identities = build_rendered_table_identities(doc)
+        return validate_rendered_continuations(pdf_lines, identities)
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+
+def _rendered_continuation_deletion_regressions(docx_path: Path) -> list:
+    return [
+        violation
+        for violation in _rendered_continuation_violations_for_docx(Path(docx_path))
+        if violation.violation_type in {
+            "missing_continuation_marker",
+            "suspected_missing_continuation_marker",
+        }
+    ]
+
+
+def _remove_strict_continuation_marker_texts(docx_path: Path, marker_texts: set[str]) -> int:
+    doc = Document(str(docx_path))
+    body = doc.element.body
+
+    removed = 0
+    for child in list(body):
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag != "p":
+            continue
+        raw = "".join(
+            t.text or ""
+            for t in child.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+        ).strip()
+        if raw in marker_texts and _STRICT_CONTINUATION_MARKER_RE.match(raw):
+            body.remove(child)
+            removed += 1
+
+    if removed:
+        doc.save(str(docx_path))
+    return removed
+
+
+def _format_rendered_deletion_regressions(violations: list) -> str:
+    details = []
+    for violation in violations:
+        table_num = getattr(violation, "table_num", None) or f"#{getattr(violation, 'table_index', '?')}"
+        page = getattr(violation, "page", "?")
+        violation_type = getattr(violation, "violation_type", "?")
+        confidence = getattr(violation, "confidence", "?")
+        details.append(f"{table_num}@p{page}:{violation_type}:{confidence}")
+    return ";".join(details)
+
+
+def _warn_unsafe_same_page_marker_cleanup(
+    report: FormattingReport | None,
+    violations: list,
+) -> None:
+    if report is None:
+        return
+    seen: set[tuple[str, int, str]] = set()
+    for violation in violations:
+        table_num = getattr(violation, "table_num", None) or f"#{getattr(violation, 'table_index', '?')}"
+        page = int(getattr(violation, "page", 0) or 0)
+        violation_type = str(getattr(violation, "violation_type", ""))
+        key = (table_num, page, violation_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        if violation_type == "missing_continuation_marker":
+            report.warn(
+                f"Проверьте перенос таблицы {table_num}: "
+                f"маркер продолжения сохранён, потому что его удаление оставляет стр. {page} без маркера."
+            )
+        elif violation_type == "suspected_missing_continuation_marker":
+            report.warn(
+                f"Проверьте возможный перенос таблицы {table_num}: "
+                f"маркер продолжения сохранён, потому что его удаление может оставить стр. {page} без маркера."
+            )
+
+
+def _repair_row_fingerprint(row_xml) -> str:
+    return " ".join(
+        _norm_match_text(text)
+        for text in _row_cell_texts(row_xml)
+        if _norm_match_text(text)
+    )
+
+
+def _repair_fingerprint_key(text: str) -> str:
+    cleaned = _norm_match_text(text)
+    cleaned = re.sub(r"\s*[-–—]\s*", "-", cleaned)
+    cleaned = re.sub(r"\s*/\s*", "/", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _repair_text_matches_row(row_xml, row_fingerprint: str) -> bool:
+    needle = _repair_fingerprint_key(row_fingerprint)
+    if not needle:
+        return False
+    row_fp = _repair_fingerprint_key(_repair_row_fingerprint(row_xml))
+    return bool(row_fp and (needle in row_fp or row_fp in needle))
+
+
+def _repair_table_has_unsafe_manual_chain_markup(tbl_xml) -> bool:
+    for tr in tbl_xml.findall(qn("w:tr")):
+        trPr = tr.find(qn("w:trPr"))
+        if trPr is not None and trPr.find(qn("w:trHeight")) is not None:
+            return True
+        for tc in tr.findall(qn("w:tc")):
+            tcPr = tc.find(qn("w:tcPr"))
+            if tcPr is None:
+                continue
+            if tcPr.find(qn("w:gridSpan")) is not None:
+                return True
+            if tcPr.find(qn("w:vMerge")) is not None:
+                return True
+    return False
+
+
+def _repair_paragraph_text(doc: Document, node) -> str:
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+    paragraph = para_by_xml.get(node)
+    if paragraph is not None:
+        return _norm_text(paragraph.text)
+    return _norm_text("".join(t.text or "" for t in node.findall(".//" + qn("w:t"))))
+
+
+def _manual_chain_after_table(
+    doc: Document,
+    table_index: int,
+    table_num: str,
+) -> tuple[object, int] | None:
+    if table_index < 0 or table_index >= len(doc.tables):
+        return None
+    first_tbl = doc.tables[table_index]._tbl
+    children = list(doc.element.body)
+    try:
+        pos = children.index(first_tbl)
+    except ValueError:
+        return None
+
+    expected_marker = f"Продолжение таблицы {table_num}"
+    marker_seen = False
+    next_table_index = table_index + 1
+    for node in children[pos + 1:]:
+        if node.tag == qn("w:p"):
+            text = _repair_paragraph_text(doc, node)
+            if not text:
+                continue
+            if not marker_seen:
+                if text == expected_marker and _STRICT_CONTINUATION_MARKER_RE.match(text):
+                    marker_seen = True
+                    continue
+                return None
+            return None
+        if node.tag == qn("w:tbl"):
+            if marker_seen and next_table_index < len(doc.tables) and doc.tables[next_table_index]._tbl is node:
+                return node, next_table_index
+            return None
+    return None
+
+
+def _manual_chain_overflow_boundary(
+    first_tbl,
+    second_tbl,
+    *,
+    row_fingerprint: str,
+) -> int | None:
+    col_count = _table_col_count(first_tbl)
+    if col_count <= 0 or _table_col_count(second_tbl) != col_count:
+        return None
+    first_rows = first_tbl.findall(qn("w:tr"))
+    second_rows = second_tbl.findall(qn("w:tr"))
+    if len(first_rows) < 4 or len(second_rows) < 3:
+        return None
+    if not _rows_match(first_rows[0], second_rows[0]):
+        return None
+    if not (_row_is_exact_numeric_row(first_rows[1], col_count) and _row_is_exact_numeric_row(second_rows[1], col_count)):
+        return None
+    if _repair_table_has_unsafe_manual_chain_markup(first_tbl):
+        return None
+    if _repair_table_has_unsafe_manual_chain_markup(second_tbl):
+        return None
+    for row_idx in range(2, len(first_rows)):
+        if _repair_text_matches_row(first_rows[row_idx], row_fingerprint):
+            if row_idx <= 2 or row_idx >= len(first_rows):
+                return None
+            return row_idx
+    return None
+
+
+def _move_manual_chain_rows(first_tbl, second_tbl, split_before_row: int) -> int:
+    first_rows = first_tbl.findall(qn("w:tr"))
+    second_rows = second_tbl.findall(qn("w:tr"))
+    moving = list(first_rows[split_before_row:])
+    if not moving or len(second_rows) < 2:
+        return 0
+    insert_after = second_rows[1]
+    insert_pos = second_tbl.index(insert_after) + 1
+    for row in moving:
+        first_tbl.remove(row)
+    for offset, row in enumerate(moving):
+        second_tbl.insert(insert_pos + offset, row)
+    return len(moving)
+
+
+def _target_rendered_violations(violations: list, table_num: str) -> list:
+    return [
+        violation
+        for violation in violations
+        if getattr(violation, "table_num", None) == table_num
+        and getattr(violation, "violation_type", None) in {
+            "missing_continuation_marker",
+            "suspected_missing_continuation_marker",
+        }
+    ]
+
+
+def _target_same_page_violations(violations: list[_SamePageContinuationMarkerViolation], table_num: str) -> list:
+    marker_text = f"Продолжение таблицы {table_num}"
+    return [
+        violation
+        for violation in violations
+        if violation.marker_text.strip() == marker_text
+    ]
+
+
+def _attempt_manual_chain_overflow_repair(
+    docx_path: Path,
+    violation,
+    *,
+    report: FormattingReport | None = None,
+) -> bool:
+    table_num = getattr(violation, "table_num", None)
+    table_index = int(getattr(violation, "table_index", -1))
+    violation_type = getattr(violation, "violation_type", None)
+    confidence = getattr(violation, "confidence", None)
+    evidence = getattr(violation, "evidence", {}) or {}
+    row_fingerprint = str(evidence.get("row_fingerprint") or "")
+    if (
+        not table_num
+        or violation_type != "missing_continuation_marker"
+        or confidence != "high"
+        or not row_fingerprint
+    ):
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="kpfu_manual_chain_repair_") as tmp:
+        candidate_path = Path(tmp) / Path(docx_path).name
+        shutil.copy2(docx_path, candidate_path)
+        doc = Document(str(candidate_path))
+        if table_index < 0 or table_index >= len(doc.tables):
+            return False
+        first_tbl = doc.tables[table_index]._tbl
+        caption_num = _find_caption_number_before_table(doc, first_tbl)
+        if caption_num != table_num:
+            return False
+        chain = _manual_chain_after_table(doc, table_index, table_num)
+        if chain is None:
+            return False
+        second_tbl, second_table_index = chain
+        boundary = _manual_chain_overflow_boundary(
+            first_tbl,
+            second_tbl,
+            row_fingerprint=row_fingerprint,
+        )
+        if boundary is None:
+            return False
+        if not _split_geometry_is_safe(
+            first_tbl,
+            table_index=table_index,
+            split_before_row=boundary,
+            log_prefix="manual_chain_overflow_repair_skip",
+        ):
+            return False
+
+        moved = _move_manual_chain_rows(first_tbl, second_tbl, boundary)
+        if moved <= 0:
+            return False
+        doc.save(str(candidate_path))
+
+        try:
+            rendered_after = _rendered_continuation_violations_for_docx(candidate_path)
+        except Exception as exc:
+            logger.info(
+                "manual_chain_overflow_repair_rollback table_num=%s table_index=%s reason=rendered_validation_failed error=%s",
+                table_num, table_index, exc,
+            )
+            if report is not None:
+                report.warn(
+                    f"Проверьте перенос таблицы {table_num}: автоматическая коррекция отменена, PDF-проверка не выполнена."
+                )
+            return False
+        if _target_rendered_violations(rendered_after, table_num):
+            logger.info(
+                "manual_chain_overflow_repair_rollback table_num=%s table_index=%s reason=rendered_violation_remains",
+                table_num, table_index,
+            )
+            if report is not None:
+                report.warn(
+                    f"Проверьте перенос таблицы {table_num}: автоматическая коррекция отменена, перенос всё ещё требует проверки."
+                )
+            return False
+        try:
+            same_page_after = _same_page_continuation_marker_violations_for_docx(candidate_path)
+        except Exception as exc:
+            logger.info(
+                "manual_chain_overflow_repair_rollback table_num=%s table_index=%s reason=same_page_validation_failed error=%s",
+                table_num, table_index, exc,
+            )
+            if report is not None:
+                report.warn(
+                    f"Проверьте перенос таблицы {table_num}: автоматическая коррекция отменена, проверка маркеров не выполнена."
+                )
+            return False
+        if _target_same_page_violations(same_page_after, table_num):
+            logger.info(
+                "manual_chain_overflow_repair_rollback table_num=%s table_index=%s reason=same_page_marker_remains",
+                table_num, table_index,
+            )
+            if report is not None:
+                report.warn(
+                    f"Проверьте перенос таблицы {table_num}: автоматическая коррекция отменена, маркер остался на той же странице."
+                )
+            return False
+
+        shutil.copy2(candidate_path, docx_path)
+        logger.info(
+            "manual_chain_overflow_repair_applied table_num=%s table_index=%s continuation_table_index=%s moved_rows=%s split_before_row=%s",
+            table_num, table_index, second_table_index, moved, boundary,
+        )
+        return True
+
+
+def repair_manual_chain_overflow_before_marker(
+    docx_path: Path,
+    violations: list,
+    *,
+    report: FormattingReport | None = None,
+) -> int:
+    """
+    Repair one narrow high-confidence manual-chain failure:
+
+    table A -> "Продолжение таблицы X" -> table B exists, but the rendered PDF
+    shows rows from table A spilling onto the next page before the marker.  Move
+    only the rows identified by the rendered validator's row fingerprint into
+    table B, after its numeric row.  The candidate DOCX is accepted only when
+    repeated PDF validation for the target table is clean.
+    """
+    repaired = 0
+    seen: set[tuple[str, int, int]] = set()
+    for violation in violations:
+        table_num = getattr(violation, "table_num", None)
+        table_index = int(getattr(violation, "table_index", -1))
+        page = int(getattr(violation, "page", 0) or 0)
+        key = (str(table_num or ""), table_index, page)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _attempt_manual_chain_overflow_repair(
+            Path(docx_path),
+            violation,
+            report=report,
+        ):
+            repaired += 1
+    return repaired
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
@@ -2722,11 +3099,6 @@ def restore_docx_if_same_page_continuation_markers(
         "post_render_same_page_marker_violation context=%s restored_backup=1 violations=%s",
         context, ";".join(details),
     )
-    if report is not None:
-        report.warn(
-            "Автоматическое разделение таблиц пропущено: обнаружен маркер "
-            "продолжения на той же странице. Таблицу нужно проверить вручную."
-        )
     try:
         remaining = _same_page_continuation_marker_violations_for_docx(Path(docx_path))
     except Exception as exc:
@@ -2744,7 +3116,11 @@ def restore_docx_if_same_page_continuation_markers(
     return True
 
 
-def remove_same_page_continuation_markers_inplace(docx_path: Path) -> int:
+def remove_same_page_continuation_markers_inplace(
+    docx_path: Path,
+    *,
+    report: FormattingReport | None = None,
+) -> int:
     """
     Render *docx_path*, find any "Продолжение таблицы" markers that land on the
     same page as both their preceding and following table segments, and remove
@@ -2772,32 +3148,37 @@ def remove_same_page_continuation_markers_inplace(docx_path: Path) -> int:
         return 0
 
     violation_texts = {v.marker_text.strip() for v in violations}
-    doc = Document(str(docx_path))
-    body = doc.element.body
+    with tempfile.TemporaryDirectory(prefix="kpfu_same_page_marker_cleanup_") as tmp:
+        candidate_path = Path(tmp) / Path(docx_path).name
+        shutil.copy2(docx_path, candidate_path)
+        removed = _remove_strict_continuation_marker_texts(candidate_path, violation_texts)
+        if not removed:
+            return 0
+        try:
+            regressions = _rendered_continuation_deletion_regressions(candidate_path)
+        except Exception as exc:
+            logger.info(
+                "remove_same_page_markers_preserved path=%s reason=rendered_validation_failed error=%s",
+                docx_path, exc,
+            )
+            return 0
+        if regressions:
+            logger.warning(
+                "remove_same_page_markers_preserved path=%s reason=rendered_continuation_regression violations=%s",
+                docx_path,
+                _format_rendered_deletion_regressions(regressions),
+            )
+            _warn_unsafe_same_page_marker_cleanup(report, regressions)
+            return 0
 
-    removed = 0
-    for child in list(body):
-        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-        if tag != "p":
-            continue
-        # Get text of the paragraph (concatenate all w:t elements)
-        raw = "".join(
-            t.text or ""
-            for t in child.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
-        ).strip()
-        if raw in violation_texts and _STRICT_CONTINUATION_MARKER_RE.match(raw):
-            body.remove(child)
-            removed += 1
+        shutil.copy2(candidate_path, docx_path)
+        for raw in sorted(violation_texts):
             logger.info("remove_same_page_markers: removed %r from %s", raw, docx_path)
-
-    if removed:
-        doc.save(str(docx_path))
         logger.info(
             "remove_same_page_markers_done path=%s removed=%d",
             docx_path, removed,
         )
-
-    return removed
+        return removed
 
 
 # E1 — Phase 3 marker-split candidate classification (logging-only, no behavior change).
