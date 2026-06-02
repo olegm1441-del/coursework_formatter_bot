@@ -6,12 +6,37 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Pt
 FORMULA_NUMBER_RE = re.compile(r"\((\d+\.\d+\.\d+|\d+\.\d+)\)\s*$")
 FORMULA_REFERENCE_RE = re.compile(
-    r"\bформул[аеуы]\s+(\d+\.\d+(?:\.\d+)?)\b",
+    r"\bформул(?:[аеуы])?\s+(\d+\.\d+(?:\.\d+)?)\b",
     re.IGNORECASE,
 )
 FORMULA_EXPLANATION_RE = re.compile(r"^\s*где\b", re.IGNORECASE)
 
 MATH_TOKEN_RE = re.compile(r"[=+\-*/×÷^(){}\[\]<>]|[A-Za-zА-Яа-яЁё]\s*=")
+FORMULA_LHS_RE = re.compile(r"^\s*[$\\[]?\s*[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_]*\s*=")
+INLINE_FORMULA_EXPLANATION_RE = re.compile(r"^(?P<expr>.+?)\s+где\b\s*(?P<explanation>.+)$", re.IGNORECASE)
+FORMULA_EXPLANATION_TERM_PATTERN = (
+    r"(?:[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_]{0,5}|\d(?:[\d\s]*\d)?(?:\s*(?:₽|руб\.?))?)"
+)
+
+
+def _strip_formula_trailing_comma(text: str) -> str:
+    return re.sub(r"\s*,\s*$", "", clean_spaces(text))
+
+
+def _looks_like_formula_expression(text: str) -> bool:
+    expr = _strip_formula_trailing_comma(text)
+    if not expr or len(expr) > 120:
+        return False
+    if not FORMULA_LHS_RE.search(expr):
+        return False
+    if not MATH_TOKEN_RE.search(expr):
+        return False
+
+    before_eq = expr.split("=", 1)[0]
+    # Ordinary prose false positives usually have several words before x=...
+    if len(re.findall(r"[A-Za-zА-Яа-яЁё]{2,}", before_eq)) > 1:
+        return False
+    return True
 
 
 def is_formula_paragraph_text(text: str) -> bool:
@@ -24,20 +49,14 @@ def is_formula_paragraph_text(text: str) -> bool:
 
     # До номера должен быть не обычный текст, а выражение
     left = FORMULA_NUMBER_RE.sub("", t).strip()
-    if len(left) > 120:
-        return False
-
-    # Формула должна содержать математический маркер
-    return bool(MATH_TOKEN_RE.search(left))
+    return _looks_like_formula_expression(left)
 
 
 def is_unnumbered_formula_paragraph_text(text: str) -> bool:
     t = clean_spaces(text)
     if not t or FORMULA_NUMBER_RE.search(t):
         return False
-    if len(t) > 120:
-        return False
-    return bool(MATH_TOKEN_RE.search(t))
+    return _looks_like_formula_expression(t)
 
 
 def is_formula_explanation_start(text: str) -> bool:
@@ -51,7 +70,7 @@ def is_formula_explanation_continuation(text: str) -> bool:
     if is_formula_explanation_start(t):
         return True
     # строка расшифровки символов: "V - ...", "R – ..."
-    return bool(re.match(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*\s*[-–—=]\s*.+$", t))
+    return bool(re.match(rf"^{FORMULA_EXPLANATION_TERM_PATTERN}\s*[-–—=]\s*.+$", t))
 
 def is_formula_block_paragraph_text(text: str) -> bool:
     """
@@ -80,27 +99,46 @@ def normalize_formula_explanation_text(text: str, is_first=False) -> str:
     t = re.sub(r"\s*,?\s*_\s*$", "", t)
 
     if is_first:
+        t = re.sub(r"^\s*где\b", "где", t, flags=re.IGNORECASE)
         t = re.sub(r"^\s*где\s*:\s*", "где ", t, flags=re.IGNORECASE)
         t = re.sub(r"^\s*где\s+", "где ", t, flags=re.IGNORECASE)
         t = re.sub(
-            r"^где\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*[-–—=]\s*",
-            r"где \1 — ",
+            rf"^где\s+({FORMULA_EXPLANATION_TERM_PATTERN})\s*[-–—=]\s*",
+            r"где \1 - ",
             t,
             flags=re.IGNORECASE,
         )
 
     # Нормализуем пробелы вокруг дефиса/тире после обозначения символа:
     # V- -> V – ; R –цена -> R – цена
-    t = re.sub(r"^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*)\s*[-–—=]\s*", r"\1 — ", t)
+    t = re.sub(rf"^({FORMULA_EXPLANATION_TERM_PATTERN})\s*[-–—=]\s*", r"\1 - ", t)
+    t = re.sub(
+        rf"([\s(,;])({FORMULA_EXPLANATION_TERM_PATTERN})\s*[-–—=]\s*",
+        r"\1\2 - ",
+        t,
+    )
 
     return t
 
 
 def _normalize_formula_expression(text: str) -> str:
-    expr = clean_spaces(text)
+    expr = _strip_formula_trailing_comma(text)
+    expr = expr.replace("−", "-").replace("–", "-").replace("—", "-")
     expr = re.sub(r"\s*([=+\-*/×÷^])\s*", r" \1 ", expr)
     expr = re.sub(r"\s+", " ", expr).strip()
     return expr
+
+
+def _split_inline_formula_explanation_text(text: str) -> tuple[str, str] | None:
+    cleaned = clean_spaces(text)
+    match = INLINE_FORMULA_EXPLANATION_RE.match(cleaned)
+    if not match:
+        return None
+    expr = clean_spaces(match.group("expr"))
+    explanation = clean_spaces(match.group("explanation"))
+    if not _looks_like_formula_expression(FORMULA_NUMBER_RE.sub("", expr)):
+        return None
+    return expr, f"где {explanation}"
 
 
 def _normalize_formula_explanation_punctuation(text: str, *, is_last: bool) -> str:
@@ -121,6 +159,38 @@ def _find_formula_number_from_preceding_prose(paragraphs, idx: int, body_start: 
                 return match.group(1)
         j -= 1
     return None
+
+
+def _find_current_heading2_formula_prefix(paragraphs, idx: int, body_start: int) -> str | None:
+    j = idx - 1
+    while j >= body_start:
+        text = clean_spaces(paragraphs[j].text)
+        if text:
+            parsed_h2 = parse_heading2(text)
+            if parsed_h2:
+                return f'{parsed_h2["chapter_num"]}.{parsed_h2["paragraph_num"]}'
+            if parse_heading1(text):
+                return None
+        j -= 1
+    return None
+
+
+def _next_formula_number_from_heading_context(paragraphs, idx: int, body_start: int) -> str | None:
+    prefix = _find_current_heading2_formula_prefix(paragraphs, idx, body_start)
+    if not prefix:
+        return None
+    max_seen = 0
+    number_re = re.compile(rf"^\(?{re.escape(prefix)}\.(\d+)\)?$")
+    for j in range(body_start, idx):
+        text = clean_spaces(paragraphs[j].text)
+        match = FORMULA_NUMBER_RE.search(text)
+        if not match:
+            continue
+        number = match.group(1)
+        number_match = number_re.match(number)
+        if number_match:
+            max_seen = max(max_seen, int(number_match.group(1)))
+    return f"{prefix}.{max_seen + 1}"
 
 
 def _next_nonempty_paragraph_starts_formula_explanation(paragraphs, idx: int) -> bool:
@@ -144,7 +214,14 @@ def split_formula_explanations_in_paragraph(paragraph, is_first=False):
         return []
 
     has_trailing_semicolon = text.rstrip().endswith(";")
-    raw_parts = [clean_spaces(x) for x in text.split(";") if clean_spaces(x)]
+    raw_parts = [
+        re.sub(r"\s*[,;]\s*$", "", clean_spaces(x))
+        for x in re.split(
+            rf"[;,]\s*(?={FORMULA_EXPLANATION_TERM_PATTERN}\s*[-–—=])",
+            text,
+        )
+        if clean_spaces(x)
+    ]
     if not raw_parts:
         replace_paragraph_text(paragraph, text)
         return []
@@ -177,15 +254,14 @@ def format_formula_paragraph(paragraph):
     number = m.group(0)
     expr = _normalize_formula_expression(text[:m.start()].rstrip())
 
-    replace_paragraph_text(paragraph, f"\t{expr}\t{number}")
+    replace_paragraph_text(paragraph, f"{expr},\t{number}")
 
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    paragraph.paragraph_format.first_line_indent = Cm(0)
+    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
 
     tabs = paragraph.paragraph_format.tab_stops
     tabs.clear_all()
-    tabs.add_tab_stop(Cm(8), WD_TAB_ALIGNMENT.CENTER)
     tabs.add_tab_stop(Cm(16), WD_TAB_ALIGNMENT.RIGHT)
 
     for run in paragraph.runs:
@@ -194,7 +270,7 @@ def format_formula_paragraph(paragraph):
 def format_formula_explanation_paragraph(paragraph, is_first=False):
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    paragraph.paragraph_format.first_line_indent = Cm(0)
+    paragraph.paragraph_format.first_line_indent = Cm(FIRST_LINE_INDENT_CM)
 
     text = normalize_formula_explanation_text(paragraph.text, is_first=is_first)
     replace_paragraph_text(paragraph, text)
@@ -212,12 +288,23 @@ def normalize_formula_blocks(document, body_start):
         p = paragraphs[idx]
         text = clean_spaces(p.text)
 
+        inline_formula_explanation = _split_inline_formula_explanation_text(text)
+        if inline_formula_explanation:
+            formula_text, explanation_text = inline_formula_explanation
+            replace_paragraph_text(p, formula_text)
+            insert_paragraph_after(p, explanation_text)
+            text = clean_spaces(p.text)
+            changed = True
+            paragraphs = document.paragraphs
+
         if not is_formula_paragraph_text(text):
             if (
                 is_unnumbered_formula_paragraph_text(text)
                 and _next_nonempty_paragraph_starts_formula_explanation(paragraphs, idx)
             ):
                 formula_number = _find_formula_number_from_preceding_prose(paragraphs, idx, body_start)
+                if not formula_number:
+                    formula_number = _next_formula_number_from_heading_context(paragraphs, idx, body_start)
                 if formula_number:
                     replace_paragraph_text(p, f"{text} ({formula_number})")
                     text = clean_spaces(p.text)
@@ -280,6 +367,13 @@ def normalize_formula_blocks(document, body_start):
                 first_expl = False
                 j += 1 + len(inserted)
                 continue
+
+            if (
+                not first_expl
+                and is_unnumbered_formula_paragraph_text(t)
+                and _next_nonempty_paragraph_starts_formula_explanation(paragraphs, j)
+            ):
+                break
 
             if not first_expl and is_formula_explanation_continuation(t):
                 inserted = split_formula_explanations_in_paragraph(paragraphs[j], is_first=False)

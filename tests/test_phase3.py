@@ -6903,15 +6903,15 @@ def test_formula_unnumbered_formula_gets_number_from_preceding_prose() -> tuple[
 
     if not changed:
         return _result(False, "unnumbered formula block was not changed")
-    if formula.text != "\tC = V × R\t(1.1.1)":
+    if formula.text != "C = V × R,\t(1.1.1)":
         return _result(False, f"formula text not normalized/numbered: {formula.text!r}")
-    if not _paragraph_has_tab_stop(formula, "center") or not _paragraph_has_tab_stop(formula, "right"):
-        return _result(False, "formula paragraph lacks center/right tab stops")
+    if not _paragraph_has_tab_stop(formula, "right"):
+        return _result(False, "formula paragraph lacks right tab stop")
     texts = [p.text for p in doc.paragraphs]
     expected = [
-        "где C — товарооборот предприятия;",
-        "V — количество реализованного товара;",
-        "R — цена реализованного товара.",
+        "где C - товарооборот предприятия;",
+        "V - количество реализованного товара;",
+        "R - цена реализованного товара.",
     ]
     for item in expected:
         if item not in texts:
@@ -6932,12 +6932,12 @@ def test_formula_existing_numbered_formula_still_formats() -> tuple[bool, str]:
 
     normalize_formula_blocks(doc, body_start=0)
 
-    if formula.text != "\tE = mc ^ 2\t(1.2.3)":
+    if formula.text != "E = mc ^ 2,\t(1.2.3)":
         return _result(False, f"existing numbered formula not formatted: {formula.text!r}")
-    if not _paragraph_has_tab_stop(formula, "center") or not _paragraph_has_tab_stop(formula, "right"):
-        return _result(False, "existing formula paragraph lacks center/right tab stops")
+    if not _paragraph_has_tab_stop(formula, "right"):
+        return _result(False, "existing formula paragraph lacks right tab stop")
     texts = [p.text for p in doc.paragraphs]
-    if "где E — энергия;" not in texts or "m — масса;" not in texts or "c — скорость света." not in texts:
+    if "где E - энергия;" not in texts or "m - масса;" not in texts or "c - скорость света." not in texts:
         return _result(False, f"existing formula explanations not normalized: {texts!r}")
     return _result(True, "existing numbered formula remains supported")
 
@@ -6958,13 +6958,201 @@ def test_formula_paragraph_not_list_normalized() -> tuple[bool, str]:
     normalize_formula_blocks(doc, body_start=0)
     normalize_plain_lists_in_document(doc, body_start=0)
 
-    if not formula.text.startswith("\tC = V × R\t"):
+    if not formula.text.startswith("C = V × R,\t"):
         return _result(False, f"formula was not preserved as formula: {formula.text!r}")
-    if not expl.text.startswith("где C — "):
+    if not expl.text.startswith("где C - "):
         return _result(False, f"formula explanation was not preserved as explanation: {expl.text!r}")
     if formula.text.startswith("- ") or expl.text.startswith("- "):
         return _result(False, f"formula block was list-normalized: {formula.text!r} / {expl.text!r}")
     return _result(True, "formula block is protected from list normalization")
+
+
+def test_formula_unnumbered_formula_numbered_from_current_heading2_context() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    doc.add_paragraph("Текст перед формулой.")
+    formula = doc.add_paragraph("C=V×R")
+    doc.add_paragraph("где C-товарооборот;")
+    doc.add_paragraph("V-количество")
+    doc.add_paragraph("R-цена")
+
+    changed = normalize_formula_blocks(doc, body_start=0)
+
+    if not changed:
+        return _result(False, "formula without prose reference was not changed")
+    if formula.text != "C = V × R,\t(1.1.1)":
+        return _result(False, f"formula did not get heading-derived number: {formula.text!r}")
+    texts = [p.text for p in doc.paragraphs]
+    if "где C - товарооборот;" not in texts or "V - количество;" not in texts or "R - цена." not in texts:
+        return _result(False, f"explanations not normalized with hyphen separator: {texts!r}")
+    return _result(True, "unnumbered formula gets next number from heading2 context")
+
+
+def test_formula_inline_gde_split_into_explanations() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    formula = doc.add_paragraph("C=V×R где C-товарооборот; V-количество; R-цена")
+    doc.add_paragraph("Следующий текст.")
+
+    changed = normalize_formula_blocks(doc, body_start=0)
+
+    if not changed:
+        return _result(False, "inline-gde formula block was not changed")
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "C = V × R,\t(1.1.1)",
+        "где C - товарооборот;",
+        "V - количество;",
+        "R - цена.",
+    ]
+    for item in expected:
+        if item not in texts:
+            return _result(False, f"expected inline-gde output missing: {item!r}; texts={texts!r}")
+    if formula.text != expected[0]:
+        return _result(False, f"formula paragraph not split cleanly: {formula.text!r}")
+    return _result(True, "formula and inline explanations split into canonical block")
+
+
+def test_formula_next_formula_after_explanations_is_not_absorbed() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    first = doc.add_paragraph("C=V*R где C-товарооборот; V-количество; R-цена")
+    second = doc.add_paragraph("Y=27x+17*z-25")
+    doc.add_paragraph("где x-количество денег; z-стоимость услуги; Y-величина капитала")
+
+    changed = normalize_formula_blocks(doc, body_start=0)
+
+    if not changed:
+        return _result(False, "adjacent formula blocks were not changed")
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "C = V * R,\t(1.1.1)",
+        "где C - товарооборот;",
+        "V - количество;",
+        "R - цена.",
+        "Y = 27x + 17 * z - 25,\t(1.1.2)",
+        "где x - количество денег;",
+        "z - стоимость услуги;",
+        "Y - величина капитала.",
+    ]
+    for item in expected:
+        if item not in texts:
+            return _result(False, f"expected adjacent formula output missing: {item!r}; texts={texts!r}")
+    if first.text != expected[0] or second.text != expected[4]:
+        return _result(False, f"formula paragraphs not preserved: {first.text!r}; {second.text!r}")
+    return _result(True, "adjacent formula blocks remain separate")
+
+
+def test_formula_comma_separated_explanations_split_safely() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    formula = doc.add_paragraph("C=V×R")
+    doc.add_paragraph("где C-товарооборот, V-количество, R-цена")
+
+    changed = normalize_formula_blocks(doc, body_start=0)
+
+    if not changed:
+        return _result(False, "comma-separated formula explanations were not changed")
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "C = V × R,\t(1.1.1)",
+        "где C - товарооборот;",
+        "V - количество;",
+        "R - цена.",
+    ]
+    for item in expected:
+        if item not in texts:
+            return _result(False, f"expected comma-separated output missing: {item!r}; texts={texts!r}")
+    if formula.text != expected[0]:
+        return _result(False, f"formula paragraph changed unexpectedly: {formula.text!r}")
+    return _result(True, "comma-separated explanation symbols split into canonical lines")
+
+
+def test_formula_numeric_coefficient_explanations_stay_in_block() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    formula = doc.add_paragraph("Эп = (76 ₽ – 10 ₽) × 172 860 = 11 408 760 ₽ (1.1.1)")
+    doc.add_paragraph("где Эп – процессный эффект (экономия) (притом 76 ₽ — стоимость заказного письма;")
+    doc.add_paragraph("10 ₽ — усредненная стоимость одного исходящего электронного документа;")
+    doc.add_paragraph("172 860 — расчетный объем бумажных документов в год)")
+    doc.add_paragraph("Следующий текст.")
+
+    normalize_formula_blocks(doc, body_start=0)
+
+    texts = [p.text for p in doc.paragraphs]
+    expected = [
+        "Эп = (76 ₽ - 10 ₽) × 172 860 = 11 408 760 ₽,\t(1.1.1)",
+        "где Эп - процессный эффект (экономия) (притом 76 ₽ - стоимость заказного письма;",
+        "10 ₽ - усредненная стоимость одного исходящего электронного документа;",
+        "172 860 - расчетный объем бумажных документов в год).",
+    ]
+    for item in expected:
+        if item not in texts:
+            return _result(False, f"expected numeric coefficient explanation missing: {item!r}; texts={texts!r}")
+    idx = texts.index(expected[0])
+    if texts[idx + 1:idx + 4] != expected[1:]:
+        return _result(False, f"numeric coefficient explanations split by blank: {texts!r}")
+    if formula.text != expected[0]:
+        return _result(False, f"formula text unexpected: {formula.text!r}")
+    return _result(True, "numeric coefficient explanation lines stay in formula block")
+
+
+def test_formula_block_has_single_blank_before_and_after() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    doc.add_paragraph("Текст перед формулой.")
+    formula = doc.add_paragraph("C=V×R")
+    doc.add_paragraph("где C-товарооборот")
+    doc.add_paragraph("Следующий текст.")
+
+    normalize_formula_blocks(doc, body_start=0)
+
+    paragraphs = doc.paragraphs
+    idx = next(
+        (i for i, paragraph in enumerate(paragraphs) if paragraph.text.startswith("C = V × R,")),
+        None,
+    )
+    if idx is None:
+        return _result(False, f"formatted formula paragraph not found: {[p.text for p in paragraphs]!r}")
+    if idx - 1 < 0 or paragraphs[idx - 1].text != "":
+        return _result(False, f"missing blank before formula: {[p.text for p in paragraphs]!r}")
+    if idx + 1 >= len(paragraphs) or paragraphs[idx + 1].text.startswith("где ") is False:
+        return _result(False, f"explanation not immediately after formula: {[p.text for p in paragraphs]!r}")
+    if idx + 2 >= len(paragraphs) or paragraphs[idx + 2].text != "":
+        return _result(False, f"missing blank after whole formula block: {[p.text for p in paragraphs]!r}")
+    if idx + 3 >= len(paragraphs) or paragraphs[idx + 3].text != "Следующий текст.":
+        return _result(False, f"text after formula block shifted unexpectedly: {[p.text for p in paragraphs]!r}")
+    return _result(True, "formula block has one blank before and after, not inside")
+
+
+def test_formula_prose_with_equals_is_not_promoted() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_formula_blocks
+
+    prose = "В настройках системы параметр x=5 означает число попыток отправки."
+    doc = Document()
+    doc.add_paragraph("1.1. Понятие и роль документооборота")
+    p = doc.add_paragraph(prose)
+    doc.add_paragraph("где дальше начинается обычное предложение, а не пояснение формулы.")
+
+    changed = normalize_formula_blocks(doc, body_start=0)
+
+    if changed:
+        return _result(False, f"ordinary prose with equals changed: {[p.text for p in doc.paragraphs]!r}")
+    if p.text != prose:
+        return _result(False, f"ordinary prose was mutated: {p.text!r}")
+    return _result(True, "ordinary prose with equals is not promoted to formula")
 
 
 # ── Guard test: blank breaks G2 block ────────────────────────────────────────
@@ -15725,6 +15913,12 @@ def run_all() -> None:
         ("FORMULA | unnumbered formula numbered",             test_formula_unnumbered_formula_gets_number_from_preceding_prose),
         ("FORMULA | existing numbered formula",               test_formula_existing_numbered_formula_still_formats),
         ("FORMULA | formula not list-normalized",             test_formula_paragraph_not_list_normalized),
+        ("FORMULA | number from heading2 context",            test_formula_unnumbered_formula_numbered_from_current_heading2_context),
+        ("FORMULA | inline где split",                        test_formula_inline_gde_split_into_explanations),
+        ("FORMULA | comma explanations split",                test_formula_comma_separated_explanations_split_safely),
+        ("FORMULA | numeric explanations",                    test_formula_numeric_coefficient_explanations_stay_in_block),
+        ("FORMULA | blank around block",                      test_formula_block_has_single_blank_before_and_after),
+        ("FORMULA | prose equals guard",                      test_formula_prose_with_equals_is_not_promoted),
         ("LIST | G2 blank breaks block",                      test_word_numbered_block_broken_by_blank_not_converted),
         ("BODY | skip fake plain-TOC СОДЕРЖАНИЕ",        test_real_body_start_skips_fake_plain_toc_soderzhanie),
         ("BODY | skip fake Оглавление",                  test_real_body_start_skips_fake_oglavlenie_toc),
