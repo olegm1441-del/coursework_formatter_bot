@@ -13639,6 +13639,285 @@ def test_tm_rendered_fragment_with_marker_before_it_passes() -> tuple[bool, str]
     return _result(True, "marker before rendered continuation fragment passes")
 
 
+def test_tm_same_page_adjacent_fragments_are_flagged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    first = RenderedTableIdentity(
+        table_index=4,
+        body_order_index=4,
+        caption_num="1.3.1",
+        preceding_marker=None,
+        following_marker=None,
+        header_fingerprint=("нпа предмет регулирования для кого ключевые положения",),
+        numeric_row_fingerprint="1 2 3 4",
+        row_fingerprints=(
+            "нпа предмет регулирования для кого ключевые положения",
+            "1 2 3 4",
+            "208-фз компетенция органов ао публичные общества",
+        ),
+    )
+    second = RenderedTableIdentity(
+        table_index=5,
+        body_order_index=5,
+        caption_num=None,
+        preceding_marker=None,
+        following_marker=None,
+        header_fingerprint=("нпа предмет регулирования для кого ключевые положения",),
+        numeric_row_fingerprint="1 2 3 4",
+        row_fingerprints=(
+            "нпа предмет регулирования для кого ключевые положения",
+            "1 2 3 4",
+            "трудовой кодекс трудовые отношения работодатели работники",
+        ),
+    )
+    violations = validate_rendered_continuations(
+        [
+            _rv_line("Таблица 1.3.1", 22, 40.0),
+            _rv_line("НПА Предмет регулирования Для кого Ключевые положения", 22, 70.0),
+            _rv_line("1 2 3 4", 22, 90.0),
+            _rv_line("208-ФЗ компетенция органов АО публичные общества", 22, 115.0),
+            _rv_line("НПА Предмет регулирования Для кого Ключевые положения", 22, 210.0),
+            _rv_line("1 2 3 4", 22, 230.0),
+            _rv_line("Трудовой кодекс трудовые отношения работодатели работники", 22, 255.0),
+        ],
+        [first, second],
+    )
+
+    if not any(v.violation_type == "same_page_repeated_fragment" for v in violations):
+        return _result(False, f"same-page repeated fragment not flagged: {violations!r}")
+    return _result(True, "same-page adjacent repeated fragment is flagged")
+
+
+def test_tm_late_marker_rows_before_marker_are_flagged() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    identity = RenderedTableIdentity(
+        table_index=4,
+        body_order_index=4,
+        caption_num="1.3.1",
+        preceding_marker=None,
+        following_marker="Продолжение таблицы 1.3.1",
+        header_fingerprint=("страна модель роль государства роль операторов форматы стандарты",),
+        numeric_row_fingerprint="1 2 3 4 5",
+        row_fingerprints=(
+            "страна модель роль государства роль операторов форматы стандарты",
+            "1 2 3 4 5",
+            "ес peppol eidas директивы требования общий правовой контур",
+        ),
+    )
+    violations = validate_rendered_continuations(
+        [
+            _rv_line("Таблица 1.3.1", 14, 480.0),
+            _rv_line("Страна модель Роль государства Роль операторов Форматы стандарты", 15, 45.0),
+            _rv_line("1 2 3 4 5", 15, 70.0),
+            _rv_line("ЕС Peppol eIDAS директивы требования общий правовой контур", 15, 95.0),
+            _rv_line("Продолжение таблицы 1.3.1", 15, 150.0),
+        ],
+        [identity],
+    )
+
+    late = [v for v in violations if v.violation_type == "late_continuation_marker"]
+    if not late:
+        return _result(False, f"late marker not flagged: {violations!r}")
+    if late[0].page != 15 or late[0].confidence != "high":
+        return _result(False, f"late marker page/confidence wrong: {late!r}")
+    return _result(True, "rows before same-page continuation marker are flagged")
+
+
+def test_tm_source_bad_duplicate_rows_are_warning_only() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    source = RenderedTableIdentity(
+        table_index=3,
+        body_order_index=3,
+        caption_num="1.2.1",
+        preceding_marker=None,
+        following_marker=None,
+        header_fingerprint=("функция kpi метрика источник",),
+        numeric_row_fingerprint=None,
+        row_fingerprints=(
+            "функция kpi метрика источник",
+            "уровень формальные органы неформальные практики основные функции",
+            "корпоративный общее собрание наблюдательный совет стратегия надзор",
+            "уровень формальные органы неформальные практики основные функции",
+            "корпоративный общее собрание наблюдательный совет стратегия надзор",
+        ),
+    )
+    output = RenderedTableIdentity(
+        table_index=3,
+        body_order_index=3,
+        caption_num="1.2.1",
+        preceding_marker=None,
+        following_marker=None,
+        header_fingerprint=("функция kpi метрика источник",),
+        numeric_row_fingerprint=None,
+        row_fingerprints=source.row_fingerprints,
+    )
+    violations = validate_rendered_continuations(
+        [_rv_line("Таблица 1.2.1", 16, 40.0)],
+        [output],
+        source_table_identities=[source],
+    )
+
+    source_bad = [v for v in violations if v.violation_type == "source_bad_duplicated_content_rows"]
+    if not source_bad:
+        return _result(False, f"source-bad duplicate rows not flagged: {violations!r}")
+    if source_bad[0].evidence.get("source_proven") is not True:
+        return _result(False, f"source provenance missing: {source_bad!r}")
+    repair_classes = {"missing_continuation_marker", "late_continuation_marker"}
+    if any(v.violation_type in repair_classes for v in violations):
+        return _result(False, f"source-bad rows should not become repair class: {violations!r}")
+    return _result(True, "source-bad duplicated content rows are warning-only")
+
+
+def test_tm_ambiguous_adjacent_tables_are_flagged_without_repair_class() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    first = RenderedTableIdentity(
+        table_index=19,
+        body_order_index=19,
+        caption_num="2.3.1",
+        preceding_marker=None,
+        following_marker=None,
+        header_fingerprint=("роль ответственность частота артефакты kpi срок пилота",),
+        numeric_row_fingerprint=None,
+        row_fingerprints=("роль ответственность частота артефакты kpi срок пилота",),
+    )
+    second = RenderedTableIdentity(
+        table_index=20,
+        body_order_index=20,
+        caption_num=None,
+        preceding_marker=None,
+        following_marker=None,
+        header_fingerprint=("роль ответственность частота артефакты kpi срок пилота",),
+        numeric_row_fingerprint=None,
+        row_fingerprints=(
+            "роль ответственность частота артефакты kpi срок пилота",
+            "представители трайбов экспертные ревью обмен кейсами",
+            "риск офицер комплаенс проверка рисков контроль изменений",
+        ),
+    )
+    violations = validate_rendered_continuations(
+        [
+            _rv_line("Таблица 2.3.1", 44, 40.0),
+            _rv_line("Роль Ответственность Частота Артефакты KPI Срок пилота", 44, 70.0),
+        ],
+        [first, second],
+    )
+
+    ambiguous = [v for v in violations if v.violation_type == "ambiguous_adjacent_tables"]
+    if not ambiguous:
+        return _result(False, f"ambiguous adjacent tables not flagged: {violations!r}")
+    if any(v.violation_type == "missing_continuation_marker" for v in violations):
+        return _result(False, f"ambiguous case should not become hard repair class: {violations!r}")
+    return _result(True, "ambiguous adjacent tables are warning-only")
+
+
+def test_tm_clean_continuation_has_no_new_fragment_diagnostics() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        RenderedTableIdentity,
+        validate_rendered_continuations,
+    )
+
+    first = RenderedTableIdentity(
+        table_index=0,
+        body_order_index=0,
+        caption_num="1.1.1",
+        preceding_marker=None,
+        following_marker="Продолжение таблицы 1.1.1",
+        header_fingerprint=("показатель как влияет последствия",),
+        numeric_row_fingerprint="1 2 3",
+        row_fingerprints=("показатель как влияет последствия", "1 2 3", "скорость реакции запросы"),
+    )
+    second = RenderedTableIdentity(
+        table_index=1,
+        body_order_index=1,
+        caption_num=None,
+        preceding_marker="Продолжение таблицы 1.1.1",
+        following_marker=None,
+        header_fingerprint=("показатель как влияет последствия",),
+        numeric_row_fingerprint="1 2 3",
+        row_fingerprints=("показатель как влияет последствия", "1 2 3", "управление документами"),
+    )
+    violations = validate_rendered_continuations(
+        [
+            _rv_line("Таблица 1.1.1", 5, 60.0),
+            _rv_line("Показатель Как влияет Последствия", 5, 90.0),
+            _rv_line("1 2 3", 5, 110.0),
+            _rv_line("Продолжение таблицы 1.1.1", 6, 50.0),
+            _rv_line("Показатель Как влияет Последствия", 6, 80.0),
+            _rv_line("1 2 3", 6, 100.0),
+        ],
+        [first, second],
+    )
+
+    if violations:
+        return _result(False, f"clean continuation produced diagnostics: {violations!r}")
+    return _result(True, "clean continuation has no same-page/ambiguous diagnostics")
+
+
+def test_tm_artifact_guard_pdfs_remain_clean_for_new_diagnostics() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.pdf_layout_analyzer import analyze_pdf_lines
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        build_rendered_table_identities,
+        validate_rendered_continuations,
+    )
+
+    artifacts = {
+        "237": (
+            Path("/tmp/kfu_patchB_padding_final_pdfs/237_after.pdf"),
+            Path("/tmp/kfu_patchB_padding_final_pdfs_work/237_formatted_from_original.docx"),
+        ),
+        "244": (
+            Path("/tmp/kfu_patchB_padding_final_pdfs/244_after.pdf"),
+            Path("/tmp/kfu_patchB_padding_final_pdfs_work/244_formatted_from_original.docx"),
+        ),
+        "reference": (
+            Path("/tmp/kfu_patchB_padding_final_pdfs/reference_rybakov_after.pdf"),
+            Path("/tmp/kfu_patchB_padding_final_pdfs_work/reference_rybakov_formatted_from_original.docx"),
+        ),
+    }
+    missing = [str(path) for pair in artifacts.values() for path in pair if not path.exists()]
+    if missing:
+        return _result(True, f"artifact guard skipped; missing {missing!r}")
+
+    bad_types = {
+        "same_page_repeated_fragment",
+        "same_page_adjacent_fragment",
+        "late_continuation_marker",
+        "missing_or_late_continuation_marker",
+        "ambiguous_adjacent_tables",
+    }
+    failures: dict[str, list[tuple[str, int, str]]] = {}
+    for key, (pdf_path, docx_path) in artifacts.items():
+        violations = validate_rendered_continuations(
+            analyze_pdf_lines(pdf_path),
+            build_rendered_table_identities(Document(str(docx_path))),
+        )
+        selected = [
+            (v.table_num or "", v.page, v.violation_type)
+            for v in violations
+            if v.violation_type in bad_types
+        ]
+        if selected:
+            failures[key] = selected
+    if failures:
+        return _result(False, f"guard artifacts got new diagnostics: {failures!r}")
+    return _result(True, "237/244/reference guard PDFs remain clean for new diagnostics")
+
+
 def test_tm_inline_prose_is_not_rendered_continuation_marker() -> tuple[bool, str]:
     from guides.coursework_kfu_2025.rendered_table_validation import (
         classify_continuation_marker_line,
@@ -13833,7 +14112,9 @@ def test_tm_formatter_surfaces_rendered_continuation_warnings() -> tuple[bool, s
                 lambda _output, _backup, report=None, context="": False
             )
             fs.remove_same_page_continuation_markers_inplace = lambda _path, report=None: 0
-            fs._rendered_continuation_violations_for_docx = lambda _path: [high, medium]
+            fs._rendered_continuation_violations_for_docx = (
+                lambda _path, **_kwargs: [high, medium]
+            )
             _, warnings = fs.format_docx(str(inp), str(out))
         finally:
             fs.process_document = old_process
@@ -14567,6 +14848,34 @@ def _pg2_set_tbl_cell_spacing(tbl, value: str = "15") -> None:
     spacing.set(qn("w:type"), "dxa")
 
 
+def _pg2_set_tbl_cell_mar(tbl, left: str = "15", right: str = "15") -> None:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    mar = tbl_pr.find(qn("w:tblCellMar"))
+    if mar is None:
+        mar = OxmlElement("w:tblCellMar")
+        tbl_pr.append(mar)
+    for side, value in (("left", left), ("right", right)):
+        node = mar.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            mar.append(node)
+        node.set(qn("w:w"), value)
+        node.set(qn("w:type"), "dxa")
+
+
+def _pg2_tbl_cell_mar_left_right(tbl) -> tuple[str | None, str | None]:
+    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
+    mar = tbl_pr.find(qn("w:tblCellMar"))
+    if mar is None:
+        return None, None
+    left = mar.find(qn("w:left"))
+    right = mar.find(qn("w:right"))
+    return (
+        left.get(qn("w:w")) if left is not None else None,
+        right.get(qn("w:w")) if right is not None else None,
+    )
+
+
 def _pg2_set_tbl_borders(tbl, *, val: str = "double", color: str = "auto") -> None:
     tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
     borders = tbl_pr.find(qn("w:tblBorders"))
@@ -14764,6 +15073,151 @@ def test_pg2_preserve_border_cleanup_keeps_merged_and_vmerge_structure() -> tupl
         if before[key] != after[key]:
             return _result(False, f"{key} changed for merged/vMerge preserve border cleanup")
     return _result(True, "preserve border cleanup does not damage merged/vMerge structure")
+
+
+def test_pg2_table_cell_margins_set_to_170_without_spacing() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = _pg2_base_doc()
+    simple_tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(simple_tbl)
+    _pg2_set_tbl_cell_mar(simple_tbl, "15", "15")
+    _pg2_set_tbl_cell_spacing(simple_tbl, "15")
+
+    preserve_tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(preserve_tbl)
+    _pg2_set_tbl_w(preserve_tbl, "5000", "pct")
+    _pg2_set_all_tcw(preserve_tbl, [1400, 2600])
+    _pg2_set_tbl_cell_mar(preserve_tbl, "15", "15")
+    _pg2_set_tbl_cell_spacing(preserve_tbl, "15")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(src)
+        process_document(src, out)
+        out_doc = Document(str(out))
+
+    for idx, table in enumerate(out_doc.tables):
+        left, right = _pg2_tbl_cell_mar_left_right(table)
+        if (left, right) != ("170", "170"):
+            return _result(False, f"table {idx} margins are {(left, right)!r}, expected ('170', '170')")
+        tbl_pr = _pg2_get_tbl_pr(table._tbl)
+        if tbl_pr.find(qn("w:tblCellSpacing")) is not None:
+            return _result(False, f"table {idx} retained tblCellSpacing")
+    return _result(True, "simple and preserve tables get 170 dxa left/right margins without tblCellSpacing")
+
+
+def test_pg2_table_cell_margins_preserve_sensitive_geometry_and_merges() -> tuple[bool, str]:
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=3, cols=3)
+    _pg2_fill_table(tbl)
+    _pg2_set_tbl_w(tbl, "5000", "pct")
+    _pg2_set_all_tcw(tbl, [1200, 2400, 3600])
+    _pg2_set_tbl_cell_mar(tbl, "15", "15")
+    tbl.cell(0, 0).merge(tbl.cell(0, 1))
+
+    restart = OxmlElement("w:vMerge")
+    restart.set(qn("w:val"), "restart")
+    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
+    cont = OxmlElement("w:vMerge")
+    cont.set(qn("w:val"), "continue")
+    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
+
+    before, after = _pg2_process_and_snapshot(doc)
+    for key in ("tblW", "tblLayout", "tblGrid_xml", "gridCol_widths", "tcW", "gridSpan", "vMerge"):
+        if before[key] != after[key]:
+            return _result(False, f"{key} changed while applying cell margins")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(src)
+        from guides.coursework_kfu_2025.safe_formatter import process_document
+
+        process_document(src, out)
+        out_doc = Document(str(out))
+        left, right = _pg2_tbl_cell_mar_left_right(out_doc.tables[0])
+    if (left, right) != ("170", "170"):
+        return _result(False, f"preserve merged table margins are {(left, right)!r}")
+    return _result(True, "170 dxa margins do not change sensitive geometry or merge structure")
+
+
+def test_pg2_margin_free_tables_gain_readable_margins() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = _pg2_base_doc()
+    tbl = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(tbl)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(src)
+        process_document(src, out)
+        out_doc = Document(str(out))
+
+    left, right = _pg2_tbl_cell_mar_left_right(out_doc.tables[0])
+    if (left, right) != ("170", "170"):
+        return _result(False, f"margin-free table margins are {(left, right)!r}, expected ('170', '170')")
+    return _result(True, "margin-free tables gain 170 dxa left/right margins")
+
+
+def test_pg2_continuation_chain_tables_use_safe_margin_fallback() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = _pg2_base_doc()
+    first = doc.add_table(rows=2, cols=5)
+    _pg2_fill_table(first)
+    _pg2_set_tbl_cell_mar(first, "15", "15")
+    doc.add_paragraph("Продолжение таблицы 1.2.3")
+    second = doc.add_table(rows=2, cols=5)
+    _pg2_fill_table(second)
+    ordinary = doc.add_table(rows=2, cols=2)
+    _pg2_fill_table(ordinary)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(src)
+        process_document(src, out)
+        out_doc = Document(str(out))
+
+    margins = [_pg2_tbl_cell_mar_left_right(table) for table in out_doc.tables]
+    if margins[:2] != [("15", "15"), (None, None)]:
+        return _result(False, f"continuation chain margins are {margins[:2]!r}, expected preserved authored/no margins")
+    if margins[2] != ("170", "170"):
+        return _result(False, f"ordinary table margin is {margins[2]!r}, expected 170 dxa")
+    return _result(True, "pagination-sensitive continuation tables preserve margins; ordinary tables use 170 dxa")
+
+
+def test_pg2_dense_tables_preserve_margins_as_safe_fallback() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+
+    doc = _pg2_base_doc()
+    dense_authored = doc.add_table(rows=4, cols=4)
+    _pg2_fill_table(dense_authored)
+    _pg2_set_tbl_cell_mar(dense_authored, "15", "15")
+    dense_margin_free = doc.add_table(rows=4, cols=4)
+    _pg2_fill_table(dense_margin_free)
+    ordinary = doc.add_table(rows=3, cols=3)
+    _pg2_fill_table(ordinary)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "in.docx"
+        out = Path(tmp) / "out.docx"
+        doc.save(src)
+        process_document(src, out)
+        out_doc = Document(str(out))
+
+    margins = [_pg2_tbl_cell_mar_left_right(table) for table in out_doc.tables]
+    if margins[0] != ("15", "15"):
+        return _result(False, f"dense authored table margin changed: {margins[0]!r}")
+    if margins[1] != (None, None):
+        return _result(False, f"dense margin-free table gained margins: {margins[1]!r}")
+    if margins[2] != ("170", "170"):
+        return _result(False, f"ordinary table margin is {margins[2]!r}, expected 170 dxa")
+    return _result(True, "dense tables preserve margins; ordinary table receives 170 dxa")
 
 
 def test_pg2_force_borders_preserves_geometry_adjacent_nodes() -> tuple[bool, str]:
@@ -15445,6 +15899,12 @@ def run_all() -> None:
         ("TM | continuation marker report page+flag", test_tm_continuation_marker_report_includes_page_and_violation),
         ("TM | rendered missing marker flagged", test_tm_rendered_fragment_without_marker_is_flagged),
         ("TM | rendered marker before fragment passes", test_tm_rendered_fragment_with_marker_before_it_passes),
+        ("TM | same-page adjacent fragments flagged", test_tm_same_page_adjacent_fragments_are_flagged),
+        ("TM | late marker rows before marker flagged", test_tm_late_marker_rows_before_marker_are_flagged),
+        ("TM | source-bad duplicate rows warning", test_tm_source_bad_duplicate_rows_are_warning_only),
+        ("TM | ambiguous adjacent tables warning", test_tm_ambiguous_adjacent_tables_are_flagged_without_repair_class),
+        ("TM | clean continuation no new diagnostics", test_tm_clean_continuation_has_no_new_fragment_diagnostics),
+        ("TM | artifact guard PDFs clean", test_tm_artifact_guard_pdfs_remain_clean_for_new_diagnostics),
         ("TM | inline prose not rendered marker", test_tm_inline_prose_is_not_rendered_continuation_marker),
         ("TM | stable manual chain identity reload", test_tm_stable_manual_chain_identity_survives_save_reload),
         ("TM | real fixture rendered missing-marker diagnostics", test_tm_real_fixture_rendered_missing_marker_diagnostics),
@@ -15469,6 +15929,11 @@ def run_all() -> None:
         ("PG2 | merged and vMerge tables preserved", test_pg2_safe_formatter_preserves_merged_and_vmerge_tables),
         ("PG2 | preserve border cleanup no geometry mutation", test_pg2_preserve_geometry_table_gets_border_cleanup_without_geometry_mutation),
         ("PG2 | preserve border cleanup keeps merges", test_pg2_preserve_border_cleanup_keeps_merged_and_vmerge_structure),
+        ("PG2 | table cell margins 170 dxa", test_pg2_table_cell_margins_set_to_170_without_spacing),
+        ("PG2 | table cell margins preserve geometry", test_pg2_table_cell_margins_preserve_sensitive_geometry_and_merges),
+        ("PG2 | margin-free tables get padding", test_pg2_margin_free_tables_gain_readable_margins),
+        ("PG2 | continuation-chain margin fallback", test_pg2_continuation_chain_tables_use_safe_margin_fallback),
+        ("PG2 | dense table margin fallback", test_pg2_dense_tables_preserve_margins_as_safe_fallback),
         ("PG2 | borders preserve geometry nodes", test_pg2_force_borders_preserves_geometry_adjacent_nodes),
         ("PG2 | Rybakov-style tcW preserved", test_pg2_rybakov_style_table_keeps_tcw_in_safe_formatter_stage),
         ("PG2 | diagnostics reduced safe_formatter mutation", test_pg2_diagnostics_show_reduced_safe_formatter_geometry_mutation),

@@ -34,6 +34,7 @@ class RenderedTableIdentity:
     header_fingerprint: tuple[str, ...]
     numeric_row_fingerprint: str | None
     row_fingerprints: tuple[str, ...]
+    preceding_inter_table_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,19 @@ def build_rendered_table_identities(doc: Document) -> list[RenderedTableIdentity
                 if text:
                     break
 
+        preceding_inter_table_texts: list[str] = []
+        if body_idx >= 0:
+            for node in reversed(body_children[:body_idx]):
+                if node.tag == qn("w:tbl"):
+                    break
+                if node.tag != qn("w:p"):
+                    continue
+                para = para_by_xml.get(node)
+                text = " ".join(((para.text if para is not None else "") or "").split())
+                if text:
+                    preceding_inter_table_texts.append(text)
+            preceding_inter_table_texts.reverse()
+
         header_rows: list[str] = []
         numeric_row: str | None = None
         all_rows: list[str] = []
@@ -199,6 +213,7 @@ def build_rendered_table_identities(doc: Document) -> list[RenderedTableIdentity
                 header_fingerprint=tuple(header_rows),
                 numeric_row_fingerprint=numeric_row,
                 row_fingerprints=tuple(all_rows),
+                preceding_inter_table_texts=tuple(preceding_inter_table_texts),
             )
         )
     return out
@@ -242,6 +257,116 @@ def _page_lines(pdf_lines: list[PdfLine], page_num: int) -> list[PdfLine]:
     )
 
 
+def _page_text(pdf_lines: list[PdfLine], page_num: int) -> str:
+    return " ".join(_norm_text(line.text) for line in _page_lines(pdf_lines, page_num))
+
+
+def _fingerprint_overlap(left: str, right: str) -> float:
+    left_tokens = _tokens(left)
+    right_tokens = _tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+
+
+def _line_matches_numeric(line: PdfLine, numeric_row_fingerprint: str) -> bool:
+    normalized = _norm_text(line.text)
+    return normalized == numeric_row_fingerprint or (
+        bool(_NUMERIC_ROW_RE.match(normalized)) and normalized == numeric_row_fingerprint
+    )
+
+
+def _numeric_row_count(lines: list[PdfLine], numeric_row_fingerprint: str | None) -> int:
+    if not numeric_row_fingerprint:
+        return 0
+    return sum(1 for line in lines if _line_matches_numeric(line, numeric_row_fingerprint))
+
+
+def _meaningful_rows(identity: RenderedTableIdentity) -> list[str]:
+    rows: list[str] = []
+    structural_headers = set(identity.header_fingerprint[:1])
+    for row_fp in identity.row_fingerprints:
+        if row_fp == identity.numeric_row_fingerprint:
+            continue
+        if row_fp in structural_headers:
+            continue
+        if len(_tokens(row_fp)) < 3:
+            continue
+        rows.append(row_fp)
+    return rows
+
+
+def _first_meaningful_row_on_page(
+    identity: RenderedTableIdentity,
+    page_text: str,
+    *,
+    min_overlap: float = 0.7,
+) -> str | None:
+    for row_fp in _meaningful_rows(identity):
+        if _contains_fingerprint(page_text, row_fp, min_overlap=min_overlap):
+            return row_fp
+    return None
+
+
+def _compatible_adjacent_fragment(
+    current: RenderedTableIdentity,
+    following: RenderedTableIdentity,
+) -> bool:
+    if following.caption_num is not None:
+        return False
+    if following.preceding_marker or following.following_marker:
+        return False
+    if following.preceding_inter_table_texts:
+        return False
+    if not current.header_fingerprint or not following.header_fingerprint:
+        return False
+    if current.numeric_row_fingerprint and following.numeric_row_fingerprint:
+        if current.numeric_row_fingerprint != following.numeric_row_fingerprint:
+            return False
+    return _fingerprint_overlap(current.header_fingerprint[0], following.header_fingerprint[0]) >= 0.65
+
+
+def _adjacent_identity_pairs(
+    identities: list[RenderedTableIdentity],
+) -> list[tuple[RenderedTableIdentity, RenderedTableIdentity]]:
+    ordered = sorted(identities, key=lambda identity: identity.body_order_index)
+    pairs: list[tuple[RenderedTableIdentity, RenderedTableIdentity]] = []
+    for current, following in zip(ordered, ordered[1:]):
+        if following.body_order_index != current.body_order_index + 1:
+            continue
+        if not current.caption_num:
+            continue
+        if _compatible_adjacent_fragment(current, following):
+            pairs.append((current, following))
+    return pairs
+
+
+def _source_bad_duplicate_rows(
+    identity: RenderedTableIdentity,
+    source_by_num: dict[str, RenderedTableIdentity],
+) -> list[str]:
+    if not identity.caption_num:
+        return []
+    source = source_by_num.get(identity.caption_num)
+    if source is None:
+        return []
+
+    source_counts: dict[str, int] = {}
+    for row_fp in _meaningful_rows(source):
+        source_counts[row_fp] = source_counts.get(row_fp, 0) + 1
+
+    output_counts: dict[str, int] = {}
+    for row_fp in _meaningful_rows(identity):
+        output_counts[row_fp] = output_counts.get(row_fp, 0) + 1
+
+    duplicates = [
+        row_fp
+        for row_fp, count in output_counts.items()
+        if count > 1 and source_counts.get(row_fp, 0) > 1
+    ]
+    return duplicates
+
+
 def _valid_marker_before_fragment(marker_lines: list[PdfLine], page_num: int, evidence_top: float) -> bool:
     return any(line.page_num == page_num and line.top < evidence_top - 1.0 for line in marker_lines)
 
@@ -262,6 +387,7 @@ def _nearest_marker_page(marker_lines: list[PdfLine], page_num: int, evidence_to
 def validate_rendered_continuations(
     pdf_lines: list[PdfLine],
     table_identities: list[RenderedTableIdentity],
+    source_table_identities: list[RenderedTableIdentity] | None = None,
 ) -> list[RenderedContinuationViolation]:
     violations: list[RenderedContinuationViolation] = []
     pages = sorted({line.page_num for line in pdf_lines})
@@ -348,8 +474,14 @@ def validate_rendered_continuations(
                 continue
             marker_page = _nearest_marker_page(markers, page_num, evidence_top)
 
-            if repeated_header and repeated_numeric:
+            if repeated_header and repeated_numeric and marker_on_page:
+                violation_type = "late_continuation_marker"
+                confidence = "high"
+            elif repeated_header and repeated_numeric:
                 violation_type = "missing_continuation_marker"
+                confidence = "high"
+            elif repeated_numeric and markers and marker_on_page:
+                violation_type = "late_continuation_marker"
                 confidence = "high"
             elif repeated_numeric and markers:
                 violation_type = "missing_continuation_marker"
@@ -379,6 +511,143 @@ def validate_rendered_continuations(
                         "header_fingerprint": header_snippet,
                         "numeric_row_fingerprint": numeric_snippet,
                         "row_fingerprint": row_snippet,
+                    },
+                )
+            )
+
+    caption_page_by_num: dict[str, int] = {}
+    for identity in table_identities:
+        if not identity.caption_num:
+            continue
+        captions = _caption_lines(pdf_lines, identity.caption_num)
+        if captions:
+            caption_page_by_num[identity.caption_num] = min(line.page_num for line in captions)
+
+    for current, following in _adjacent_identity_pairs(table_identities):
+        table_num = current.caption_num
+        if not table_num:
+            continue
+        first_page = caption_page_by_num.get(table_num)
+        if first_page is None:
+            continue
+        same_page_lines = _page_lines(pdf_lines, first_page)
+        same_page_text = " ".join(_norm_text(line.text) for line in same_page_lines)
+        next_row = _first_meaningful_row_on_page(following, same_page_text)
+        repeated_numeric_count = _numeric_row_count(
+            same_page_lines,
+            current.numeric_row_fingerprint,
+        )
+        repeated_header = any(
+            _contains_fingerprint(same_page_text, header)
+            for header in following.header_fingerprint
+        )
+        same_page_proven = bool(next_row)
+        if same_page_proven:
+            repeated_artifact = repeated_numeric_count >= 2 or repeated_header
+            violations.append(
+                RenderedContinuationViolation(
+                    table_num=table_num,
+                    table_index=current.table_index,
+                    page=first_page,
+                    violation_type=(
+                        "same_page_repeated_fragment"
+                        if repeated_artifact
+                        else "same_page_adjacent_fragment"
+                    ),
+                    confidence="high",
+                    evidence={
+                        "following_table_index": following.table_index,
+                        "fragment_page": first_page,
+                        "repeated_header": repeated_header,
+                        "repeated_numeric_row_count": repeated_numeric_count,
+                        "row_fingerprint": _snippet(next_row),
+                        "adjacent_fragment_proof": "following_row_on_caption_page",
+                    },
+                )
+            )
+            continue
+
+        following_pages = [
+            page
+            for page in pages
+            if _first_meaningful_row_on_page(following, _page_text(pdf_lines, page)) is not None
+        ]
+        if following_pages:
+            first_following_page = min(following_pages)
+            if (
+                first_following_page > first_page
+                and current.numeric_row_fingerprint
+                and following.numeric_row_fingerprint
+            ):
+                markers = _strict_marker_lines(pdf_lines, table_num)
+                marker_before = any(
+                    line.page_num < first_following_page
+                    or (
+                        line.page_num == first_following_page
+                        and line.top < min(l.top for l in _page_lines(pdf_lines, first_following_page))
+                    )
+                    for line in markers
+                )
+                violations.append(
+                    RenderedContinuationViolation(
+                        table_num=table_num,
+                        table_index=current.table_index,
+                        page=first_following_page,
+                        violation_type=(
+                            "ambiguous_adjacent_tables"
+                            if marker_before
+                            else "missing_or_late_continuation_marker"
+                        ),
+                        confidence="medium",
+                        evidence={
+                            "following_table_index": following.table_index,
+                            "previous_caption_page": first_page,
+                            "fragment_page": first_following_page,
+                            "proof": "adjacent_fragment_row_on_later_page",
+                        },
+                    )
+                )
+                continue
+
+        following_meaningful_rows = _meaningful_rows(following)
+        if len(following_meaningful_rows) >= 2:
+            violations.append(
+                RenderedContinuationViolation(
+                    table_num=table_num,
+                    table_index=current.table_index,
+                    page=first_page,
+                    violation_type="ambiguous_adjacent_tables",
+                    confidence="medium",
+                    evidence={
+                        "following_table_index": following.table_index,
+                        "previous_caption_page": first_page,
+                        "following_meaningful_rows": len(following_meaningful_rows),
+                        "proof": "compatible_adjacent_docx_tables_render_not_proven",
+                    },
+                )
+            )
+
+    if source_table_identities:
+        source_by_num = {
+            identity.caption_num: identity
+            for identity in source_table_identities
+            if identity.caption_num
+        }
+        for identity in table_identities:
+            duplicates = _source_bad_duplicate_rows(identity, source_by_num)
+            if not duplicates:
+                continue
+            violations.append(
+                RenderedContinuationViolation(
+                    table_num=identity.caption_num,
+                    table_index=identity.table_index,
+                    page=caption_page_by_num.get(identity.caption_num or "", 0),
+                    violation_type="source_bad_duplicated_content_rows",
+                    confidence="high",
+                    evidence={
+                        "duplicate_row_count": len(duplicates),
+                        "row_fingerprint": _snippet(duplicates[0]),
+                        "source_proven": True,
                     },
                 )
             )

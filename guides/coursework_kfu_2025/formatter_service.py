@@ -39,6 +39,8 @@ def _flag_value(name: str) -> str:
 
 def _rendered_continuation_violations_for_docx(
     docx_path: Path,
+    *,
+    source_table_identities: list | None = None,
 ) -> list[RenderedContinuationViolation]:
     pdf_path: Path | None = None
     try:
@@ -46,7 +48,11 @@ def _rendered_continuation_violations_for_docx(
         pdf_lines = analyze_pdf_lines(pdf_path)
         doc = Document(str(docx_path))
         identities = build_rendered_table_identities(doc)
-        return validate_rendered_continuations(pdf_lines, identities)
+        return validate_rendered_continuations(
+            pdf_lines,
+            identities,
+            source_table_identities=source_table_identities,
+        )
     finally:
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
@@ -71,6 +77,45 @@ def _rendered_continuation_warning(
         return (
             f"Проверьте возможный перенос таблицы {table_num}: "
             f"стр. {violation.page} без маркера продолжения."
+        )
+    if (
+        violation.violation_type == "late_continuation_marker"
+        and violation.confidence == "high"
+    ):
+        return (
+            f"Проверьте перенос таблицы {table_num}: "
+            f"на стр. {violation.page} строки идут до маркера продолжения."
+        )
+    if (
+        violation.violation_type == "same_page_repeated_fragment"
+        and violation.confidence == "high"
+    ):
+        return (
+            f"Проверьте таблицу {table_num}: "
+            f"на стр. {violation.page} повторный фрагмент виден на той же странице."
+        )
+    if (
+        violation.violation_type == "same_page_adjacent_fragment"
+        and violation.confidence == "high"
+    ):
+        return (
+            f"Проверьте таблицу {table_num}: "
+            f"на стр. {violation.page} соседний фрагмент выглядит как часть той же таблицы."
+        )
+    if violation.violation_type == "missing_or_late_continuation_marker":
+        return (
+            f"Проверьте перенос таблицы {table_num}: "
+            f"стр. {violation.page} без корректного маркера продолжения."
+        )
+    if violation.violation_type == "ambiguous_adjacent_tables":
+        return (
+            f"Проверьте таблицу {table_num}: "
+            "соседние таблицы похожи на фрагменты, но связь не доказана."
+        )
+    if violation.violation_type == "source_bad_duplicated_content_rows":
+        return (
+            f"Проверьте таблицу {table_num}: "
+            "в исходном файле есть повторяющиеся содержательные строки."
         )
     return None
 
@@ -114,6 +159,10 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         raise ValueError("Поддерживаются только .docx файлы")
 
     report = FormattingReport()
+    try:
+        source_table_identities = build_rendered_table_identities(Document(str(input_path)))
+    except Exception:
+        source_table_identities = None
 
     # Phase 1: structural formatting
     process_document(input_path, output_path)
@@ -245,7 +294,10 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
 
     try:
-        rendered_violations = _rendered_continuation_violations_for_docx(output_path)
+        rendered_violations = _rendered_continuation_violations_for_docx(
+            output_path,
+            source_table_identities=source_table_identities,
+        )
         if rendered_violations:
             n_repaired = repair_manual_chain_overflow_before_marker(
                 output_path,
@@ -263,7 +315,10 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
                     logger.exception(
                         "format_docx: same-page marker cleanup after manual-chain repair failed"
                     )
-                rendered_violations = _rendered_continuation_violations_for_docx(output_path)
+                rendered_violations = _rendered_continuation_violations_for_docx(
+                    output_path,
+                    source_table_identities=source_table_identities,
+                )
         if rendered_violations:
             _append_rendered_continuation_warnings(report, rendered_violations)
             hard_count = sum(
