@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/test_ux_texts.sqlite")
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,11 +54,60 @@ def test_start_text_mentions_file_deletion_and_informal_consent() -> tuple[bool,
     return True, "start text includes deletion notice and informal consent"
 
 
+def test_referral_link_uses_context_username_and_preserves_payload() -> tuple[bool, str]:
+    user = SimpleNamespace(referral_code="ABC123")
+    actual = services.build_referral_text("coursework_kpfu_format_bot", user)
+    expected = "https://t.me/coursework_kpfu_format_bot?start=ref_ABC123"
+    if expected not in actual:
+        return False, f"missing referral link: {actual!r}"
+    if "your_bot_username" in actual:
+        return False, "placeholder username leaked into referral text"
+    return True, "referral text uses bot username and preserves ref_ payload"
+
+
+def test_referral_link_strips_at_prefix_from_env_username() -> tuple[bool, str]:
+    actual = services.get_referral_link("@coursework_kpfu_format_bot", "ABC123")
+    expected = "https://t.me/coursework_kpfu_format_bot?start=ref_ABC123"
+    if actual != expected:
+        return False, f"unexpected referral link: {actual!r}"
+    return True, "referral link strips @ prefix"
+
+
+def test_bot_username_fallback_never_uses_placeholder() -> tuple[bool, str]:
+    original = services.BOT_USERNAME_FALLBACK
+    try:
+        services.BOT_USERNAME_FALLBACK = ""
+        actual = services.get_bot_username_fallback()
+    finally:
+        services.BOT_USERNAME_FALLBACK = original
+    if actual != "coursework_kpfu_format_bot":
+        return False, f"unexpected fallback username: {actual!r}"
+    if actual == "your_bot_username":
+        return False, "placeholder username returned"
+    return True, "bot username fallback uses production bot username"
+
+
+def test_bot_username_fallback_strips_env_at_prefix() -> tuple[bool, str]:
+    original = services.BOT_USERNAME_FALLBACK
+    try:
+        services.BOT_USERNAME_FALLBACK = "@coursework_kpfu_format_bot"
+        actual = services.get_bot_username_fallback()
+    finally:
+        services.BOT_USERNAME_FALLBACK = original
+    if actual != "coursework_kpfu_format_bot":
+        return False, f"unexpected env fallback username: {actual!r}"
+    return True, "bot username fallback strips @ from env value"
+
+
 def main() -> int:
     tests = [
         ("file received format text", test_file_received_format_text),
         ("file received check text", test_file_received_check_text_unchanged),
         ("start text deletion notice", test_start_text_mentions_file_deletion_and_informal_consent),
+        ("referral link context username", test_referral_link_uses_context_username_and_preserves_payload),
+        ("referral link strips at prefix", test_referral_link_strips_at_prefix_from_env_username),
+        ("bot username fallback", test_bot_username_fallback_never_uses_placeholder),
+        ("bot username fallback strips env at prefix", test_bot_username_fallback_strips_env_at_prefix),
     ]
     failed = 0
     for name, fn in tests:

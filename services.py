@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 # Базовые настройки проекта
 # =========================
 
+BOT_USERNAME_HARD_FALLBACK = "coursework_kpfu_format_bot"
 BOT_USERNAME_FALLBACK = os.getenv("BOT_USERNAME", "").strip()
+_BOT_USERNAME_HARD_FALLBACK_LOGGED = False
 TEMP_DIR = Path("bot_storage")
 TEMP_DIR.mkdir(exist_ok=True)
 
@@ -271,8 +273,12 @@ def get_or_create_user(
             db.rollback()
 
 
+def _normalize_bot_username(bot_username: str | None) -> str:
+    return (bot_username or "").strip().lstrip("@")
+
+
 def get_referral_link(bot_username: str, referral_code: str) -> str:
-    bot_username = bot_username.strip().lstrip("@")
+    bot_username = _normalize_bot_username(bot_username) or get_bot_username_fallback()
     return f"https://t.me/{bot_username}?start=ref_{referral_code}"
 
 
@@ -1011,7 +1017,17 @@ def ensure_user(
 
 
 def get_bot_username_fallback() -> str:
-    return BOT_USERNAME_FALLBACK or "your_bot_username"
+    global _BOT_USERNAME_HARD_FALLBACK_LOGGED
+    configured_username = _normalize_bot_username(BOT_USERNAME_FALLBACK)
+    if configured_username:
+        return configured_username
+    if not _BOT_USERNAME_HARD_FALLBACK_LOGGED:
+        logger.warning(
+            "bot_username_hard_fallback_used username=%s",
+            BOT_USERNAME_HARD_FALLBACK,
+        )
+        _BOT_USERNAME_HARD_FALLBACK_LOGGED = True
+    return BOT_USERNAME_HARD_FALLBACK
 
 
 def get_userinfo_text(db, user: User) -> str:
