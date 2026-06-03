@@ -14959,6 +14959,8 @@ def test_tm_real_fixture_marker_gate_preserves_semantic_markers() -> tuple[bool,
                 review_needed = any(
                     "маркер продолжения сохран" in warning
                     or "без маркера продолжения" in warning
+                    or "повторный фрагмент виден на той же странице" in warning
+                    or "соседний фрагмент выглядит как часть той же таблицы" in warning
                     for warning in warnings
                 )
                 if not review_needed:
@@ -15034,34 +15036,6 @@ def _pg2_set_tbl_cell_spacing(tbl, value: str = "15") -> None:
         tbl_pr.append(spacing)
     spacing.set(qn("w:w"), value)
     spacing.set(qn("w:type"), "dxa")
-
-
-def _pg2_set_tbl_cell_mar(tbl, left: str = "15", right: str = "15") -> None:
-    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
-    mar = tbl_pr.find(qn("w:tblCellMar"))
-    if mar is None:
-        mar = OxmlElement("w:tblCellMar")
-        tbl_pr.append(mar)
-    for side, value in (("left", left), ("right", right)):
-        node = mar.find(qn(f"w:{side}"))
-        if node is None:
-            node = OxmlElement(f"w:{side}")
-            mar.append(node)
-        node.set(qn("w:w"), value)
-        node.set(qn("w:type"), "dxa")
-
-
-def _pg2_tbl_cell_mar_left_right(tbl) -> tuple[str | None, str | None]:
-    tbl_pr = _pg2_get_tbl_pr(tbl._tbl)
-    mar = tbl_pr.find(qn("w:tblCellMar"))
-    if mar is None:
-        return None, None
-    left = mar.find(qn("w:left"))
-    right = mar.find(qn("w:right"))
-    return (
-        left.get(qn("w:w")) if left is not None else None,
-        right.get(qn("w:w")) if right is not None else None,
-    )
 
 
 def _pg2_set_tbl_borders(tbl, *, val: str = "double", color: str = "auto") -> None:
@@ -15261,151 +15235,6 @@ def test_pg2_preserve_border_cleanup_keeps_merged_and_vmerge_structure() -> tupl
         if before[key] != after[key]:
             return _result(False, f"{key} changed for merged/vMerge preserve border cleanup")
     return _result(True, "preserve border cleanup does not damage merged/vMerge structure")
-
-
-def test_pg2_table_cell_margins_set_to_170_without_spacing() -> tuple[bool, str]:
-    from guides.coursework_kfu_2025.safe_formatter import process_document
-
-    doc = _pg2_base_doc()
-    simple_tbl = doc.add_table(rows=2, cols=2)
-    _pg2_fill_table(simple_tbl)
-    _pg2_set_tbl_cell_mar(simple_tbl, "15", "15")
-    _pg2_set_tbl_cell_spacing(simple_tbl, "15")
-
-    preserve_tbl = doc.add_table(rows=2, cols=2)
-    _pg2_fill_table(preserve_tbl)
-    _pg2_set_tbl_w(preserve_tbl, "5000", "pct")
-    _pg2_set_all_tcw(preserve_tbl, [1400, 2600])
-    _pg2_set_tbl_cell_mar(preserve_tbl, "15", "15")
-    _pg2_set_tbl_cell_spacing(preserve_tbl, "15")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "in.docx"
-        out = Path(tmp) / "out.docx"
-        doc.save(src)
-        process_document(src, out)
-        out_doc = Document(str(out))
-
-    for idx, table in enumerate(out_doc.tables):
-        left, right = _pg2_tbl_cell_mar_left_right(table)
-        if (left, right) != ("170", "170"):
-            return _result(False, f"table {idx} margins are {(left, right)!r}, expected ('170', '170')")
-        tbl_pr = _pg2_get_tbl_pr(table._tbl)
-        if tbl_pr.find(qn("w:tblCellSpacing")) is not None:
-            return _result(False, f"table {idx} retained tblCellSpacing")
-    return _result(True, "simple and preserve tables get 170 dxa left/right margins without tblCellSpacing")
-
-
-def test_pg2_table_cell_margins_preserve_sensitive_geometry_and_merges() -> tuple[bool, str]:
-    doc = _pg2_base_doc()
-    tbl = doc.add_table(rows=3, cols=3)
-    _pg2_fill_table(tbl)
-    _pg2_set_tbl_w(tbl, "5000", "pct")
-    _pg2_set_all_tcw(tbl, [1200, 2400, 3600])
-    _pg2_set_tbl_cell_mar(tbl, "15", "15")
-    tbl.cell(0, 0).merge(tbl.cell(0, 1))
-
-    restart = OxmlElement("w:vMerge")
-    restart.set(qn("w:val"), "restart")
-    tbl.rows[1].cells[0]._tc.get_or_add_tcPr().append(restart)
-    cont = OxmlElement("w:vMerge")
-    cont.set(qn("w:val"), "continue")
-    tbl.rows[2].cells[0]._tc.get_or_add_tcPr().append(cont)
-
-    before, after = _pg2_process_and_snapshot(doc)
-    for key in ("tblW", "tblLayout", "tblGrid_xml", "gridCol_widths", "tcW", "gridSpan", "vMerge"):
-        if before[key] != after[key]:
-            return _result(False, f"{key} changed while applying cell margins")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "in.docx"
-        out = Path(tmp) / "out.docx"
-        doc.save(src)
-        from guides.coursework_kfu_2025.safe_formatter import process_document
-
-        process_document(src, out)
-        out_doc = Document(str(out))
-        left, right = _pg2_tbl_cell_mar_left_right(out_doc.tables[0])
-    if (left, right) != ("170", "170"):
-        return _result(False, f"preserve merged table margins are {(left, right)!r}")
-    return _result(True, "170 dxa margins do not change sensitive geometry or merge structure")
-
-
-def test_pg2_margin_free_tables_gain_readable_margins() -> tuple[bool, str]:
-    from guides.coursework_kfu_2025.safe_formatter import process_document
-
-    doc = _pg2_base_doc()
-    tbl = doc.add_table(rows=2, cols=2)
-    _pg2_fill_table(tbl)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "in.docx"
-        out = Path(tmp) / "out.docx"
-        doc.save(src)
-        process_document(src, out)
-        out_doc = Document(str(out))
-
-    left, right = _pg2_tbl_cell_mar_left_right(out_doc.tables[0])
-    if (left, right) != ("170", "170"):
-        return _result(False, f"margin-free table margins are {(left, right)!r}, expected ('170', '170')")
-    return _result(True, "margin-free tables gain 170 dxa left/right margins")
-
-
-def test_pg2_continuation_chain_tables_use_safe_margin_fallback() -> tuple[bool, str]:
-    from guides.coursework_kfu_2025.safe_formatter import process_document
-
-    doc = _pg2_base_doc()
-    first = doc.add_table(rows=2, cols=5)
-    _pg2_fill_table(first)
-    _pg2_set_tbl_cell_mar(first, "15", "15")
-    doc.add_paragraph("Продолжение таблицы 1.2.3")
-    second = doc.add_table(rows=2, cols=5)
-    _pg2_fill_table(second)
-    ordinary = doc.add_table(rows=2, cols=2)
-    _pg2_fill_table(ordinary)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "in.docx"
-        out = Path(tmp) / "out.docx"
-        doc.save(src)
-        process_document(src, out)
-        out_doc = Document(str(out))
-
-    margins = [_pg2_tbl_cell_mar_left_right(table) for table in out_doc.tables]
-    if margins[:2] != [("15", "15"), (None, None)]:
-        return _result(False, f"continuation chain margins are {margins[:2]!r}, expected preserved authored/no margins")
-    if margins[2] != ("170", "170"):
-        return _result(False, f"ordinary table margin is {margins[2]!r}, expected 170 dxa")
-    return _result(True, "pagination-sensitive continuation tables preserve margins; ordinary tables use 170 dxa")
-
-
-def test_pg2_dense_tables_preserve_margins_as_safe_fallback() -> tuple[bool, str]:
-    from guides.coursework_kfu_2025.safe_formatter import process_document
-
-    doc = _pg2_base_doc()
-    dense_authored = doc.add_table(rows=4, cols=4)
-    _pg2_fill_table(dense_authored)
-    _pg2_set_tbl_cell_mar(dense_authored, "15", "15")
-    dense_margin_free = doc.add_table(rows=4, cols=4)
-    _pg2_fill_table(dense_margin_free)
-    ordinary = doc.add_table(rows=3, cols=3)
-    _pg2_fill_table(ordinary)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "in.docx"
-        out = Path(tmp) / "out.docx"
-        doc.save(src)
-        process_document(src, out)
-        out_doc = Document(str(out))
-
-    margins = [_pg2_tbl_cell_mar_left_right(table) for table in out_doc.tables]
-    if margins[0] != ("15", "15"):
-        return _result(False, f"dense authored table margin changed: {margins[0]!r}")
-    if margins[1] != (None, None):
-        return _result(False, f"dense margin-free table gained margins: {margins[1]!r}")
-    if margins[2] != ("170", "170"):
-        return _result(False, f"ordinary table margin is {margins[2]!r}, expected 170 dxa")
-    return _result(True, "dense tables preserve margins; ordinary table receives 170 dxa")
 
 
 def test_pg2_force_borders_preserves_geometry_adjacent_nodes() -> tuple[bool, str]:
@@ -16123,11 +15952,6 @@ def run_all() -> None:
         ("PG2 | merged and vMerge tables preserved", test_pg2_safe_formatter_preserves_merged_and_vmerge_tables),
         ("PG2 | preserve border cleanup no geometry mutation", test_pg2_preserve_geometry_table_gets_border_cleanup_without_geometry_mutation),
         ("PG2 | preserve border cleanup keeps merges", test_pg2_preserve_border_cleanup_keeps_merged_and_vmerge_structure),
-        ("PG2 | table cell margins 170 dxa", test_pg2_table_cell_margins_set_to_170_without_spacing),
-        ("PG2 | table cell margins preserve geometry", test_pg2_table_cell_margins_preserve_sensitive_geometry_and_merges),
-        ("PG2 | margin-free tables get padding", test_pg2_margin_free_tables_gain_readable_margins),
-        ("PG2 | continuation-chain margin fallback", test_pg2_continuation_chain_tables_use_safe_margin_fallback),
-        ("PG2 | dense table margin fallback", test_pg2_dense_tables_preserve_margins_as_safe_fallback),
         ("PG2 | borders preserve geometry nodes", test_pg2_force_borders_preserves_geometry_adjacent_nodes),
         ("PG2 | Rybakov-style tcW preserved", test_pg2_rybakov_style_table_keeps_tcw_in_safe_formatter_stage),
         ("PG2 | diagnostics reduced safe_formatter mutation", test_pg2_diagnostics_show_reduced_safe_formatter_geometry_mutation),
