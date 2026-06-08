@@ -13654,6 +13654,325 @@ def test_tm_diagnostic_harness_writes_stage_artifacts() -> tuple[bool, str]:
     return _result(True, "diagnostic harness writes stage artifacts and table geometry reports")
 
 
+def _tm_set_row(table, row_index: int, values: list[str]) -> None:
+    for cell_index, value in enumerate(values):
+        table.rows[row_index].cells[cell_index].text = value
+
+
+def test_tm_universal_model_groups_caption_title_table_source() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    doc.add_paragraph("Название таблицы")
+    table = doc.add_table(rows=2, cols=2)
+    _tm_set_row(table, 0, ["Показатель", "Значение"])
+    _tm_set_row(table, 1, ["A", "B"])
+    doc.add_paragraph("Источник: составлено автором")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "grouping.docx"
+        doc.save(path)
+        model = diag.build_docx_table_model(path)
+
+    logicals = model["logical_tables"]
+    if len(logicals) != 1:
+        return _result(False, f"expected one logical table, got {logicals!r}")
+    logical = logicals[0]
+    if logical["table_num"] != "1.1.1":
+        return _result(False, f"caption/table number not grouped: {logical!r}")
+    if logical["title_paragraph_text"] != "Название таблицы":
+        return _result(False, f"title not grouped: {logical!r}")
+    if logical["physical_table_indexes"] != [0]:
+        return _result(False, f"physical table index not grouped: {logical!r}")
+    if not logical["source_note_paragraphs"] or logical["source_note_paragraphs"][0]["text"] != "Источник: составлено автором":
+        return _result(False, f"source/note not grouped: {logical!r}")
+    return _result(True, "universal model groups caption, title, table, and source note")
+
+
+def test_tm_universal_row_roles_detect_header_numeric_data() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    table = doc.add_table(rows=3, cols=3)
+    _tm_set_row(table, 0, ["Показатель", "База", "Цель"])
+    _tm_set_row(table, 1, ["1", "2", "3"])
+    _tm_set_row(table, 2, ["Конверсия", "10", "15"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "roles.docx"
+        doc.save(path)
+        model = diag.build_docx_table_model(path)
+
+    roles = [row["role"] for row in model["rows"]]
+    if roles != ["semantic_header", "numeric_row", "data_row"]:
+        return _result(False, f"unexpected row roles: {roles!r}")
+    return _result(True, "universal row role classifier detects semantic header, numeric row, and data")
+
+
+def test_tm_universal_provenance_unknown_and_source_safe() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    source = Document()
+    source.add_paragraph("Таблица 1.1.1")
+    source_table = source.add_table(rows=2, cols=2)
+    _tm_set_row(source_table, 0, ["Показатель", "Значение"])
+    _tm_set_row(source_table, 1, ["A", "B"])
+
+    formatted = Document()
+    formatted.add_paragraph("Таблица 1.1.1")
+    formatted_table = formatted.add_table(rows=3, cols=2)
+    _tm_set_row(formatted_table, 0, ["Показатель", "Значение"])
+    _tm_set_row(formatted_table, 1, ["1", "2"])
+    _tm_set_row(formatted_table, 2, ["A", "B"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        source_path = Path(tmp) / "source.docx"
+        formatted_path = Path(tmp) / "formatted.docx"
+        source.save(source_path)
+        formatted.save(formatted_path)
+
+        unknown = diag.build_docx_table_model(formatted_path)
+        proven = diag.build_docx_table_model(formatted_path, source_docx=source_path)
+
+    if {row["provenance"] for row in unknown["rows"]} != {"unknown"}:
+        return _result(False, f"omitted source should produce unknown provenance: {unknown['rows']!r}")
+    by_fp = {row["normalized_fingerprint"]: row["provenance"] for row in proven["rows"]}
+    if by_fp.get("a b") != "source":
+        return _result(False, f"source data row not proven: {proven['rows']!r}")
+    if by_fp.get("1 2") != "formatter_generated":
+        return _result(False, f"generated numeric row not classified by provenance: {proven['rows']!r}")
+    return _result(True, "provenance is unknown without source and source/formatter-generated with source")
+
+
+def test_tm_universal_same_page_repeated_fragment_issue() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1")
+    first = doc.add_table(rows=3, cols=3)
+    _tm_set_row(first, 0, ["НПА", "Предмет", "Для кого"])
+    _tm_set_row(first, 1, ["1", "2", "3"])
+    _tm_set_row(first, 2, ["208-ФЗ", "Компетенция", "АО"])
+    second = doc.add_table(rows=3, cols=3)
+    _tm_set_row(second, 0, ["НПА", "Предмет", "Для кого"])
+    _tm_set_row(second, 1, ["1", "2", "3"])
+    _tm_set_row(second, 2, ["ТК РФ", "Труд", "Работники"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "same_page.docx"
+        doc.save(path)
+        report = diag.build_universal_table_diagnostics(
+            formatted_docx=path,
+            pdf_lines=[
+                _rv_line("Таблица 1.3.1", 22, 40.0),
+                _rv_line("НПА Предмет Для кого", 22, 70.0),
+                _rv_line("1 2 3", 22, 90.0),
+                _rv_line("208-ФЗ Компетенция АО", 22, 115.0),
+                _rv_line("НПА Предмет Для кого", 22, 210.0),
+                _rv_line("1 2 3", 22, 230.0),
+                _rv_line("ТК РФ Труд Работники", 22, 255.0),
+            ],
+        )
+
+    issues = [issue["issue_type"] for issue in report["issues"]]
+    if "same_page_repeated_fragment" not in issues:
+        return _result(False, f"same-page repeated fragment not emitted: {report['issues']!r}")
+    return _result(True, "universal diagnostics emit same-page repeated fragment issue")
+
+
+def test_tm_universal_continuation_missing_numeric_row_issue() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.2")
+    first = doc.add_table(rows=2, cols=2)
+    _tm_set_row(first, 0, ["Критерий", "Описание"])
+    _tm_set_row(first, 1, ["A", "B"])
+    doc.add_paragraph("Продолжение таблицы 1.1.2")
+    second = doc.add_table(rows=2, cols=2)
+    _tm_set_row(second, 0, ["Критерий", "Описание"])
+    _tm_set_row(second, 1, ["C", "D"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "missing_numeric.docx"
+        doc.save(path)
+        report = diag.build_universal_table_diagnostics(
+            formatted_docx=path,
+            pdf_lines=[
+                _rv_line("Таблица 1.1.2", 4, 40.0),
+                _rv_line("Критерий Описание", 4, 70.0),
+                _rv_line("A B", 4, 95.0),
+                _rv_line("Продолжение таблицы 1.1.2", 5, 40.0),
+                _rv_line("Критерий Описание", 5, 70.0),
+                _rv_line("C D", 5, 95.0),
+            ],
+        )
+
+    missing = [issue for issue in report["issues"] if issue["issue_type"] == "continuation_missing_numeric_row"]
+    if not missing:
+        return _result(False, f"missing numeric issue not emitted: {report['issues']!r}")
+    if missing[0]["evidence"].get("missing_numeric_physical_table_indexes") != [0, 1]:
+        return _result(False, f"missing numeric evidence wrong: {missing!r}")
+    return _result(True, "marker chain without numeric rows emits continuation_missing_numeric_row")
+
+
+def test_tm_universal_single_physical_table_crosses_pages_issue() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.3")
+    table = doc.add_table(rows=3, cols=2)
+    _tm_set_row(table, 0, ["Кейс", "Описание"])
+    _tm_set_row(table, 1, ["Кейс 1", "Начало"])
+    _tm_set_row(table, 2, ["Кейс 5", "Середина"])
+    table.add_row()
+    _tm_set_row(table, 3, ["Кейс 9", "Финал"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "cross_page.docx"
+        doc.save(path)
+        report = diag.build_universal_table_diagnostics(
+            formatted_docx=path,
+            rendered_rows=[
+                {
+                    "logical_table_id": "table_1.1.3",
+                    "physical_table_index": 0,
+                    "row_index": 1,
+                    "page": 5,
+                    "top_y": 500.0,
+                    "bottom_y": 520.0,
+                    "confidence": "high",
+                    "split_or_spill": False,
+                },
+                {
+                    "logical_table_id": "table_1.1.3",
+                    "physical_table_index": 0,
+                    "row_index": 2,
+                    "page": 6,
+                    "top_y": 60.0,
+                    "bottom_y": 80.0,
+                    "confidence": "high",
+                    "split_or_spill": False,
+                },
+                {
+                    "logical_table_id": "table_1.1.3",
+                    "physical_table_index": 0,
+                    "row_index": 3,
+                    "page": 7,
+                    "top_y": 60.0,
+                    "bottom_y": 80.0,
+                    "confidence": "high",
+                    "split_or_spill": False,
+                },
+            ],
+        )
+
+    issues = [issue for issue in report["issues"] if issue["issue_type"] == "single_physical_table_crosses_pages_without_marker"]
+    if not issues:
+        return _result(False, f"single physical cross-page issue not emitted: {report['issues']!r}")
+    if issues[0]["pages"] != [5, 6, 7]:
+        return _result(False, f"cross-page pages wrong: {issues!r}")
+    return _result(True, "mocked rendered rows emit single physical cross-page issue")
+
+
+def test_tm_universal_rendered_mapping_keeps_repeated_case_rows_on_real_pages() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.3")
+    table = doc.add_table(rows=4, cols=2)
+    _tm_set_row(table, 0, ["Кейс", "Описание"])
+    _tm_set_row(table, 1, ["Кейс 1 длинный, грустно, Word ширины, тест", "A"])
+    _tm_set_row(table, 2, ["Кейс 4 длинный, грустно, Word ширины, тест", "B"])
+    _tm_set_row(table, 3, ["Кейс 9 длинный, грустно, Word ширины, тест", "C"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "case_rows.docx"
+        doc.save(path)
+        report = diag.build_universal_table_diagnostics(
+            formatted_docx=path,
+            pdf_lines=[
+                _rv_line("Таблица 1.1.3", 5, 250.0),
+                _rv_line("Кейс 1 длинный, грустно, Word ширины, тест", 5, 382.0),
+                _rv_line("Кейс 4 длинный, грустно, Word ширины, тест", 6, 114.0),
+                _rv_line("Кейс 9 длинный, грустно, Word ширины, тест", 7, 114.0),
+            ],
+        )
+
+    rendered = [
+        (row["row_index"], row["page"])
+        for row in report["rendered_rows"]
+        if row["logical_table_id"] == "table_1.1.3" and row["row_index"] in {1, 2, 3}
+    ]
+    if rendered != [(1, 5), (2, 6), (3, 7)]:
+        return _result(False, f"case row/page mapping drifted: {rendered!r}")
+    issues = [issue for issue in report["issues"] if issue["issue_type"] == "single_physical_table_crosses_pages_without_marker"]
+    if not issues or issues[0]["pages"] != [5, 6, 7]:
+        return _result(False, f"cross-page issue missing from mapped rows: {report['issues']!r}")
+    return _result(True, "cell-specific rendered mapping keeps repeated case rows on their pages")
+
+
+def test_tm_universal_bad2_style_clean_continuation() -> tuple[bool, str]:
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.3.1")
+    first = doc.add_table(rows=3, cols=3)
+    _tm_set_row(first, 0, ["Страна", "Модель", "Роль"])
+    _tm_set_row(first, 1, ["1", "2", "3"])
+    _tm_set_row(first, 2, ["ЕС", "Peppol", "Право"])
+    doc.add_paragraph("Продолжение таблицы 1.3.1")
+    second = doc.add_table(rows=2, cols=3)
+    _tm_set_row(second, 0, ["1", "2", "3"])
+    _tm_set_row(second, 1, ["РФ", "Оператор", "Контроль"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "bad2_clean.docx"
+        doc.save(path)
+        report = diag.build_universal_table_diagnostics(
+            formatted_docx=path,
+            pdf_lines=[
+                _rv_line("Таблица 1.3.1", 14, 450.0),
+                _rv_line("Страна Модель Роль", 14, 480.0),
+                _rv_line("1 2 3", 14, 500.0),
+                _rv_line("ЕС Peppol Право", 14, 530.0),
+                _rv_line("Продолжение таблицы 1.3.1", 15, 40.0),
+                _rv_line("1 2 3", 15, 70.0),
+                _rv_line("РФ Оператор Контроль", 15, 100.0),
+            ],
+        )
+
+    hard = [issue for issue in report["issues"] if issue["issue_type"] not in {"clean"}]
+    if hard:
+        return _result(False, f"clean continuation emitted issues: {hard!r}")
+    return _result(True, "bad2-style marker-before-rows continuation is clean")
+
+
+def test_tm_universal_diagnostics_run_is_non_mutating() -> tuple[bool, str]:
+    import hashlib
+
+    diag = _table_engine_diag_module()
+
+    doc = Document()
+    doc.add_paragraph("Таблица 1.1.1")
+    table = doc.add_table(rows=2, cols=2)
+    _tm_set_row(table, 0, ["Показатель", "Значение"])
+    _tm_set_row(table, 1, ["A", "B"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "input.docx"
+        doc.save(path)
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        diag.build_universal_table_diagnostics(formatted_docx=path, pdf_lines=[])
+        after = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    if before != after:
+        return _result(False, "diagnostics mutated input DOCX bytes")
+    return _result(True, "universal diagnostics are non-mutating")
+
+
 def test_tm_same_page_continuation_marker_is_flagged() -> tuple[bool, str]:
     diag = _table_engine_diag_module()
 
@@ -15915,6 +16234,15 @@ def run_all() -> None:
         ("TM | source note boundary fail closed", test_tm_source_note_boundary_fails_closed),
         ("TM | geometry snapshot invariant", test_tm_geometry_snapshot_invariant_for_preserve_mode),
         ("TM | diagnostic harness artifacts", test_tm_diagnostic_harness_writes_stage_artifacts),
+        ("TM | universal model grouping", test_tm_universal_model_groups_caption_title_table_source),
+        ("TM | universal row roles", test_tm_universal_row_roles_detect_header_numeric_data),
+        ("TM | universal provenance", test_tm_universal_provenance_unknown_and_source_safe),
+        ("TM | universal same-page issue", test_tm_universal_same_page_repeated_fragment_issue),
+        ("TM | universal missing numeric issue", test_tm_universal_continuation_missing_numeric_row_issue),
+        ("TM | universal single-table cross-page issue", test_tm_universal_single_physical_table_crosses_pages_issue),
+        ("TM | universal rendered case-row mapping", test_tm_universal_rendered_mapping_keeps_repeated_case_rows_on_real_pages),
+        ("TM | universal bad2 clean continuation", test_tm_universal_bad2_style_clean_continuation),
+        ("TM | universal diagnostics non-mutating", test_tm_universal_diagnostics_run_is_non_mutating),
         ("TM | same-page continuation marker flagged", test_tm_same_page_continuation_marker_is_flagged),
         ("TM | next-page continuation marker passes", test_tm_next_page_continuation_marker_passes_validation),
         ("TM | inline continuation prose classified", test_tm_inline_prose_continuation_text_is_not_valid_marker),
