@@ -6664,6 +6664,137 @@ def test_word_numbered_appendix_block_not_converted() -> tuple[bool, str]:
     return _result(True, "appendix decimal numPr items not converted")
 
 
+# ── Zone D: Lettered list recognition (uppercase, dot-delimiter, Latin) ──────
+
+def test_zone_d_lettered_list_variants() -> tuple[bool, str]:
+    """
+    Zone D: _CYRILLIC_LETTER_LIST_RE must recognize uppercase Cyrillic,
+    lowercase/uppercase Cyrillic with dot delimiter, and Latin A/B/C variants.
+    Singletons remain unchanged; ПРИЛОЖЕНИЕ А and plain body words are not affected.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+    from docx.oxml.ns import qn
+
+    def _firstline(p):
+        pPr = p._element.find(qn("w:pPr"))
+        if pPr is None:
+            return None
+        ind = pPr.find(qn("w:ind"))
+        return ind.get(qn("w:firstLine")) if ind is not None else None
+
+    def _check_list_item(p, label):
+        """Return error string or None."""
+        fl = _firstline(p)
+        if fl != "708":
+            return f"{label}: expected firstLine=708, got {fl!r} (text={p.text!r})"
+        return None
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+
+    # ── 1. Existing lowercase Cyrillic а) still works ─────────────────────────
+    a1 = doc.add_paragraph("а) первый пункт")
+    a2 = doc.add_paragraph("б) второй пункт")
+    doc.add_paragraph("")
+
+    # ── 2. Uppercase Cyrillic А) ──────────────────────────────────────────────
+    b1 = doc.add_paragraph("А) первый пункт")
+    b2 = doc.add_paragraph("Б) второй пункт")
+    doc.add_paragraph("")
+
+    # ── 3. Lowercase Cyrillic dot а. ─────────────────────────────────────────
+    c1 = doc.add_paragraph("а. первый пункт")
+    c2 = doc.add_paragraph("б. второй пункт")
+    doc.add_paragraph("")
+
+    # ── 4. Uppercase Cyrillic dot А. ─────────────────────────────────────────
+    d1 = doc.add_paragraph("А. первый пункт")
+    d2 = doc.add_paragraph("Б. второй пункт")
+    doc.add_paragraph("")
+
+    # ── 5. Latin A) ───────────────────────────────────────────────────────────
+    e1 = doc.add_paragraph("A) first item")
+    e2 = doc.add_paragraph("B) second item")
+    doc.add_paragraph("")
+
+    # ── 6. Latin A. ───────────────────────────────────────────────────────────
+    f1 = doc.add_paragraph("A. first item")
+    f2 = doc.add_paragraph("B. second item")
+    doc.add_paragraph("")
+
+    # ── Guards: must NOT be converted ─────────────────────────────────────────
+    appendix_label = doc.add_paragraph("ПРИЛОЖЕНИЕ А")
+    body_word = doc.add_paragraph("Анализ ситуации на рынке.")
+
+    normalize_plain_lists_in_document(doc, body_start=0)
+
+    # Check all list pairs got list formatting (firstLine=708)
+    for pair_label, p1, p2 in [
+        ("lowercase Cyrillic а)", a1, a2),
+        ("uppercase Cyrillic А)", b1, b2),
+        ("lowercase Cyrillic dot а.", c1, c2),
+        ("uppercase Cyrillic dot А.", d1, d2),
+        ("Latin А)", e1, e2),
+        ("Latin А.", f1, f2),
+    ]:
+        err = _check_list_item(p1, f"{pair_label} item 1")
+        if err:
+            return _result(False, err)
+        err = _check_list_item(p2, f"{pair_label} item 2")
+        if err:
+            return _result(False, err)
+
+    # ПРИЛОЖЕНИЕ А must not be touched
+    if appendix_label.text != "ПРИЛОЖЕНИЕ А":
+        return _result(False, f"ПРИЛОЖЕНИЕ А was modified: {appendix_label.text!r}")
+    if _firstline(appendix_label) == "708":
+        return _result(False, "ПРИЛОЖЕНИЕ А got list indent")
+
+    # Plain body word starting with А must not be touched
+    if "Анализ" not in body_word.text:
+        return _result(False, f"body word starting with А was mutated: {body_word.text!r}")
+    if _firstline(body_word) == "708":
+        return _result(False, "plain body word got list indent")
+
+    return _result(True, "all lettered list variants recognized; guards intact")
+
+
+def test_zone_d_singleton_letter_unchanged() -> tuple[bool, str]:
+    """Zone D: a single isolated letter-list paragraph is not converted (singleton guard).
+    Each candidate is separated from other list-like text by a blank paragraph so the
+    two-item buffer confirmation never fires.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import normalize_plain_lists_in_document
+    from docx.oxml.ns import qn
+
+    doc = _make_decimal_numbering_doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    # Singleton А) — surrounded by blank + body text so it cannot confirm a buffer
+    solo_upper = doc.add_paragraph("А) одиночный пункт")
+    doc.add_paragraph("")
+    doc.add_paragraph("Обычный текст после.")
+    doc.add_paragraph("")
+    # Singleton А. — same isolation
+    solo_dot = doc.add_paragraph("А. одиночный пункт с точкой")
+    doc.add_paragraph("Обычный текст после второго.")
+
+    normalize_plain_lists_in_document(doc, body_start=0)
+
+    pPr_u = solo_upper._element.find(qn("w:pPr"))
+    ind_u = pPr_u.find(qn("w:ind")) if pPr_u is not None else None
+    fl_u  = ind_u.get(qn("w:firstLine")) if ind_u is not None else None
+    if fl_u == "708":
+        return _result(False, f"singleton А) got list indent: {solo_upper.text!r}")
+
+    pPr_d = solo_dot._element.find(qn("w:pPr"))
+    ind_d = pPr_d.find(qn("w:ind")) if pPr_d is not None else None
+    fl_d  = ind_d.get(qn("w:firstLine")) if ind_d is not None else None
+    if fl_d == "708":
+        return _result(False, f"singleton А. got list indent: {solo_dot.text!r}")
+
+    return _result(True, "singleton uppercase/dot letter items left unchanged")
+
+
 # ── Test 10: Table-caption paragraphs not touched ────────────────────────────
 
 def test_table_caption_not_normalized() -> tuple[bool, str]:
@@ -16058,6 +16189,8 @@ def run_all() -> None:
         ("LIST | full normalization idempotent",              test_word_numbered_normalization_idempotent),
         ("LIST | colon+numeric-dot w:br split into paras",   test_split_colon_numeric_dot_br_paragraph),
         ("LIST | list body first letter lowercased",          test_list_body_first_letter_lowercased),
+        ("LIST | D uppercase/dot/Latin letter variants",      test_zone_d_lettered_list_variants),
+        ("LIST | D singleton letter item unchanged",          test_zone_d_singleton_letter_unchanged),
         ("FORMULA | unnumbered formula numbered",             test_formula_unnumbered_formula_gets_number_from_preceding_prose),
         ("FORMULA | existing numbered formula",               test_formula_existing_numbered_formula_still_formats),
         ("FORMULA | formula not list-normalized",             test_formula_paragraph_not_list_normalized),

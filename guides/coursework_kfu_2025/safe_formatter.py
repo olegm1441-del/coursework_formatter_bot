@@ -1348,7 +1348,12 @@ def normalize_citations_in_document(document, body_start):
 # ── List formatting (Level 1: а/б/в, Level 2: 1/2/3) ─────────────────────────
 
 _CYRILLIC_LIST_ALPHA = 'абвгдежзиклмнопрстуфхцчшщэюя'
-_CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яё])\)\s+(.+)$', re.DOTALL)
+# Matches single-letter list markers (Cyrillic lower/upper, Latin lower/upper)
+# with either a closing parenthesis or a period as the delimiter, followed by
+# at least one space and the item body. Single letter only — multi-letter words,
+# ПРИЛОЖЕНИЕ А, and abbreviations do not match because the delimiter must
+# immediately follow the first (and only) letter character.
+_CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яёА-ЯЁA-Za-z])[).]\s+(.+)$', re.DOTALL)
 _NUMERIC_PAREN_LIST_RE   = re.compile(r'^(\d+)\)\s+(.+)$',   re.DOTALL)
 _NUMERIC_DOT_LIST_RE     = re.compile(r'^(\d+)\.\s+(.+)$',   re.DOTALL)
 # Manual L1 dash/bullet markers (ascii hyphen, en/em dash, common black bullet
