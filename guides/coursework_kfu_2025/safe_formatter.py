@@ -4407,7 +4407,13 @@ REFERENCE_LEADING_NUMBER_RE = re.compile(
 
 
 def strip_leading_reference_number(text: str) -> str:
-    return clean_spaces(REFERENCE_LEADING_NUMBER_RE.sub("", clean_spaces(text), count=1))
+    t = clean_spaces(text)
+    for _ in range(3):
+        stripped = clean_spaces(REFERENCE_LEADING_NUMBER_RE.sub("", t, count=1))
+        if stripped == t:
+            break
+        t = stripped
+    return t
 
 
 def convert_reference_numbering_to_plain_text(document, body_start):

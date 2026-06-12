@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -19,6 +20,7 @@ from guides.coursework_kfu_2025.safe_formatter import (
     ensure_blank_before_reference_subheadings,
     ensure_single_blank_after_references_heading,
     process_document,
+    strip_leading_reference_number,
 )
 
 
@@ -420,6 +422,81 @@ def test_zone_j_new_reference_subheadings() -> tuple[bool, str]:
     return True, "Zone J subheadings are unnumbered; entries are sequentially numbered"
 
 
+def test_zone_k_duplicate_reference_numbering() -> tuple[bool, str]:
+    """Zone K: duplicate leading reference numbers are stripped before sequential renumbering."""
+    # Unit: strip_leading_reference_number removes repeated leading prefixes
+    unit_cases = [
+        ("1. 1. Федеральный закон от 01.01.2020", "Федеральный закон от 01.01.2020"),
+        ("3. 3. Книга по экономике", "Книга по экономике"),
+        ("12. 12. Статья в журнале", "Статья в журнале"),
+        ("1. Иванов И. И. Источник.", "Иванов И. И. Источник."),  # single prefix also stripped
+        ("Иванов И. И. Источник.", "Иванов И. И. Источник."),    # no prefix unchanged
+        ("1) 1) Источник номер один", "Источник номер один"),     # paren-style double
+        ("[1] [1] Источник номер один", "Источник номер один"),   # bracket-style double
+    ]
+    for text, expected in unit_cases:
+        actual = strip_leading_reference_number(text)
+        if actual != expected:
+            return False, f"strip_leading_reference_number({text!r}) = {actual!r}, expected {expected!r}"
+
+    # Unit: legal content numbers inside the title are NOT stripped
+    safe_cases = [
+        "Гражданский кодекс Российской Федерации. Часть 1. Статья 10.",
+        "ГОСТ Р 7.0.5-2008. Библиографическая ссылка.",
+        "https://example.com/path/1/resource",
+    ]
+    for text in safe_cases:
+        actual = strip_leading_reference_number(text)
+        if actual != text:
+            return False, f"safe content was mutated: {text!r} -> {actual!r}"
+
+    # Integration: full process_document with double-prefixed entries
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Краткий текст.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. 1. Федеральный закон от 01.01.2020 № 1-ФЗ.")
+    doc.add_paragraph("3. 3. Книга по экономике.")
+    doc.add_paragraph("Интернет-источники")
+    doc.add_paragraph("12. 12. Официальный сайт ЦБ РФ. URL: https://cbr.ru")
+    doc.add_paragraph("Нормальный источник без дублирования.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "in.docx"
+        output_path = Path(tmp) / "out.docx"
+        doc.save(str(input_path))
+        process_document(input_path, output_path)
+        out_doc = Document(str(output_path))
+
+    texts = _paragraph_texts(out_doc)
+    try:
+        refs_idx = texts.index("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    except ValueError:
+        return False, "references heading missing after formatting"
+
+    nonempty = [t for t in texts[refs_idx + 1:] if t]
+
+    # Zone J subheading must remain unnumbered
+    if "Интернет-источники" not in nonempty:
+        return False, "Zone J subheading Интернет-источники missing"
+    sh_idx = nonempty.index("Интернет-источники")
+    if nonempty[sh_idx][0].isdigit():
+        return False, f"subheading was numbered: {nonempty[sh_idx]!r}"
+
+    # All numbered entries must be sequentially 1./2./3./4. with no double prefix
+    numbered = [t for t in nonempty if t and t[0].isdigit()]
+    for i, entry in enumerate(numbered):
+        expected_prefix = f"{i + 1}. "
+        if not entry.startswith(expected_prefix):
+            return False, f"sequential numbering broken at position {i+1}: {entry!r}"
+        # Must not contain a second leading number immediately after the prefix
+        rest = entry[len(expected_prefix):]
+        if rest and rest[0].isdigit() and re.match(r"^\d+[.)]\s", rest):
+            return False, f"duplicate number survived in entry: {entry!r}"
+
+    return True, "duplicate leading reference numbers stripped; sequential numbering correct"
+
+
 def main() -> int:
     tests = [
         ("reference subheading spacing", test_reference_subheading_spacing),
@@ -429,6 +506,7 @@ def main() -> int:
         ("numbered reference entries", test_numbered_reference_entries_are_not_headings),
         ("old reference numbering cleanup", test_reference_old_numbering_cleanup),
         ("Zone J new reference subheadings", test_zone_j_new_reference_subheadings),
+        ("Zone K duplicate reference numbering", test_zone_k_duplicate_reference_numbering),
     ]
     failed = 0
     for name, fn in tests:
