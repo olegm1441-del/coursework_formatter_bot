@@ -348,6 +348,78 @@ def test_reference_old_numbering_cleanup() -> tuple[bool, str]:
     return True, "old reference numbering is stripped before clean sequential numbering"
 
 
+def test_zone_j_new_reference_subheadings() -> tuple[bool, str]:
+    """Zone J: newly added reference subheadings are unnumbered; entries after them are sequential."""
+    # Unit checks: canonical lookups
+    new_exact_cases = {
+        "нормативно-правовые акты": "Нормативно-правовые акты",
+        "Нормативно-правовые акты": "Нормативно-правовые акты",
+        "законы и нормативные акты": "Законы и нормативные акты",
+        "учебники и статьи": "Учебники и статьи",
+        "учебная литература": "Учебная литература",
+        "монографии": "Монографии",
+        "интернет-источники": "Интернет-источники",
+        "Интернет-источники": "Интернет-источники",
+        "интернет источники": "Интернет-источники",
+        "официальные сайты": "Официальные сайты",
+        "материалы судебной практики": "Материалы судебной практики",
+        "судебная практика": "Судебная практика",
+        "иностранные источники": "Иностранные источники",
+        "зарубежные источники": "Зарубежные источники",
+        "Зарубежные источники": "Зарубежные источники",
+    }
+    for text, expected in new_exact_cases.items():
+        actual = canonical_reference_block_heading_text(text)
+        if actual != expected:
+            return False, f"Zone J subheading not detected: {text!r} -> {actual!r}, expected {expected!r}"
+
+    # Integration: process a document with several Zone J subheadings interspersed with entries
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Краткий текст.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("Нормативно-правовые акты")
+    doc.add_paragraph("Федеральный закон от 01.01.2020 № 1-ФЗ.")
+    doc.add_paragraph("Судебная практика")
+    doc.add_paragraph("Решение Арбитражного суда от 01.03.2021.")
+    doc.add_paragraph("Зарубежные источники")
+    doc.add_paragraph("Smith J. Global Economy. London, 2022.")
+    doc.add_paragraph("Интернет-источники")
+    doc.add_paragraph("Официальный сайт ЦБ РФ. URL: https://cbr.ru")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "in.docx"
+        output_path = Path(tmp) / "out.docx"
+        doc.save(str(input_path))
+        process_document(input_path, output_path)
+        out_doc = Document(str(output_path))
+
+    texts = _paragraph_texts(out_doc)
+    try:
+        refs_idx = texts.index("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    except ValueError:
+        return False, "references heading missing after formatting"
+
+    nonempty = [t for t in texts[refs_idx + 1:] if t]
+
+    subheadings = {"Нормативно-правовые акты", "Судебная практика", "Зарубежные источники", "Интернет-источники"}
+    for sh in subheadings:
+        if sh not in nonempty:
+            return False, f"Zone J subheading missing from output: {sh!r}"
+
+    numbered_entries = [t for t in nonempty if t[0].isdigit() and ". " in t[:4]]
+    for entry in numbered_entries:
+        if entry[:2] in {"Но", "Су", "За", "Ин"}:
+            return False, f"subheading was numbered as a source entry: {entry!r}"
+
+    for i, entry in enumerate(numbered_entries):
+        expected_prefix = f"{i + 1}. "
+        if not entry.startswith(expected_prefix):
+            return False, f"sequential numbering broken: {entry!r} expected prefix {expected_prefix!r}"
+
+    return True, "Zone J subheadings are unnumbered; entries are sequentially numbered"
+
+
 def main() -> int:
     tests = [
         ("reference subheading spacing", test_reference_subheading_spacing),
@@ -356,6 +428,7 @@ def main() -> int:
         ("short centered bold reference heading", test_reference_short_centered_bold_heading_stays_unnumbered),
         ("numbered reference entries", test_numbered_reference_entries_are_not_headings),
         ("old reference numbering cleanup", test_reference_old_numbering_cleanup),
+        ("Zone J new reference subheadings", test_zone_j_new_reference_subheadings),
     ]
     failed = 0
     for name, fn in tests:
