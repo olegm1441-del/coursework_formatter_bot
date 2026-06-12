@@ -2209,12 +2209,17 @@ def smart_normalize_reference_line_case(text: str) -> str:
 
 
 def normalize_reference_url_spacing(text: str) -> str:
-    return re.sub(
+    # Insert a space before https?:// when immediately preceded by a non-space char.
+    # Lookbehind guarantees no double-space; URL content is unchanged.
+    text = re.sub(r"(?<=[^\s])(https?://)", r" \1", text)
+    # Ensure single space before opening paren of access-date annotation.
+    text = re.sub(
         r"(https?://[^\s]+?)\s*\((дата\s+обращения)",
         r"\1 (\2",
         text,
         flags=re.IGNORECASE,
     )
+    return text
 
 def strip_leading_heading_garbage(text: str) -> str:
     t = clean_spaces(text)
@@ -2871,7 +2876,59 @@ def format_empty_paragraphs_in_body(document, body_start):
         if is_empty_paragraph(paragraph):
             format_empty_paragraph(paragraph)
 
+def _ensure_space_before_hyperlink_urls(paragraph) -> bool:
+    """
+    For each w:hyperlink in the paragraph whose display text starts with
+    https?://, check the last w:r sibling that precedes it.  If that run's
+    text ends with a non-whitespace character, append a single space so the
+    URL does not appear glued to the surrounding prose.
+
+    Operates at the run-text level — never adds or removes XML elements,
+    never touches the hyperlink itself.  Safe to call on any paragraph.
+    Returns True if any run was modified.
+    """
+    changed = False
+    p_elem = paragraph._element
+    children = list(p_elem)
+    for i, child in enumerate(children):
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag != "hyperlink":
+            continue
+        h_text = "".join(t.text or "" for t in child.findall(".//" + qn("w:t")))
+        if not (h_text.startswith("http://") or h_text.startswith("https://")):
+            continue
+        # Walk backwards to find the nearest preceding w:r sibling
+        for j in range(i - 1, -1, -1):
+            sib = children[j]
+            sib_tag = sib.tag.split("}")[-1] if "}" in sib.tag else sib.tag
+            if sib_tag != "r":
+                continue
+            t_elems = sib.findall(qn("w:t"))
+            if not t_elems:
+                break
+            last_t = t_elems[-1]
+            text = last_t.text or ""
+            if text and not text[-1].isspace():
+                last_t.text = text + " "
+                last_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                changed = True
+            break
+    return changed
+
+
 def format_body(paragraph, preserve_numbering=False):
+    # Zone M: insert space before URLs glued to preceding text.
+    # Two cases handled: plain paragraphs (full text replacement) and paragraphs
+    # with existing w:hyperlink elements (run-level space insertion to preserve
+    # hyperlink XML).
+    _hyperlinks = paragraph._element.findall(".//" + qn("w:hyperlink"))
+    if not _hyperlinks:
+        _url_text = normalize_reference_url_spacing(clean_spaces(paragraph.text))
+        if _url_text != clean_spaces(paragraph.text):
+            replace_paragraph_text(paragraph, _url_text)
+    else:
+        _ensure_space_before_hyperlink_urls(paragraph)
+
     if preserve_numbering:
         # Для реальных Word-списков нельзя сбрасывать стиль в Normal
         # и нельзя трогать numbering/layout списка.

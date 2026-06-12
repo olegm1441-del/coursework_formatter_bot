@@ -19,6 +19,7 @@ from guides.coursework_kfu_2025.safe_formatter import (
     cleanup_reference_subheadings_layout,
     ensure_blank_before_reference_subheadings,
     ensure_single_blank_after_references_heading,
+    normalize_reference_url_spacing,
     process_document,
     strip_leading_reference_number,
 )
@@ -497,6 +498,183 @@ def test_zone_k_duplicate_reference_numbering() -> tuple[bool, str]:
     return True, "duplicate leading reference numbers stripped; sequential numbering correct"
 
 
+def test_zone_m_url_spacing() -> tuple[bool, str]:
+    """Zone M: space inserted before https?:// when glued to preceding text."""
+    # Unit: missing space cases
+    glued_cases = [
+        ("Разработчикhttps://t.me/aelart", "Разработчик https://t.me/aelart"),
+        ("text.https://example.com", "text. https://example.com"),
+        ("подробнее.https://example.com/page?a=1&b=2", "подробнее. https://example.com/page?a=1&b=2"),
+        ("сайтhttps://example.com/path", "сайт https://example.com/path"),
+    ]
+    for inp, expected in glued_cases:
+        actual = normalize_reference_url_spacing(inp)
+        if actual != expected:
+            return False, f"normalize_reference_url_spacing({inp!r}) = {actual!r}, expected {expected!r}"
+
+    # Guard: already-spaced URL unchanged
+    already_spaced = [
+        "Разработчик https://t.me/aelart",
+        "подробнее. https://example.com",
+        "1. Официальный сайт. URL: https://cbr.ru (дата обращения: 01.06.2026).",
+    ]
+    for inp in already_spaced:
+        actual = normalize_reference_url_spacing(inp)
+        if actual != inp:
+            return False, f"already-spaced URL was mutated: {inp!r} -> {actual!r}"
+
+    # Guard: URL path/query/fragment unchanged
+    complex_url_inp = "текстhttps://example.com/path?x=1&y=2#anchor"
+    complex_url_out = normalize_reference_url_spacing(complex_url_inp)
+    if complex_url_out != "текст https://example.com/path?x=1&y=2#anchor":
+        return False, f"complex URL result wrong: {complex_url_out!r}"
+
+    # Guard: existing дата-обращения spacing still works
+    date_inp = "https://example.com(дата обращения: 01.06.2026)"
+    date_out = normalize_reference_url_spacing(date_inp)
+    if "https://example.com (дата обращения" not in date_out:
+        return False, f"дата-обращения spacing broken: {date_out!r}"
+
+    # Guard: no double space when URL already has a space AND дата-обращения nearby
+    combined_inp = "сайт https://example.com(дата обращения: 01.06.2026)"
+    combined_out = normalize_reference_url_spacing(combined_inp)
+    if "  " in combined_out:
+        return False, f"double space introduced: {combined_out!r}"
+
+    # Integration: full process_document
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Разработчикhttps://t.me/aelart.")
+    doc.add_paragraph("Уже корректно: Разработчик https://t.me/aelart.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("Официальный сайтhttps://example.com/path?x=1.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "in.docx"
+        output_path = Path(tmp) / "out.docx"
+        doc.save(str(input_path))
+        process_document(input_path, output_path)
+        out_doc = Document(str(output_path))
+
+    texts = [p.text for p in out_doc.paragraphs]
+
+    # Body: glued URL fixed
+    body_para = next((t for t in texts if "t.me/aelart" in t and "Уже" not in t), None)
+    if body_para is None:
+        return False, "body paragraph with t.me/aelart missing"
+    if "Разработчикhttps" in body_para:
+        return False, f"body URL still glued: {body_para!r}"
+    if "  " in body_para:
+        return False, f"double space in body paragraph: {body_para!r}"
+
+    # Body: already-spaced unchanged
+    already_body = next((t for t in texts if "Уже корректно" in t), None)
+    if already_body and "  " in already_body:
+        return False, f"double space in already-spaced paragraph: {already_body!r}"
+
+    # Reference: glued URL fixed
+    ref_para = next((t for t in texts if "example.com/path" in t), None)
+    if ref_para is None:
+        return False, "reference entry with example.com missing"
+    if "сайтhttps" in ref_para:
+        return False, f"reference URL still glued: {ref_para!r}"
+
+    return True, "URL spacing inserted; existing spacing and URL content unchanged"
+
+
+def test_zone_m_url_spacing_hyperlink_paragraph() -> tuple[bool, str]:
+    """
+    Zone M regression: body paragraph where the URL is a pre-existing w:hyperlink
+    element (Word auto-converts pasted URLs) must still get a space inserted
+    between the preceding plain run and the hyperlink.
+
+    Root cause was: the plain-text guard skipped paragraphs with hyperlinks
+    entirely, leaving 'Разработчикhttps://t.me/aelart' unspaced.
+    Fix: _ensure_space_before_hyperlink_urls patches the last w:r run text.
+    """
+    from guides.coursework_kfu_2025.safe_formatter import (
+        format_body, _ensure_space_before_hyperlink_urls,
+    )
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    # Build a paragraph: plain run 'Конец. Разработчик' + w:hyperlink 'https://t.me/aelart'
+    doc = Document()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    p = doc.add_paragraph()
+    p_elem = p._element
+
+    # Plain run with no trailing space
+    run_elem = OxmlElement("w:r")
+    t_elem = OxmlElement("w:t")
+    t_elem.text = "Конец. Разработчик"
+    run_elem.append(t_elem)
+    p_elem.append(run_elem)
+
+    # Hyperlink element containing the URL
+    hl = OxmlElement("w:hyperlink")
+    hl.set(qn("w:history"), "1")
+    hl_run = OxmlElement("w:r")
+    hl_t = OxmlElement("w:t")
+    hl_t.text = "https://t.me/aelart"
+    hl_run.append(hl_t)
+    hl.append(hl_run)
+    p_elem.append(hl)
+
+    # Verify initial state
+    if "Разработчикhttps" not in p.text:
+        return False, f"test setup failed: expected glued text, got {p.text!r}"
+
+    # Apply the fix
+    _ensure_space_before_hyperlink_urls(p)
+
+    # The plain run should now end with a space
+    t_elems = run_elem.findall(qn("w:t"))
+    if not t_elems:
+        return False, "w:t element missing from plain run after fix"
+    run_text = t_elems[-1].text or ""
+    if not run_text.endswith(" "):
+        return False, f"plain run does not end with space after fix: {run_text!r}"
+
+    # Hyperlink text must be unchanged
+    hl_text = "".join(t.text or "" for t in hl.findall(".//" + qn("w:t")))
+    if hl_text != "https://t.me/aelart":
+        return False, f"hyperlink text was altered: {hl_text!r}"
+
+    # Idempotent: calling again must not double-space
+    _ensure_space_before_hyperlink_urls(p)
+    run_text2 = run_elem.findall(qn("w:t"))[-1].text or ""
+    if run_text2.endswith("  "):
+        return False, f"double space after second call: {run_text2!r}"
+
+    # Integration: format_body on a paragraph with a hyperlink applies the fix
+    doc2 = Document()
+    doc2.add_paragraph("ВВЕДЕНИЕ")
+    p2 = doc2.add_paragraph()
+    p2_elem = p2._element
+    r2 = OxmlElement("w:r")
+    t2 = OxmlElement("w:t")
+    t2.text = "Разработчик"
+    r2.append(t2)
+    p2_elem.append(r2)
+    hl2 = OxmlElement("w:hyperlink")
+    hl2.set(qn("w:history"), "1")
+    r2b = OxmlElement("w:r")
+    t2b = OxmlElement("w:t")
+    t2b.text = "https://t.me/aelart"
+    r2b.append(t2b)
+    hl2.append(r2b)
+    p2_elem.append(hl2)
+
+    format_body(p2)
+
+    t2_after = r2.findall(qn("w:t"))[-1].text or ""
+    if not t2_after.endswith(" "):
+        return False, f"format_body did not add space before hyperlink: {t2_after!r}"
+
+    return True, "hyperlink URL spacing: space added before pre-existing w:hyperlink URLs"
+
+
 def main() -> int:
     tests = [
         ("reference subheading spacing", test_reference_subheading_spacing),
@@ -507,6 +685,8 @@ def main() -> int:
         ("old reference numbering cleanup", test_reference_old_numbering_cleanup),
         ("Zone J new reference subheadings", test_zone_j_new_reference_subheadings),
         ("Zone K duplicate reference numbering", test_zone_k_duplicate_reference_numbering),
+        ("Zone M URL spacing", test_zone_m_url_spacing),
+        ("Zone M URL spacing hyperlink paragraph", test_zone_m_url_spacing_hyperlink_paragraph),
     ]
     failed = 0
     for name, fn in tests:
