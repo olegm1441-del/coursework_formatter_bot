@@ -1335,12 +1335,17 @@ def test_autotoc_old_toc_heading_with_page_number_removed() -> tuple[bool, str]:
 
 def test_autotoc_standalone_loose_contents_paragraph_does_not_delete_body() -> tuple[bool, str]:
     """
-    A loose Содержание-like paragraph that does NOT lead a real TOC block must
-    not cause aggressive deletion of unrelated front-matter body text.
+    P1 hard recovery (v2 approved rule): a Содержание marker followed by a
+    confident intro (standalone ВВЕДЕНИЕ by text) authorises hard-removal of the
+    ENTIRE block between the marker and the intro — including hand-typed prose
+    that would otherwise read like front-matter. The structural rule
+    (contents marker + confident intro) wins; no length thresholds are used.
+    Previously this case preserved the prose; the product rule changed so the
+    block is now removed and replaced by a single canonical СОДЕРЖАНИЕ.
     """
     doc = Document()
     doc.add_paragraph("Титульная строка")
-    doc.add_paragraph("Содержание.")  # loose-only; no TOC entries follow before real intro
+    doc.add_paragraph("Содержание.")  # loose marker; prose follows before real intro
     doc.add_paragraph("Просто пояснительный абзац, не относящийся к содержанию.")
     doc.add_paragraph("Ещё один обычный абзац без структуры TOC.")
     doc.add_paragraph("ВВЕДЕНИЕ")
@@ -1362,13 +1367,189 @@ def test_autotoc_standalone_loose_contents_paragraph_does_not_delete_body() -> t
     out = _run_static_contents_rebuild(doc, rendered_lines)
     front = _toc_texts_before_intro(out)
     joined = "\n".join(front)
-    if "Просто пояснительный абзац" not in joined:
-        return _result(False, f"front-matter body text deleted: {front!r}")
-    if "Ещё один обычный абзац" not in joined:
-        return _result(False, f"front-matter body text deleted: {front!r}")
+    if "Просто пояснительный абзац" in joined:
+        return _result(False, f"prose between marker and intro survived: {front!r}")
+    if "Ещё один обычный абзац" in joined:
+        return _result(False, f"prose between marker and intro survived: {front!r}")
+    if "Содержание." in joined:
+        return _result(False, f"old loose Содержание marker survived: {front!r}")
     if front.count("СОДЕРЖАНИЕ") != 1:
         return _result(False, f"expected exactly one canonical СОДЕРЖАНИЕ: {front!r}")
-    return _result(True, "standalone loose contents paragraph does not delete body text")
+    return _result(True, "confident intro authorises hard-removal of marker→intro block")
+
+
+def test_autotoc_p1_garbage_removed_when_intro_normal_style_text_only() -> tuple[bool, str]:
+    """
+    P1 v2 CORE: garbage prose must be removed even when the intro paragraph is
+    NOT yet Heading 1 — a standalone ВВЕДЕНИЕ detected by TEXT is a sufficient
+    confidence signal. Mirrors the dirty demo (primer) structure.
+    """
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("Содержание")
+    doc.add_paragraph("тут что то будет содержаться, оставлю это на откуп боту")
+    doc.add_paragraph("Сразу к делу:")
+    doc.add_paragraph("ВВЕДЕНИЕ")  # Normal style — NOT promoted to Heading 1
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("ЗАКЛЮЧЕНИЕ", 5),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "тут что то" in joined:
+        return _result(False, f"garbage survived (text-only intro): {front!r}")
+    if "Сразу к делу" in joined:
+        return _result(False, f"garbage survived (text-only intro): {front!r}")
+    if "Содержание" in joined and "СОДЕРЖАНИЕ" not in [t for t in front if t == "Содержание"] and front.count("Содержание") > 0:
+        return _result(False, f"old lowercase Содержание marker survived: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ: {front!r}")
+    return _result(True, "garbage removed with Normal-style standalone ВВЕДЕНИЕ (text signal)")
+
+
+def test_autotoc_p1_oglavlenie_variant_garbage_removed_text_only() -> tuple[bool, str]:
+    """P1 v2: Оглавление marker + Normal-style ВВЕДЕНИЕ → garbage removed."""
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("Оглавление")
+    doc.add_paragraph("мусорный текст перед введением")
+    doc.add_paragraph("ВВЕДЕНИЕ")  # Normal style
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Основной раздел")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Основной раздел", 4),
+        ("ЗАКЛЮЧЕНИЕ", 5),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "мусорный текст" in joined:
+        return _result(False, f"garbage survived in Оглавление case: {front!r}")
+    if "Оглавление" in joined:
+        return _result(False, f"old Оглавление marker survived: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ: {front!r}")
+    return _result(True, "Оглавление variant: garbage removed with text-only intro signal")
+
+
+def test_autotoc_p1_fail_closed_no_confident_intro_keeps_block() -> tuple[bool, str]:
+    """
+    P1 v2 FAIL-CLOSED: when the body-start paragraph is neither a standalone
+    intro by text nor Heading 1 styled, _find_existing_contents_start must NOT
+    return a removal index for a marker followed by non-TOC prose — the
+    conservative safety guard stays active. Unit-level check.
+    """
+    import guides.coursework_kfu_2025.contents_builder as cb
+
+    doc = Document()
+    doc.add_paragraph("Титульная строка")          # 0
+    doc.add_paragraph("Содержание")                 # 1 marker
+    doc.add_paragraph("обычный пояснительный абзац один")  # 2 prose
+    doc.add_paragraph("обычный пояснительный абзац два")   # 3 prose
+    doc.add_paragraph("ещё один абзац без структуры")      # 4 = body_start (NOT intro, NOT heading)
+    doc.add_paragraph("Текст.")                     # 5
+
+    body_start = 4
+    intro_para = doc.paragraphs[body_start]
+    # Sanity: body_start really is not a confident intro
+    if cb._is_intro_heading(intro_para.text) or cb._is_heading1_style(intro_para):
+        return _result(False, "test setup wrong: body_start looks like confident intro")
+
+    start = cb._find_existing_contents_start(doc, body_start)
+    if start is not None:
+        return _result(False, f"fail-closed violated: returned removal index {start}")
+    return _result(True, "fail-closed: no confident intro keeps conservative guard, no removal")
+
+
+def test_autotoc_p1_wellformed_old_toc_removed_with_confident_intro() -> tuple[bool, str]:
+    """P1 v2: a well-formed old TOC block is still removed (confident intro path)."""
+    doc = Document()
+    doc.add_paragraph("Титульная строка")
+    doc.add_paragraph("Содержание")
+    doc.add_paragraph("ВВЕДЕНИЕ........................................................3")
+    doc.add_paragraph("1. Раздел...............................................4")
+    doc.add_paragraph("ВВЕДЕНИЕ")  # Normal-style real intro
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 3),
+        ("1. Теоретические основы", 4),
+        ("ЗАКЛЮЧЕНИЕ", 5),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 6),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "ВВЕДЕНИЕ........" in joined:
+        return _result(False, f"old TOC entry survived: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ: {front!r}")
+    return _result(True, "well-formed old TOC block removed with confident intro")
+
+
+def test_autotoc_p1_title_page_before_contents_preserved() -> tuple[bool, str]:
+    """
+    P1 v2: paragraphs BEFORE the Содержание marker (title page) are preserved;
+    only the marker→intro block is removed.
+    """
+    doc = Document()
+    doc.add_paragraph("КАЗАНСКИЙ ФЕДЕРАЛЬНЫЙ УНИВЕРСИТЕТ")
+    doc.add_paragraph("Курсовая работа по предмету")
+    doc.add_paragraph("Автор: Иванов Иван")
+    doc.add_paragraph("Содержание")
+    doc.add_paragraph("мусор между содержанием и введением")
+    doc.add_paragraph("ВВЕДЕНИЕ")  # Normal-style
+    doc.add_paragraph("Текст введения.")
+    h1 = doc.add_paragraph("1. Теоретические основы")
+    h1.style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ")
+    doc.add_paragraph("1. Источник.")
+
+    rendered_lines = [
+        ("ВВЕДЕНИЕ", 4),
+        ("1. Теоретические основы", 5),
+        ("ЗАКЛЮЧЕНИЕ", 6),
+        ("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", 7),
+    ]
+    out = _run_static_contents_rebuild(doc, rendered_lines)
+    front = _toc_texts_before_intro(out)
+    joined = "\n".join(front)
+    if "КАЗАНСКИЙ ФЕДЕРАЛЬНЫЙ УНИВЕРСИТЕТ" not in joined:
+        return _result(False, f"title page paragraph deleted: {front!r}")
+    if "Автор: Иванов Иван" not in joined:
+        return _result(False, f"title page paragraph deleted: {front!r}")
+    if "мусор между" in joined:
+        return _result(False, f"garbage survived: {front!r}")
+    if front.count("СОДЕРЖАНИЕ") != 1:
+        return _result(False, f"expected single canonical СОДЕРЖАНИЕ: {front!r}")
+    return _result(True, "title page preserved; marker→intro garbage removed")
 
 
 def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
@@ -16464,6 +16645,11 @@ def run_all() -> None:
         ("TOC | old TOC with appendix entries removed", test_autotoc_old_toc_with_appendix_entries_removed),
         ("TOC | old TOC heading with page number removed", test_autotoc_old_toc_heading_with_page_number_removed),
         ("TOC | standalone loose heading keeps body",  test_autotoc_standalone_loose_contents_paragraph_does_not_delete_body),
+        ("TOC | P1 garbage removed text-only intro",   test_autotoc_p1_garbage_removed_when_intro_normal_style_text_only),
+        ("TOC | P1 Оглавление variant text-only",      test_autotoc_p1_oglavlenie_variant_garbage_removed_text_only),
+        ("TOC | P1 fail-closed no confident intro",    test_autotoc_p1_fail_closed_no_confident_intro_keeps_block),
+        ("TOC | P1 well-formed old TOC removed",       test_autotoc_p1_wellformed_old_toc_removed_with_confident_intro),
+        ("TOC | P1 title page before contents kept",   test_autotoc_p1_title_page_before_contents_preserved),
         ("TOC | soft-break plain TOC removed",         test_autotoc_softbreak_plain_toc_removed),
         ("TOC | soft-break TOC appendix continuation removed", test_autotoc_softbreak_toc_appendix_continuation_removed),
         ("TOC | body ВВЕДЕНИЕ preserved after softbreak cleanup", test_autotoc_body_intro_preserved_after_softbreak_toc),

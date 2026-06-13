@@ -415,11 +415,28 @@ def _collect_body_entries(document: Document, body_start: int) -> list[TocEntry]
 
 
 def _find_existing_contents_start(document: Document, body_start: int) -> int | None:
-    paragraphs = document.paragraphs[:body_start]
-    for idx, paragraph in enumerate(paragraphs):
+    paragraphs = document.paragraphs
+    intro_para = paragraphs[body_start] if 0 <= body_start < len(paragraphs) else None
+    # "Confident intro" — the structural signal that lets us hard-remove the whole
+    # block between a Содержание/Оглавление marker and the body start, including
+    # hand-typed prose garbage ("тут что то будет содержаться", "Сразу к делу:").
+    # Two independent signals, either is sufficient (no length thresholds):
+    #   * the body-start paragraph is a standalone ВВЕДЕНИЕ/Введение by TEXT
+    #     (`_is_intro_heading`) — works even before the formatter promotes it; and
+    #   * the body-start paragraph has Heading 1 style (already promoted).
+    # body_start itself comes from `_find_body_start_index_for_contents`, which in
+    # the contents path only returns a standalone intro that follows a
+    # toc-evidenced Содержание — so this stays fail-closed: when no confident
+    # intro exists, we fall back to the conservative safety check below.
+    intro_is_confident = intro_para is not None and (
+        _is_intro_heading(intro_para.text) or _is_heading1_style(intro_para)
+    )
+    for idx, paragraph in enumerate(paragraphs[:body_start]):
         text = paragraph.text or ""
         if not _is_contents_heading(text):
             continue
+        if intro_is_confident:
+            return idx
         if not _is_safe_to_remove_pre_body_block(document, text, idx, body_start):
             continue
         return idx
