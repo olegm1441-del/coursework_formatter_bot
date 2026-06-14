@@ -3955,7 +3955,190 @@ def is_heading2_promotion_safe(paragraph, parsed_h2=None, toc_text=None):
     return False
 
 
-def is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=None):
+def _numbering_ilvl(paragraph):
+    """Word-numbering indent level (ilvl) of a paragraph, or None if unnumbered."""
+    pPr = paragraph._element.pPr
+    if pPr is None:
+        return None
+    numPr = pPr.find(qn("w:numPr"))
+    if numPr is None:
+        return None
+    ilvl = numPr.find(qn("w:ilvl"))
+    if ilvl is None:
+        return 0
+    try:
+        return int(ilvl.get(qn("w:val"), "0"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _next_nonblank_paragraph(paragraphs, idx):
+    j = idx + 1
+    while j < len(paragraphs):
+        if clean_spaces(paragraphs[j].text):
+            return paragraphs[j]
+        j += 1
+    return None
+
+
+def _prev_nonblank_paragraph(paragraphs, idx, body_start=0):
+    j = idx - 1
+    while j >= body_start:
+        if clean_spaces(paragraphs[j].text):
+            return paragraphs[j]
+        j -= 1
+    return None
+
+
+def _leading_number_dot(text):
+    """Return the integer N for a paragraph that starts with `N.`, else None.
+    Tolerates a missing space after the dot (`2.дальше`)."""
+    m = re.match(r"^\s*(\d+)\.", clean_spaces(text or ""))
+    return int(m.group(1)) if m else None
+
+
+def _loose_child_h2(text):
+    """(chapter, paragraph) for an `N.M` heading-2-like child, else None.
+    Tolerates a missing space after the number (`1.1.Параграф`) and rejects a
+    three-level `N.M.K` form (that is a heading-3 / deeper, not an H2 child)."""
+    m = re.match(r"^(\d+)\.(\d+)(?!\.\d)", clean_spaces(text or ""))
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _clean_spawn_title(base_title):
+    """First sentence of a messy chapter title, trimmed so parse_heading1 (and
+    therefore the TOC builder) will accept it."""
+    t = clean_spaces(base_title or "")
+    if not t:
+        return ""
+    head = re.split(r"\.\s", t, maxsplit=1)[0].strip().rstrip(".:;,").strip()
+    if len(head) > 120:
+        head = head[:120].rstrip()
+    return head
+
+
+def detect_hierarchy_spawn_chapter(paragraph, idx, paragraphs, body_start, prev_paragraph):
+    """
+    Detect the intended Chapter-N spawn point that the plain `parse_heading1`
+    path misses: a `N.` line whose title carries internal periods, OR a top-level
+    Word-numbered list item, that is immediately followed by an `N.1` child
+    heading. Returns (chapter_num, clean_title) or None.
+
+    This is the promotion half of the demo-numbering vs real-heading rule. It is
+    deliberately conservative: it fires only when the very next non-blank
+    paragraph is an `N.1` child and the preceding line is not a colon list lead.
+    """
+    text = clean_spaces(paragraph.text)
+    if not text:
+        return None
+    low = text.lower()
+    forbidden = (
+        "таблица", "табл.", "рисунок", "рис.", "источник:", "составлено по:",
+        "рассчитано по:", "примечание:", "продолжение таб", "глава",
+    )
+    if low.startswith(forbidden):
+        return None
+    # Already a recognizable heading/subheading by text → handled elsewhere.
+    if parse_heading1(text) or parse_heading2(text) or _loose_child_h2(text):
+        return None
+
+    literal_n = None
+    base_title = None
+    m_lit = re.match(r"^(\d+)\.\s+(.+)$", text)
+    if m_lit:
+        literal_n = int(m_lit.group(1))
+        base_title = m_lit.group(2)
+    elif paragraph_has_numbering(paragraph) and _numbering_ilvl(paragraph) == 0:
+        base_title = text
+    else:
+        return None
+
+    # Colon-introduced context → list, not a chapter.
+    if prev_paragraph is not None and clean_spaces(prev_paragraph.text).endswith(":"):
+        return None
+
+    nxt = _next_nonblank_paragraph(paragraphs, idx)
+    if nxt is None:
+        return None
+    child = _loose_child_h2(nxt.text)
+    if child is None or child[1] != 1:
+        return None
+    child_chapter = child[0]
+    if literal_n is not None:
+        if child_chapter != literal_n:
+            return None
+        chapter_num = literal_n
+    else:
+        chapter_num = child_chapter
+
+    clean_title = _clean_spawn_title(base_title)
+    if not clean_title:
+        return None
+    return (chapter_num, clean_title)
+
+
+def is_demo_numbered_list_item(paragraph, parsed_h1, prev_paragraph=None, next_paragraph=None):
+    """
+    Peer/colon numbered-LIST signal for a `N.` chapter candidate that carries no
+    independent structural heading signal:
+      * its next non-blank sibling is an `N+1.` enumerator (peer list), or
+      * the preceding non-blank line ends with a colon (list lead-in).
+    Such a line is a numbered list example, not a chapter, and is converted to a
+    dash list item so it neither renders as a heading nor leaks into the TOC via
+    the contents builder's `N. Title` fallback.
+    """
+    if not parsed_h1 or parsed_h1.get("kind") != "heading1_chapter":
+        return False
+    if paragraph_has_heading_style_or_outline(paragraph) or is_probable_center_bold_heading(paragraph):
+        return False
+    chapter_num = parsed_h1.get("chapter_num")
+    if chapter_num is not None and next_paragraph is not None:
+        next_num = _leading_number_dot(next_paragraph.text)
+        if next_num is not None and next_num == chapter_num + 1:
+            return True
+    if prev_paragraph is not None and clean_spaces(prev_paragraph.text).endswith(":"):
+        return True
+    return False
+
+
+def _peer_number_run_items(paragraphs, start_idx, body_start):
+    """
+    Collect a strictly-adjacent run of plain numbered paragraphs
+    `N.`, `N+1.`, `N+2.`, … starting at *start_idx*, returning
+    [(paragraph, body_text), …] with the `N.` marker stripped from each body.
+
+    Tolerates a missing space after the dot (`2.дальше` → body "дальше …" so the
+    rendered list item is `- дальше …`, fixing the glued marker). Stops at the
+    first blank, non-numbered, wrong-number, or `N.M` (sub-heading) paragraph so
+    a real heading hierarchy is never swallowed. Used to normalize the WHOLE peer
+    list consistently, including items that never parse as a heading.
+    """
+    items: list = []
+    expected = _leading_number_dot(paragraphs[start_idx].text)
+    if expected is None:
+        return items
+    j = start_idx
+    while j < len(paragraphs):
+        txt = clean_spaces(paragraphs[j].text)
+        if not txt:
+            break
+        n = _leading_number_dot(txt)
+        if n is None or n != expected or re.match(r"^\s*\d+\.\d", txt):
+            break
+        body = re.sub(r"^\s*\d+\.\s*", "", txt).strip()
+        if not body:
+            break
+        items.append((paragraphs[j], body))
+        expected += 1
+        j += 1
+    return items
+
+
+def is_heading1_promotion_safe(
+    paragraph, parsed_h1, toc_text=None, prev_paragraph=None, next_paragraph=None
+):
     if not parsed_h1:
         return False
 
@@ -3974,6 +4157,22 @@ def is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=None):
         paragraph_has_heading_style_or_outline(paragraph)
         or is_probable_center_bold_heading(paragraph)
     )
+
+    # Demo-numbering vs real-heading demotion (only when there is NO independent
+    # structural heading signal — real styled chapters are never touched):
+    #   * peer enumerator — `N.` whose next non-blank sibling is `N+1.` is a
+    #     numbered LIST (`1. тише едешь` / `2.дальше не помню`), not a chapter;
+    #   * colon lead-in — a numbered run introduced by a `:`-terminated line is
+    #     a list. Hierarchy evidence (`N.` followed by `N.1`) is handled by the
+    #     separate promotion path and never reaches this demotion branch.
+    if not has_structural_signal:
+        chapter_num = parsed_h1.get("chapter_num")
+        if chapter_num is not None and next_paragraph is not None:
+            next_num = _leading_number_dot(next_paragraph.text)
+            if next_num is not None and next_num == chapter_num + 1:
+                return False
+        if prev_paragraph is not None and clean_spaces(prev_paragraph.text).endswith(":"):
+            return False
 
     if toc_text and has_structural_signal:
         return True
@@ -6388,6 +6587,8 @@ def process_document(input_path: Path, output_path: Path):
             if m_fig_main and caption_tail_is_reference_prose(m_fig_main.group(3) or ""):
                 kind = "body_text"
         prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
+        prev_nb_obj = _prev_nonblank_paragraph(doc.paragraphs, idx, body_start)
+        next_nb_obj = _next_nonblank_paragraph(doc.paragraphs, idx)
         is_body_list_item = is_probable_body_list_item(
             paragraph,
             prev_paragraph=prev_paragraph_obj,
@@ -6398,9 +6599,32 @@ def process_document(input_path: Path, output_path: Path):
 
         parsed_h1 = parse_heading1(text)
         if parsed_h1:
-            if parsed_h1["kind"] == "heading1_chapter":
+            if parsed_h1["kind"] == "heading1_chapter" and is_demo_numbered_list_item(
+                paragraph, parsed_h1, prev_paragraph=prev_nb_obj, next_paragraph=next_nb_obj
+            ):
+                # Demo numbered list (`1. тише едешь` / `2.дальше не помню`, or a
+                # colon-introduced run): normalize the WHOLE adjacent peer run to
+                # dash list items in one shot — so both `1.` and the glued `2.`
+                # become consistent `- …` items — and so none reach the TOC's
+                # `N. Title` fallback. Converting the run here means the loop later
+                # sees the trailing items already as dash body-list items.
+                run_items = _peer_number_run_items(doc.paragraphs, idx, body_start)
+                if len(run_items) >= 2:
+                    for run_p, run_body in run_items:
+                        _format_endash_list_item(run_p, run_body)
+                else:
+                    demo_body = re.sub(r"^\s*\d+\.\s*", "", text).strip()
+                    if demo_body:
+                        _format_endash_list_item(paragraph, demo_body)
+                text = clean_spaces(paragraph.text)
+                parsed_h1 = None
+                kind = "body_list_item"
+            elif parsed_h1["kind"] == "heading1_chapter":
                 toc_text = toc_h1_map.get(parsed_h1["chapter_num"])
-                if not is_heading1_promotion_safe(paragraph, parsed_h1, toc_text=toc_text):
+                if not is_heading1_promotion_safe(
+                    paragraph, parsed_h1, toc_text=toc_text,
+                    prev_paragraph=prev_nb_obj, next_paragraph=next_nb_obj,
+                ):
                     parsed_h1 = None
                     if kind == "heading1":
                         kind = "body_text"
@@ -6422,6 +6646,24 @@ def process_document(input_path: Path, output_path: Path):
                 next_paragraph_num = None
                 smart_repair_heading1(paragraph, text)
                 kind = "heading1"
+
+        # Hierarchy-spawn promotion: a messy-titled `N.` line or a top-level
+        # Word-numbered item followed by an `N.1` child is the intended chapter
+        # heading (the plain parse_heading1 path skips it because the title
+        # carries internal periods or the number is Word auto-numbering). This is
+        # the promotion half of the demo-numbering vs real-heading rule.
+        if parsed_h1 is None and kind in {"body_text", "body_list_item"}:
+            spawn = detect_hierarchy_spawn_chapter(
+                paragraph, idx, doc.paragraphs, body_start, prev_nb_obj
+            )
+            if spawn is not None:
+                spawn_chapter, spawn_title = spawn
+                replace_paragraph_text(paragraph, f"{spawn_chapter}. {spawn_title}")
+                text = clean_spaces(paragraph.text)
+                current_chapter_num = spawn_chapter
+                next_paragraph_num = 1
+                kind = "heading1"
+                parsed_h1 = parse_heading1(text)
 
         parsed_h2_existing = parse_heading2(text)
         if parsed_h2_existing:
@@ -6739,6 +6981,8 @@ def process_document(input_path: Path, output_path: Path):
             prev_nonempty_kind = "formula_explanation"
             continue
         prev_paragraph_obj = doc.paragraphs[idx - 1] if idx - 1 >= body_start else None
+        prev_nb_final = _prev_nonblank_paragraph(doc.paragraphs, idx, body_start)
+        next_nb_final = _next_nonblank_paragraph(doc.paragraphs, idx)
         if is_probable_body_list_item(
             paragraph,
             prev_paragraph=prev_paragraph_obj,
@@ -6752,7 +6996,7 @@ def process_document(input_path: Path, output_path: Path):
             toc_h1_map.get(parsed_h1_final["chapter_num"])
             if parsed_h1_final["kind"] == "heading1_chapter"
             else None
-        )):
+        ), prev_paragraph=prev_nb_final, next_paragraph=next_nb_final):
             smart_repair_heading1(paragraph, text)
             format_heading1(paragraph)
             prev_nonempty_kind = "heading1"

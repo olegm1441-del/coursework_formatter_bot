@@ -1552,6 +1552,215 @@ def test_autotoc_p1_title_page_before_contents_preserved() -> tuple[bool, str]:
     return _result(True, "title page preserved; marker→intro garbage removed")
 
 
+# ───────────────────────── Heading/list classifier (HL) ─────────────────────────
+# Demo-numbering vs real-heading disambiguation. A plain `N.` line followed by a
+# peer `N+1.` (or preceded by a colon) is a numbered LIST, not a chapter; a `N.`
+# line followed soon by an `N.1` child is a real chapter spawn point.
+
+def _hl_process_document(doc: "Document") -> "Document":
+    """Save doc, run the full process_document pass, reload the result."""
+    from guides.coursework_kfu_2025.safe_formatter import process_document
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.docx")
+        out = os.path.join(tmp, "out.docx")
+        doc.save(inp)
+        process_document(inp, out)
+        return Document(out)
+
+
+def _hl_style(paragraph) -> str:
+    try:
+        return (paragraph.style.name or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _hl_find(doc, needle: str):
+    for p in doc.paragraphs:
+        if needle.lower() in (p.text or "").lower():
+            return p
+    return None
+
+
+def _hl_toc_entry_titles(doc) -> list[str]:
+    """Collect the TOC body entries the contents builder would emit."""
+    import guides.coursework_kfu_2025.contents_builder as cb
+    body_start = cb._find_body_start_index_for_contents(doc)
+    if body_start is None:
+        return []
+    return [e.title for e in cb._collect_body_entries(doc, body_start)]
+
+
+def test_hl_peer_numbered_sequence_not_promoted_to_heading1() -> tuple[bool, str]:
+    """
+    Demo peer list: `1. тише едешь` immediately followed by `2.дальше не помню`
+    (no space after `2.`) is a numbered LIST. The WHOLE peer block must be
+    normalized consistently — both items become coherent `- …` list items, the
+    glued `2.дальше` spacing is fixed, neither is Heading 1, neither reaches the
+    TOC, and the result is NOT mixed (`- тише едешь` / `2.дальше не помню`).
+    """
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения для контекста, обычный абзац.")
+    doc.add_paragraph("теперь к демонстрации, начнем с простого нумерация")
+    doc.add_paragraph("1. тише едешь")
+    doc.add_paragraph("2.дальше не помню")
+    doc.add_paragraph("Дальше идет обычный пояснительный текст без структуры.")
+
+    out = _hl_process_document(doc)
+    p1 = _hl_find(out, "тише едешь")
+    p2 = _hl_find(out, "дальше не помню")
+    if p1 is None or p2 is None:
+        return _result(False, "demo list paragraphs disappeared")
+    if _hl_style(p1) == "heading 1" or _hl_style(p2) == "heading 1":
+        return _result(False, f"peer item wrongly Heading 1: {_hl_style(p1)!r}/{_hl_style(p2)!r}")
+    t1, t2 = (p1.text or "").strip(), (p2.text or "").strip()
+    # Both items consistently rendered as dash list items (house style).
+    if not t1.startswith("- ") or not t2.startswith("- "):
+        return _result(False, f"peer block not consistently a list: {t1!r} / {t2!r}")
+    # No mixed result: the glued '2.дальше' must be gone, not left as body text.
+    if t2.startswith("2.") or "2.дальше" in t2:
+        return _result(False, f"glued '2.дальше' not normalized: {t2!r}")
+    if "дальше не помню" not in t2:
+        return _result(False, f"second peer item text lost: {t2!r}")
+    titles = " | ".join(_hl_toc_entry_titles(out)).lower()
+    if "тише едешь" in titles or "дальше не помню" in titles:
+        return _result(False, f"demo list leaked into TOC: {titles!r}")
+    return _result(True, "whole peer block normalized to consistent dash list, not in TOC, spacing fixed")
+
+
+def test_hl_hierarchy_spawn_promotes_messy_chapter_with_child() -> tuple[bool, str]:
+    """
+    A `1. <messy title>` line followed soon by `1.1.` child is the intended
+    Chapter 1 spawn point — promote to Heading 1 even though the title carries
+    internal periods; the `1.1` child stays Heading 2; both appear in the TOC.
+    """
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения для контекста без двоеточия в конце абзаца")
+    doc.add_paragraph("1. как хочешь главу маркируй. Типа 1.Чето там, или Глава 1 чето там, неважно.")
+    doc.add_paragraph("")
+    doc.add_paragraph("1.1. Параграф тоже как хочешь, лишь бы циферка была.")
+    doc.add_paragraph("Текст параграфа.")
+
+    out = _hl_process_document(doc)
+    spawn = _hl_find(out, "как хочешь главу маркируй")
+    child = _hl_find(out, "параграф тоже как хочешь")
+    if spawn is None or child is None:
+        return _result(False, "spawn/child paragraphs disappeared")
+    if _hl_style(spawn) != "heading 1":
+        return _result(False, f"intended chapter not Heading 1: style={_hl_style(spawn)!r} text={spawn.text!r}")
+    if _hl_style(child) != "heading 2":
+        return _result(False, f"child 1.1 not Heading 2: style={_hl_style(child)!r}")
+    titles = _hl_toc_entry_titles(out)
+    joined = " | ".join(titles).lower()
+    if "как хочешь главу маркируй" not in joined:
+        return _result(False, f"chapter spawn missing from TOC: {titles!r}")
+    if not any(t.strip().startswith("1.1") for t in titles):
+        return _result(False, f"child 1.1 missing from TOC: {titles!r}")
+    return _result(True, "messy chapter promoted with child; both coherent in TOC")
+
+
+def test_hl_colon_context_defaults_to_list() -> tuple[bool, str]:
+    """A numbered run introduced by a colon-terminated line is a list, not headings."""
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("Начнем перечисление:")
+    doc.add_paragraph("1. первый пункт перечисления")
+    doc.add_paragraph("2. второй пункт перечисления")
+    doc.add_paragraph("Завершающий обычный абзац.")
+
+    out = _hl_process_document(doc)
+    p1 = _hl_find(out, "первый пункт")
+    p2 = _hl_find(out, "второй пункт")
+    if p1 is None or p2 is None:
+        return _result(False, "list items disappeared")
+    if _hl_style(p1) == "heading 1" or _hl_style(p2) == "heading 1":
+        return _result(False, f"colon-introduced list wrongly promoted: {_hl_style(p1)!r}/{_hl_style(p2)!r}")
+    titles = " | ".join(_hl_toc_entry_titles(out)).lower()
+    if "пункт перечисления" in titles:
+        return _result(False, f"colon list leaked into TOC: {titles!r}")
+    return _result(True, "colon-introduced numbered run stays list, not headings")
+
+
+def test_hl_real_chapter_structure_preserved() -> tuple[bool, str]:
+    """
+    Guard against over-demotion: a genuine `1. … / 1.1 … / 2. … / 2.1 …`
+    structure keeps both chapters as Heading 1 and both subsections as Heading 2.
+    """
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. Теоретические основы предмета исследования")
+    doc.add_paragraph("Вводный текст первой главы.")
+    doc.add_paragraph("1.1. Понятие и сущность предмета")
+    doc.add_paragraph("Текст подраздела.")
+    doc.add_paragraph("2. Анализ предметной области")
+    doc.add_paragraph("Вводный текст второй главы.")
+    doc.add_paragraph("2.1. Оценка текущего состояния")
+    doc.add_paragraph("Текст подраздела.")
+
+    out = _hl_process_document(doc)
+    ch1 = _hl_find(out, "теоретические основы")
+    ch2 = _hl_find(out, "анализ предметной области")
+    s1 = _hl_find(out, "понятие и сущность")
+    s2 = _hl_find(out, "оценка текущего состояния")
+    for name, p, want in [("ch1", ch1, "heading 1"), ("ch2", ch2, "heading 1"),
+                          ("1.1", s1, "heading 2"), ("2.1", s2, "heading 2")]:
+        if p is None:
+            return _result(False, f"{name} paragraph disappeared")
+        if _hl_style(p) != want:
+            return _result(False, f"{name} expected {want}, got {_hl_style(p)!r} ({p.text!r})")
+    titles = _hl_toc_entry_titles(out)
+    if not any("теоретические основы" in t.lower() for t in titles):
+        return _result(False, f"chapter 1 missing from TOC: {titles!r}")
+    if not any("анализ предметной" in t.lower() for t in titles):
+        return _result(False, f"chapter 2 missing from TOC: {titles!r}")
+    return _result(True, "real two-chapter structure preserved as headings")
+
+
+def test_hl_no_toc_orphan_when_demoting_demo_block() -> tuple[bool, str]:
+    """
+    End-to-end demo shape: the `1. тише едешь / 2.дальше не помню` peer list is
+    demoted, the real Chapter 1 spawns from `1. как хочешь…`, and the generated
+    TOC has NO orphan `1.1` without a parent Chapter 1.
+    """
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения, обычный абзац без структуры.")
+    doc.add_paragraph("теперь к демонстрации начнем с простого нумерация")
+    doc.add_paragraph("1. тише едешь")
+    doc.add_paragraph("2.дальше не помню")
+    doc.add_paragraph("ладно будем серьезнее")
+    doc.add_paragraph("1. как хочешь главу маркируй. Типа 1.Чето там, или Глава 1 чето там, неважно.")
+    doc.add_paragraph("")
+    doc.add_paragraph("1.1. Параграф тоже как хочешь, лишь бы циферка была.")
+    doc.add_paragraph("Текст подраздела один.")
+    doc.add_paragraph("1.2. для математиков формулы")
+    doc.add_paragraph("Текст подраздела два.")
+    doc.add_paragraph("2. попа самый сильный наркотик")
+    doc.add_paragraph("Вводный текст второй главы.")
+    doc.add_paragraph("2.1. на ней сидят все")
+    doc.add_paragraph("Текст подраздела.")
+
+    out = _hl_process_document(doc)
+    titles = _hl_toc_entry_titles(out)
+    joined = " | ".join(titles).lower()
+    if "тише едешь" in joined:
+        return _result(False, f"demo list leaked into TOC: {titles!r}")
+    if "как хочешь главу маркируй" not in joined:
+        return _result(False, f"intended Chapter 1 missing from TOC: {titles!r}")
+    # No orphan: if any 1.x appears, a chapter '1.' entry must precede it.
+    has_child_1 = any(t.strip().startswith(("1.1", "1.2")) for t in titles)
+    has_chapter_1 = any(re.match(r"^1\.\s", t.strip()) for t in titles)
+    if has_child_1 and not has_chapter_1:
+        return _result(False, f"orphan 1.x without Chapter 1 in TOC: {titles!r}")
+    if not any(re.match(r"^2\.\s", t.strip()) for t in titles):
+        return _result(False, f"Chapter 2 missing from TOC: {titles!r}")
+    return _result(True, "demo block demoted, real Chapter 1 spawned, no TOC orphan")
+
+
 def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
     out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
     entry_paragraphs = [p for p in out.paragraphs if "\t" in (p.text or "")]
@@ -16650,6 +16859,11 @@ def run_all() -> None:
         ("TOC | P1 fail-closed no confident intro",    test_autotoc_p1_fail_closed_no_confident_intro_keeps_block),
         ("TOC | P1 well-formed old TOC removed",       test_autotoc_p1_wellformed_old_toc_removed_with_confident_intro),
         ("TOC | P1 title page before contents kept",   test_autotoc_p1_title_page_before_contents_preserved),
+        ("HL | peer numbered seq not Heading1",        test_hl_peer_numbered_sequence_not_promoted_to_heading1),
+        ("HL | hierarchy spawn promotes messy chapter", test_hl_hierarchy_spawn_promotes_messy_chapter_with_child),
+        ("HL | colon context defaults to list",        test_hl_colon_context_defaults_to_list),
+        ("HL | real chapter structure preserved",      test_hl_real_chapter_structure_preserved),
+        ("HL | no TOC orphan when demoting demo block", test_hl_no_toc_orphan_when_demoting_demo_block),
         ("TOC | soft-break plain TOC removed",         test_autotoc_softbreak_plain_toc_removed),
         ("TOC | soft-break TOC appendix continuation removed", test_autotoc_softbreak_toc_appendix_continuation_removed),
         ("TOC | body ВВЕДЕНИЕ preserved after softbreak cleanup", test_autotoc_body_intro_preserved_after_softbreak_toc),
