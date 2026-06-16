@@ -2916,6 +2916,93 @@ def _ensure_space_before_hyperlink_urls(paragraph) -> bool:
     return changed
 
 
+_CYR_LOWER = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+_CAP_FIRST_LETTER_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+_CAP_LOWER_CYR_RE = re.compile(r"[а-яё]")
+_CAP_SENT_BOUNDARY_RE = re.compile(r"([.!?])(\s+)([а-яё])")
+# Narrow abbreviation guard: a Cyrillic letter after one of these short tokens +
+# dot is NOT a sentence start (т. д. / т. е. / т. п. / и т. д. / и т. п. / и др. /
+# и пр.). Deliberately minimal — no broad abbreviation/NLP handling.
+_CAP_ABBR_TOKENS = {"т", "д", "е", "п", "др", "пр"}
+
+
+def _capitalize_body_sentence_starts(text: str) -> str:
+    """
+    Capitalize sentence starts in ordinary body text. Case-only and idempotent.
+
+      * the first lowercase Cyrillic letter of the paragraph → uppercase;
+      * a lowercase Cyrillic letter after `[.!?]` + whitespace → uppercase, unless
+        the token before the punctuation is a guarded short abbreviation.
+
+    Missing-space junctions (`текст.ее`) are left unchanged (no whitespace after
+    the dot → not a boundary). Latin/URLs/digits are never touched.
+    """
+    if not text:
+        return text
+    s = text
+    # Rule 1: paragraph-initial letter (only if it is a lowercase Cyrillic letter)
+    m = _CAP_FIRST_LETTER_RE.search(s)
+    if m and s[m.start()] in _CYR_LOWER:
+        i = m.start()
+        s = s[:i] + s[i].upper() + s[i + 1:]
+    # Rule 2: letter after sentence punctuation + whitespace, with abbreviation guard
+    out: list[str] = []
+    last = 0
+    for mo in _CAP_SENT_BOUNDARY_RE.finditer(s):
+        punct_pos = mo.start(1)
+        letter_pos = mo.start(3)
+        # token (run of letters) immediately before the punctuation
+        k = punct_pos - 1
+        while k >= 0 and s[k].isalpha():
+            k -= 1
+        token = s[k + 1:punct_pos].lower()
+        out.append(s[last:letter_pos])
+        # A real sentence ends with a word (letter). A `.` preceded by a digit
+        # (`Рис. 1.1.1. показывает…`, `версия 1.2. готова`) is a numbering/
+        # reference dot, not a sentence boundary — do not capitalize. A guarded
+        # short abbreviation (т. д. / и др. …) is also left as-is.
+        if not token or token in _CAP_ABBR_TOKENS:
+            out.append(s[letter_pos])
+        else:
+            out.append(s[letter_pos].upper())
+        last = letter_pos + 1
+    out.append(s[last:])
+    return "".join(out)
+
+
+def _capitalize_body_paragraph(paragraph) -> None:
+    """
+    Apply `_capitalize_body_sentence_starts` to an ordinary body paragraph using a
+    run-level, case-only remap that preserves all run boundaries and formatting.
+
+    Skips (does nothing) when the paragraph carries a hyperlink, is a KFU-stamped
+    or marker-prefixed list item, or has no lowercase Cyrillic to act on. Never
+    calls `replace_paragraph_text` and never flattens `w:hyperlink` XML.
+    """
+    if paragraph._element.findall(".//" + qn("w:hyperlink")):
+        return
+    if _get_kfu_list_type(paragraph):
+        return
+    runs = paragraph.runs
+    old = "".join(r.text for r in runs)
+    if not old or not _CAP_LOWER_CYR_RE.search(old):
+        return
+    cleaned = clean_spaces(old)
+    if _is_dash_or_bullet_list_text(cleaned) or _is_level1_list_text(cleaned):
+        return
+    new = _capitalize_body_sentence_starts(old)
+    if new == old or len(new) != len(old):
+        return
+    offset = 0
+    for r in runs:
+        n = len(r.text)
+        if n:
+            seg = new[offset:offset + n]
+            if seg != r.text:
+                r.text = seg
+            offset += n
+
+
 def format_body(paragraph, preserve_numbering=False):
     # Zone M: insert space before URLs glued to preceding text.
     # Two cases handled: plain paragraphs (full text replacement) and paragraphs
@@ -6932,6 +7019,7 @@ def process_document(input_path: Path, output_path: Path):
     # добиваем заголовки, таблицы и обычный текст уже после всех структурных вставок/удалений
     prev_nonempty_kind = None
     _final_in_references = False
+    _in_appendix = False
     for idx, paragraph in enumerate(doc.paragraphs):
         if idx < body_start:
             continue
@@ -6947,6 +7035,7 @@ def process_document(input_path: Path, output_path: Path):
             _final_in_references = True
         elif is_appendix_heading_text(text):
             _final_in_references = False
+            _in_appendix = True
 
         if not text:
             format_empty_paragraph(paragraph)
@@ -7043,6 +7132,10 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         format_body(paragraph)
+        # Body-text capitalization: ordinary body paragraphs only (every other
+        # role has been filtered/continued above). Appendices excluded.
+        if not _in_appendix:
+            _capitalize_body_paragraph(paragraph)
         prev_nonempty_kind = "body_text"
 
     run_with_pass_limit(

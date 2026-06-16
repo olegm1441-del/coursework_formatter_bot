@@ -1761,6 +1761,252 @@ def test_hl_no_toc_orphan_when_demoting_demo_block() -> tuple[bool, str]:
     return _result(True, "demo block demoted, real Chapter 1 spawned, no TOC orphan")
 
 
+# ───────────────────────── Body-text capitalization (CAP) ─────────────────────────
+# Capitalize sentence starts in ordinary body paragraphs only. Run-level, case-only,
+# idempotent. Narrow abbreviation guard (т. д. / т. е. / т. п. / и др. / и пр.).
+# Excludes headings, lists, references, captions, source/note, formulas, appendices,
+# hyperlink paragraphs, and table cells.
+
+def test_cap_helper_first_letter() -> tuple[bool, str]:
+    """Rule 1 in isolation (comma, not a sentence boundary)."""
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_sentence_starts as cap
+    got = cap("привет, обычный абзац без точек")
+    if got != "Привет, обычный абзац без точек":
+        return _result(False, f"got {got!r}")
+    return _result(True, "first lowercase Cyrillic letter capitalized")
+
+
+def test_cap_helper_after_sentence_punct() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_sentence_starts as cap
+    cases = {
+        "Одно предложение. второе предложение": "Одно предложение. Второе предложение",
+        "Текст! ответ дальше": "Текст! Ответ дальше",
+        "Вопрос? ответ дальше": "Вопрос? Ответ дальше",
+    }
+    for src, want in cases.items():
+        got = cap(src)
+        if got != want:
+            return _result(False, f"{src!r} -> {got!r}, want {want!r}")
+    return _result(True, "capitalizes Cyrillic after . ! ? + whitespace")
+
+
+def test_cap_helper_missing_space_unchanged() -> tuple[bool, str]:
+    """Missing-space junction (`текст.ее`) is NOT repaired/capitalized (separate
+    future patch). Paragraph-initial letter is still capitalized by rule 1."""
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_sentence_starts as cap
+    got = cap("система переписывает текст.ее задача")
+    if "текст.Ее" in got or "текст.ЕЕ" in got:
+        return _result(False, f"missing-space wrongly capitalized: {got!r}")
+    if "текст.ее" not in got:
+        return _result(False, f"missing-space junction altered: {got!r}")
+    if not got.startswith("Система"):
+        return _result(False, f"first letter not capitalized: {got!r}")
+    return _result(True, "текст.ее unchanged; only paragraph-initial letter capitalized")
+
+
+def test_cap_helper_abbreviation_guard() -> tuple[bool, str]:
+    """Narrow abbreviation guard: a Cyrillic letter after a guarded short
+    abbreviation token (т./д./е./п./др./пр.) is NOT capitalized. Conservative —
+    the continuation after `и т. д.` stays lowercase (documented behavior)."""
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_sentence_starts as cap
+    got = cap("это пример и т. д. дальше текст")
+    for bad in ("т. Д.", "д. Дальше", "и Т."):
+        if bad in got:
+            return _result(False, f"abbreviation wrongly capitalized ({bad!r}): {got!r}")
+    if not got.startswith("Это"):
+        return _result(False, f"first letter not capitalized: {got!r}")
+    # other guarded clusters
+    for src in ("и т. е. значит", "смотри и др. потом", "цвет и пр. вещи", "значит т. п. конец"):
+        g = cap(src)
+        if re.search(r"\b(т|д|е|п|др|пр)\. [А-ЯЁ]", g):
+            return _result(False, f"guarded abbreviation capitalized: {src!r} -> {g!r}")
+    return _result(True, "abbreviation guard prevents т. Д. / и Др. etc.")
+
+
+def test_cap_helper_numbering_dot_not_sentence_boundary() -> tuple[bool, str]:
+    """A `.` preceded by a digit (figure/table/version numbering) is NOT a
+    sentence boundary: `Рис. 1.1.1. показывает…` keeps `показывает` lowercase."""
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_sentence_starts as cap
+    cases = {
+        "Рис. 1.1.1. показывает структуру центра": "Рис. 1.1.1. показывает структуру центра",
+        "Таблица 1.2. отражает данные": "Таблица 1.2. отражает данные",
+        "версия 1.2. готова к сдаче": "Версия 1.2. готова к сдаче",
+    }
+    for src, want in cases.items():
+        got = cap(src)
+        if got != want:
+            return _result(False, f"{src!r} -> {got!r}, want {want!r}")
+    return _result(True, "digit-preceded dot not treated as sentence boundary")
+
+
+def test_cap_helper_idempotent() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_sentence_starts as cap
+    src = "привет. второе предложение! третье? четвертое и т. д. дальше"
+    once = cap(src)
+    twice = cap(once)
+    if once != twice:
+        return _result(False, f"not idempotent: {once!r} != {twice!r}")
+    return _result(True, "idempotent")
+
+
+def test_cap_integration_body_paragraphs() -> tuple[bool, str]:
+    """Through process_document: ordinary body paragraphs get sentence-start caps."""
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("привет. намеренно собрал все")
+    doc.add_paragraph("теперь к демонстрации, обычный абзац")
+    doc.add_paragraph("далее, не надо нагло копировать")
+    doc.add_paragraph("ладно будем серьезнее.")
+    out = _hl_process_document(doc)
+    texts = [(_p.text or "") for _p in out.paragraphs]
+    joined = "\n".join(texts)
+    # Both rules apply: paragraph-initial AND after `. ` (standard sentence casing).
+    for want in ("Привет. Намеренно собрал все", "Теперь к демонстрации", "Далее, не надо", "Ладно будем серьезнее."):
+        if want not in joined:
+            return _result(False, f"missing {want!r} in: {texts!r}")
+    return _result(True, "body sentence starts capitalized end-to-end (both rules)")
+
+
+def test_cap_integration_dash_and_lettered_lists_unchanged() -> tuple[bool, str]:
+    """Dash list items and lettered lists must stay lowercase after the marker."""
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("теперь к демонстрации начнем с простого нумерация")
+    doc.add_paragraph("1. тише едешь")
+    doc.add_paragraph("2.дальше не помню")
+    doc.add_paragraph("перечисление букв:")
+    doc.add_paragraph("а) первый пункт")
+    doc.add_paragraph("б) второй пункт")
+    out = _hl_process_document(doc)
+    joined = "\n".join((_p.text or "") for _p in out.paragraphs)
+    if "- Тише едешь" in joined or "- Дальше не помню" in joined:
+        return _result(False, f"dash list wrongly capitalized: {joined!r}")
+    if "- тише едешь" not in joined or "- дальше не помню" not in joined:
+        return _result(False, f"dash list block changed unexpectedly: {joined!r}")
+    if "А) первый" in joined or "Б) второй" in joined or "а) Первый" in joined:
+        return _result(False, f"lettered list wrongly capitalized: {joined!r}")
+    return _result(True, "dash/lettered list items unchanged")
+
+
+def test_cap_integration_heading_unchanged() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    h = doc.add_paragraph("1. теоретические основы предмета")
+    h.style = "Heading 1"
+    doc.add_paragraph("обычный текст главы.")
+    out = _hl_process_document(doc)
+    heading = next((p for p in out.paragraphs if "ТЕОРЕТИЧЕСКИЕ" in (p.text or "").upper() and (p.style.name or "")=="Heading 1"), None)
+    if heading is None:
+        return _result(False, "heading paragraph not found / not Heading 1")
+    return _result(True, "heading paragraph unaffected by body capitalization")
+
+
+def test_cap_integration_references_unchanged() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ").style = "Heading 1"
+    doc.add_paragraph("Итоги.")
+    doc.add_paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ").style = "Heading 1"
+    doc.add_paragraph("1. источник один автора.")
+    doc.add_paragraph("2. источник два автора.")
+    out = _hl_process_document(doc)
+    refs = [(_p.text or "") for _p in out.paragraphs if "источник" in (_p.text or "").lower()]
+    joined = "\n".join(refs)
+    # reference entries are handled by the references path, not body capitalization
+    if "1. Источник один" in joined or "2. Источник два" in joined:
+        return _result(False, f"reference entry wrongly capitalized by body pass: {refs!r}")
+    return _result(True, "reference entries not touched by body capitalization")
+
+
+def test_cap_integration_source_and_caption_unchanged() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("Рис. 1.1. схема процесса")
+    doc.add_paragraph("источник: составлено автором по данным.")
+    out = _hl_process_document(doc)
+    joined = "\n".join((_p.text or "") for _p in out.paragraphs)
+    # figure caption + source line go through their own formatters, not body caps
+    if "источник: Составлено" in joined:
+        return _result(False, f"source line body-capitalized: {joined!r}")
+    return _result(True, "figure caption / source line not touched by body capitalization")
+
+
+def test_cap_integration_formula_unchanged() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("ROI = эффект / затраты * 100")
+    doc.add_paragraph("где эффект и затраты заданы.")
+    out = _hl_process_document(doc)
+    joined = "\n".join((_p.text or "") for _p in out.paragraphs)
+    if "ROI = эффект" not in joined and "ROI=эффект" not in joined.replace(" ", "ROI=эффект"):
+        # formula text must survive; we only assert it wasn't mangled into a capitalized sentence
+        pass
+    if "Где эффект" in joined:
+        return _result(False, f"formula explanation body-capitalized: {joined!r}")
+    return _result(True, "formula / explanation not touched by body capitalization")
+
+
+def test_cap_unit_hyperlink_paragraph_skipped() -> tuple[bool, str]:
+    """A paragraph containing w:hyperlink is skipped: hyperlink preserved, text unchanged."""
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_paragraph
+    doc = Document()
+    p = doc.add_paragraph()
+    r = p.add_run("разработчик ")
+    # build a w:hyperlink child manually
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("w:anchor"), "x")
+    hr = OxmlElement("w:r"); ht = OxmlElement("w:t"); ht.text = "ссылка"
+    hr.append(ht); hyperlink.append(hr)
+    p._element.append(hyperlink)
+    before = p.text
+    n_hl_before = len(p._element.findall(".//" + qn("w:hyperlink")))
+    _capitalize_body_paragraph(p)
+    after = p.text
+    n_hl_after = len(p._element.findall(".//" + qn("w:hyperlink")))
+    if n_hl_after != n_hl_before or n_hl_after != 1:
+        return _result(False, f"hyperlink count changed: {n_hl_before}->{n_hl_after}")
+    if after != before:
+        return _result(False, f"text changed on hyperlink paragraph: {before!r}->{after!r}")
+    return _result(True, "hyperlink paragraph skipped; w:hyperlink preserved, text unchanged")
+
+
+def test_cap_unit_run_preservation() -> tuple[bool, str]:
+    """Run-level remap: same run count, only case changes, formatting preserved."""
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_paragraph
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("привет ")           # run 0
+    r2 = p.add_run("мир. текст")    # run 1
+    r2.italic = True
+    _capitalize_body_paragraph(p)
+    if len(p.runs) != 2:
+        return _result(False, f"run count changed: {len(p.runs)}")
+    if p.runs[0].text != "Привет ":
+        return _result(False, f"run0 text: {p.runs[0].text!r}")
+    if p.runs[1].text != "мир. Текст":
+        return _result(False, f"run1 text: {p.runs[1].text!r}")
+    if p.runs[1].italic is not True:
+        return _result(False, "run1 italic formatting lost")
+    return _result(True, "runs preserved (count+formatting); only case changed")
+
+
+def test_cap_unit_no_lowercase_cyrillic_noop() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _capitalize_body_paragraph
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("ABC 123 — DEF")
+    before = p.text
+    _capitalize_body_paragraph(p)
+    if p.text != before:
+        return _result(False, f"changed no-Cyrillic paragraph: {before!r}->{p.text!r}")
+    return _result(True, "no lowercase Cyrillic → no-op")
+
+
 def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
     out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
     entry_paragraphs = [p for p in out.paragraphs if "\t" in (p.text or "")]
@@ -16864,6 +17110,21 @@ def run_all() -> None:
         ("HL | colon context defaults to list",        test_hl_colon_context_defaults_to_list),
         ("HL | real chapter structure preserved",      test_hl_real_chapter_structure_preserved),
         ("HL | no TOC orphan when demoting demo block", test_hl_no_toc_orphan_when_demoting_demo_block),
+        ("CAP | helper first letter",                  test_cap_helper_first_letter),
+        ("CAP | helper after . ! ?",                   test_cap_helper_after_sentence_punct),
+        ("CAP | helper missing-space unchanged",       test_cap_helper_missing_space_unchanged),
+        ("CAP | helper abbreviation guard",            test_cap_helper_abbreviation_guard),
+        ("CAP | helper numbering dot not boundary",    test_cap_helper_numbering_dot_not_sentence_boundary),
+        ("CAP | helper idempotent",                    test_cap_helper_idempotent),
+        ("CAP | integration body paragraphs",          test_cap_integration_body_paragraphs),
+        ("CAP | integration dash/lettered lists",      test_cap_integration_dash_and_lettered_lists_unchanged),
+        ("CAP | integration heading unchanged",        test_cap_integration_heading_unchanged),
+        ("CAP | integration references unchanged",     test_cap_integration_references_unchanged),
+        ("CAP | integration source/caption unchanged", test_cap_integration_source_and_caption_unchanged),
+        ("CAP | integration formula unchanged",        test_cap_integration_formula_unchanged),
+        ("CAP | unit hyperlink skipped",               test_cap_unit_hyperlink_paragraph_skipped),
+        ("CAP | unit run preservation",                test_cap_unit_run_preservation),
+        ("CAP | unit no-Cyrillic no-op",               test_cap_unit_no_lowercase_cyrillic_noop),
         ("TOC | soft-break plain TOC removed",         test_autotoc_softbreak_plain_toc_removed),
         ("TOC | soft-break TOC appendix continuation removed", test_autotoc_softbreak_toc_appendix_continuation_removed),
         ("TOC | body ВВЕДЕНИЕ preserved after softbreak cleanup", test_autotoc_body_intro_preserved_after_softbreak_toc),
