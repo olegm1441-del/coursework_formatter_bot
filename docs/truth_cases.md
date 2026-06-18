@@ -58,6 +58,10 @@ Known **gold / regression-protected** (must remain correct):
 
 Any future table-split patch must either fix the "bad" tables above or explicitly skip them with a logged reason; in either case it must not regress 1.3.2.
 
+#### Demo table-start orphan truth target
+
+`Пример_че_может_бот.docx`, `Таблица 1.1.3` is the current table-start orphan truth case. If the rendered start page contains only `Таблица 1.1.3`, the title/header, and zero complete real data rows while the first row (`Кейс 1`) starts on the next page, the formatter must move the whole table start by inserting exactly two blank paragraphs before the caption. It must not split the table, insert `Продолжение таблицы 1.1.3`, or synthesize a numeric row for this ordinary non-split table.
+
 ### bad2 / example_coursework_bad2
 
 - Useful for TOC checks only when the active batch touches contents/front matter.

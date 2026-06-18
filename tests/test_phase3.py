@@ -122,6 +122,26 @@ def _paragraph_has_page_break_before(p_xml) -> bool:
     return p_pr is not None and p_pr.find(qn("w:pageBreakBefore")) is not None
 
 
+def _blank_paragraph_count_before(doc: Document, paragraph_text: str) -> int:
+    children = list(doc.element.body)
+    caption_idx = None
+    for idx, child in enumerate(children):
+        if child.tag != qn("w:p"):
+            continue
+        if _paragraph_text(child) == paragraph_text:
+            caption_idx = idx
+            break
+    if caption_idx is None:
+        raise AssertionError(f"paragraph not found: {paragraph_text!r}")
+
+    count = 0
+    idx = caption_idx - 1
+    while idx >= 0 and children[idx].tag == qn("w:p") and not _paragraph_text(children[idx]):
+        count += 1
+        idx -= 1
+    return count
+
+
 def _paragraph_has_keep_next(p_xml) -> bool:
     p_pr = p_xml.find(qn("w:pPr"))
     return p_pr is not None and p_pr.find(qn("w:keepNext")) is not None
@@ -4900,14 +4920,26 @@ def test_c_rendered_start_page_moves_whole_table_without_complete_data_row() -> 
         old_analyze = tc.analyze_pdf_lines
         try:
             tc.render_docx_to_pdf = lambda _path: pdf_path
-            tc.analyze_pdf_lines = lambda _path: [
-                PdfLine("Таблица 2.2.3", 1, 686.5, 700.0),
-                PdfLine("Показатели эффективности", 1, 710.8, 724.0),
-                PdfLine("Показатель Экономия", 1, 741.8, 755.0),
-                PdfLine("Почтовые расходы переход", 1, 763.2, 776.0),
-                PdfLine("на электронный документооборот", 2, 86.8, 99.0),
-                PdfLine("Архивное хранение высокая экономия архива", 2, 108.0, 121.0),
-            ]
+            calls = {"n": 0}
+
+            def fake_analyze(_path):
+                calls["n"] += 1
+                if _blank_paragraph_count_before(Document(str(path)), caption.text) < 2:
+                    return [
+                        PdfLine("Таблица 2.2.3", 1, 686.5, 700.0),
+                        PdfLine("Показатели эффективности", 1, 710.8, 724.0),
+                        PdfLine("Показатель Экономия", 1, 741.8, 755.0),
+                        PdfLine("Почтовые расходы переход на электронный документооборот", 2, 86.8, 99.0),
+                        PdfLine("Архивное хранение высокая экономия архива", 2, 108.0, 121.0),
+                    ]
+                return [
+                    PdfLine("Таблица 2.2.3", 2, 58.0, 70.0),
+                    PdfLine("Показатели эффективности", 2, 82.0, 94.0),
+                    PdfLine("Показатель Экономия", 2, 106.0, 118.0),
+                    PdfLine("Почтовые расходы переход на электронный документооборот", 2, 132.0, 144.0),
+                ]
+
+            tc.analyze_pdf_lines = fake_analyze
             n = tc.apply_rendered_table_continuation(path)
         finally:
             tc.render_docx_to_pdf = old_render
@@ -4916,19 +4948,19 @@ def test_c_rendered_start_page_moves_whole_table_without_complete_data_row() -> 
         reread = Document(str(path))
         reread_caption = next(p for p in reread.paragraphs if p.text == caption.text)
 
-    pPr = reread_caption._element.find(qn("w:pPr"))
-    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
     markers = [p.text for p in reread.paragraphs if "Продолжение таблицы" in (p.text or "")]
 
     if n != 1:
-        return _result(False, f"expected whole-table move, got {n}")
-    if page_break is None:
-        return _result(False, "caption did not receive pageBreakBefore")
+        return _result(False, f"expected table-start orphan move, got {n}")
+    if _blank_paragraph_count_before(reread, caption.text) != 2:
+        return _result(False, "caption did not receive exactly two preceding blank paragraphs")
+    if _paragraph_has_page_break_before(reread_caption._element):
+        return _result(False, "table-start orphan repair should not add pageBreakBefore")
     if len(reread.tables) != 1:
-        return _result(False, f"whole-table move should not split, got {len(reread.tables)} tables")
+        return _result(False, f"table-start orphan repair should not split, got {len(reread.tables)} tables")
     if markers:
-        return _result(False, f"whole-table move inserted continuation marker: {markers!r}")
-    return _result(True, "whole-table move applied to caption")
+        return _result(False, f"table-start orphan repair inserted continuation marker: {markers!r}")
+    return _result(True, "table-start orphan move inserted two blanks before caption")
 
 
 def test_c_rendered_start_page_first_row_spill_moves_whole_table() -> tuple[bool, str]:
@@ -4961,15 +4993,27 @@ def test_c_rendered_start_page_first_row_spill_moves_whole_table() -> tuple[bool
         old_analyze = tc.analyze_pdf_lines
         try:
             tc.render_docx_to_pdf = lambda _path: pdf_path
-            tc.analyze_pdf_lines = lambda _path: [
-                PdfLine("Таблица 2.3.1", 1, 683.2, 695.0),
-                PdfLine("Структура прямой экономии ТТС при переходе на ЭДО", 1, 707.4, 719.0),
-                PdfLine("Статья Значение Комментарий", 1, 731.5, 743.0),
-                PdfLine("Почтовые расходы 31–33 отказ от бумажных", 1, 759.6, 771.0),
-                PdfLine("Статья Значение Комментарий", 2, 58.8, 70.0),
-                PdfLine("отправлений", 2, 86.8, 98.0),
-                PdfLine("Печать 4–5 сокращение печати", 2, 108.2, 120.0),
-            ]
+            calls = {"n": 0}
+
+            def fake_analyze(_path):
+                calls["n"] += 1
+                if _blank_paragraph_count_before(Document(str(path)), caption.text) < 2:
+                    return [
+                        PdfLine("Таблица 2.3.1", 1, 683.2, 695.0),
+                        PdfLine("Структура прямой экономии ТТС при переходе на ЭДО", 1, 707.4, 719.0),
+                        PdfLine("Статья Значение Комментарий", 1, 731.5, 743.0),
+                        PdfLine("Почтовые расходы 31–33 отказ от бумажных отправлений", 2, 86.8, 98.0),
+                        PdfLine("Печать 4–5 сокращение печати", 2, 108.2, 120.0),
+                    ]
+                return [
+                    PdfLine("Таблица 2.3.1", 2, 58.0, 70.0),
+                    PdfLine("Структура прямой экономии ТТС при переходе на ЭДО", 2, 82.0, 94.0),
+                    PdfLine("Статья Значение Комментарий", 2, 106.0, 118.0),
+                    PdfLine("Почтовые расходы 31–33 отказ от бумажных отправлений", 2, 132.0, 144.0),
+                    PdfLine("Печать 4–5 сокращение печати", 2, 158.0, 170.0),
+                ]
+
+            tc.analyze_pdf_lines = fake_analyze
             n = tc.apply_rendered_table_continuation(path)
         finally:
             tc.render_docx_to_pdf = old_render
@@ -4978,16 +5022,15 @@ def test_c_rendered_start_page_first_row_spill_moves_whole_table() -> tuple[bool
         reread = Document(str(path))
         reread_caption = next(p for p in reread.paragraphs if p.text == caption.text)
 
-    pPr = reread_caption._element.find(qn("w:pPr"))
-    page_break = pPr.find(qn("w:pageBreakBefore")) if pPr is not None else None
-
     if n != 1:
-        return _result(False, f"first-row spill should trigger whole-table move, got {n}")
-    if page_break is None:
-        return _result(False, "caption did not receive pageBreakBefore after first-row spill")
+        return _result(False, f"first-row spill should trigger table-start orphan move, got {n}")
+    if _blank_paragraph_count_before(reread, caption.text) != 2:
+        return _result(False, "caption did not receive exactly two preceding blank paragraphs")
+    if _paragraph_has_page_break_before(reread_caption._element):
+        return _result(False, "table-start orphan repair should not add pageBreakBefore")
     if len(reread.tables) != 1:
-        return _result(False, f"whole-table move should not split tables, got {len(reread.tables)}")
-    return _result(True, "first-row spill triggered whole-table move")
+        return _result(False, f"table-start orphan repair should not split tables, got {len(reread.tables)}")
+    return _result(True, "first-row spill triggered table-start orphan move")
 
 
 def test_c_rendered_start_page_skips_existing_page_break_candidate() -> tuple[bool, str]:
@@ -5022,16 +5065,31 @@ def test_c_rendered_start_page_skips_existing_page_break_candidate() -> tuple[bo
         old_analyze = tc.analyze_pdf_lines
         try:
             tc.render_docx_to_pdf = lambda _path: pdf_path
-            tc.analyze_pdf_lines = lambda _path: [
-                PdfLine("Таблица 1.2.2", 1, 680.0, 692.0),
-                PdfLine("Показатель Эффект", 1, 705.0, 717.0),
-                PdfLine("Первый показатель", 2, 80.0, 92.0),
-                PdfLine("переход на электронный обмен", 2, 100.0, 112.0),
-                PdfLine("Таблица 2.3.3", 3, 680.0, 692.0),
-                PdfLine("Год Комментарий", 3, 705.0, 717.0),
-                PdfLine("Первый год", 4, 80.0, 92.0),
-                PdfLine("обучение сотрудников", 4, 100.0, 112.0),
-            ]
+            calls = {"n": 0}
+
+            def fake_analyze(_path):
+                calls["n"] += 1
+                if _blank_paragraph_count_before(Document(str(path)), second_caption.text) < 2:
+                    return [
+                        PdfLine("Таблица 1.2.2", 1, 680.0, 692.0),
+                        PdfLine("Показатель Эффект", 1, 705.0, 717.0),
+                        PdfLine("Первый показатель", 2, 80.0, 92.0),
+                        PdfLine("переход на электронный обмен", 2, 100.0, 112.0),
+                        PdfLine("Таблица 2.3.3", 3, 680.0, 692.0),
+                        PdfLine("Год Комментарий", 3, 705.0, 717.0),
+                        PdfLine("Первый год обучение сотрудников", 4, 80.0, 92.0),
+                    ]
+                return [
+                    PdfLine("Таблица 1.2.2", 1, 680.0, 692.0),
+                    PdfLine("Показатель Эффект", 1, 705.0, 717.0),
+                    PdfLine("Первый показатель", 2, 80.0, 92.0),
+                    PdfLine("переход на электронный обмен", 2, 100.0, 112.0),
+                    PdfLine("Таблица 2.3.3", 4, 58.0, 70.0),
+                    PdfLine("Год Комментарий", 4, 82.0, 94.0),
+                    PdfLine("Первый год обучение сотрудников", 4, 108.0, 120.0),
+                ]
+
+            tc.analyze_pdf_lines = fake_analyze
             n = tc.apply_rendered_table_continuation(path)
         finally:
             tc.render_docx_to_pdf = old_render
@@ -5042,19 +5100,19 @@ def test_c_rendered_start_page_skips_existing_page_break_candidate() -> tuple[bo
         second = next(p for p in reread.paragraphs if p.text == second_caption.text)
 
     first_pPr = first._element.find(qn("w:pPr"))
-    second_pPr = second._element.find(qn("w:pPr"))
     first_pb = first_pPr.find(qn("w:pageBreakBefore")) if first_pPr is not None else None
-    second_pb = second_pPr.find(qn("w:pageBreakBefore")) if second_pPr is not None else None
 
     if n != 1:
-        return _result(False, f"expected one later whole-table move, got {n}")
+        return _result(False, f"expected one later table-start orphan move, got {n}")
     if first_pb is None:
         return _result(False, "existing pageBreakBefore was lost from first caption")
-    if second_pb is None:
-        return _result(False, "later candidate did not receive pageBreakBefore")
+    if _blank_paragraph_count_before(reread, second_caption.text) != 2:
+        return _result(False, "later candidate did not receive exactly two preceding blank paragraphs")
+    if _paragraph_has_page_break_before(second._element):
+        return _result(False, "later table-start orphan repair should not add pageBreakBefore")
     if len(reread.tables) != 2:
-        return _result(False, f"whole-table move should not split tables, got {len(reread.tables)}")
-    return _result(True, "existing page-break candidate skipped and later candidate moved")
+        return _result(False, f"table-start orphan repair should not split tables, got {len(reread.tables)}")
+    return _result(True, "existing page-break candidate skipped and later candidate got two blanks")
 
 
 def test_c_rendered_start_page_upgrades_disabled_page_break() -> tuple[bool, str]:
@@ -5071,7 +5129,7 @@ def test_c_rendered_start_page_upgrades_disabled_page_break() -> tuple[bool, str
     tbl = doc.add_table(rows=2, cols=2)
     tbl.rows[0].cells[0].text = "Показатель"
     tbl.rows[0].cells[1].text = "Комментарий"
-    tbl.rows[1].cells[0].text = "Первый показатель"
+    tbl.rows[1].cells[0].text = "Первый критерий"
     tbl.rows[1].cells[1].text = "обучение сотрудников"
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -5086,12 +5144,23 @@ def test_c_rendered_start_page_upgrades_disabled_page_break() -> tuple[bool, str
         old_analyze = tc.analyze_pdf_lines
         try:
             tc.render_docx_to_pdf = lambda _path: pdf_path
-            tc.analyze_pdf_lines = lambda _path: [
-                PdfLine("Таблица 2.4.1", 1, 680.0, 692.0),
-                PdfLine("Показатель Комментарий", 1, 705.0, 717.0),
-                PdfLine("Первый показатель", 2, 80.0, 92.0),
-                PdfLine("обучение сотрудников", 2, 100.0, 112.0),
-            ]
+            calls = {"n": 0}
+
+            def fake_analyze(_path):
+                calls["n"] += 1
+                if _blank_paragraph_count_before(Document(str(path)), caption.text) < 2:
+                    return [
+                        PdfLine("Таблица 2.4.1", 1, 680.0, 692.0),
+                        PdfLine("Показатель Комментарий", 1, 705.0, 717.0),
+                        PdfLine("Первый критерий обучение сотрудников", 2, 80.0, 92.0),
+                    ]
+                return [
+                    PdfLine("Таблица 2.4.1", 2, 58.0, 70.0),
+                    PdfLine("Показатель Комментарий", 2, 82.0, 94.0),
+                    PdfLine("Первый критерий обучение сотрудников", 2, 108.0, 120.0),
+                ]
+
+            tc.analyze_pdf_lines = fake_analyze
             n = tc.apply_rendered_table_continuation(path)
         finally:
             tc.render_docx_to_pdf = old_render
@@ -5105,14 +5174,16 @@ def test_c_rendered_start_page_upgrades_disabled_page_break() -> tuple[bool, str
     page_break_val = page_break.get(qn("w:val")) if page_break is not None else None
 
     if n != 1:
-        return _result(False, f"disabled pageBreakBefore should not block move, got {n}")
+        return _result(False, f"disabled pageBreakBefore should not block table-start orphan move, got {n}")
+    if _blank_paragraph_count_before(reread, caption.text) != 2:
+        return _result(False, "caption did not receive exactly two preceding blank paragraphs")
     if page_break is None:
-        return _result(False, "disabled pageBreakBefore was not upgraded")
-    if page_break_val in {"0", "false", "False", "off"}:
-        return _result(False, f"pageBreakBefore still disabled: {page_break_val!r}")
+        return _result(False, "pre-existing disabled pageBreakBefore was removed")
+    if page_break_val not in {"0", "false", "False", "off"}:
+        return _result(False, f"table-start orphan repair should not enable pageBreakBefore: {page_break_val!r}")
     if len(reread.tables) != 1:
-        return _result(False, f"whole-table move should not split tables, got {len(reread.tables)}")
-    return _result(True, "disabled pageBreakBefore upgraded to active")
+        return _result(False, f"table-start orphan repair should not split tables, got {len(reread.tables)}")
+    return _result(True, "disabled pageBreakBefore preserved and two blanks inserted")
 
 
 def test_c_rendered_start_page_skips_ambiguous_usability() -> tuple[bool, str]:
@@ -5316,13 +5387,25 @@ def test_c_rendered_decision_logging_for_ambiguous_skip() -> tuple[bool, str]:
         old_analyze = tc.analyze_pdf_lines
         try:
             tc.render_docx_to_pdf = lambda _path: pdf_path
-            tc.analyze_pdf_lines = lambda _path: [
-                PdfLine("Таблица 2.2.4", 1, 690.0, 702.0),
-                PdfLine("Год Значение", 1, 735.0, 748.0),
-                PdfLine("2023", 1, 763.0, 776.0),
-                PdfLine("10", 2, 86.0, 98.0),
-                PdfLine("2024 10", 2, 108.0, 120.0),
-            ]
+            calls = {"n": 0}
+
+            def fake_analyze(_path):
+                calls["n"] += 1
+                if _blank_paragraph_count_before(Document(str(path)), "Таблица 2.2.4") < 2:
+                    return [
+                        PdfLine("Таблица 2.2.4", 1, 690.0, 702.0),
+                        PdfLine("Год Значение", 1, 735.0, 748.0),
+                        PdfLine("2023 10", 2, 86.0, 98.0),
+                        PdfLine("2024 10", 2, 108.0, 120.0),
+                    ]
+                return [
+                    PdfLine("Таблица 2.2.4", 2, 58.0, 70.0),
+                    PdfLine("Год Значение", 2, 82.0, 94.0),
+                    PdfLine("2023 10", 2, 108.0, 120.0),
+                    PdfLine("2024 10", 2, 132.0, 144.0),
+                ]
+
+            tc.analyze_pdf_lines = fake_analyze
             n = tc.apply_rendered_table_continuation(path)
         finally:
             tc.render_docx_to_pdf = old_render
@@ -5332,19 +5415,19 @@ def test_c_rendered_decision_logging_for_ambiguous_skip() -> tuple[bool, str]:
 
     logs = log_stream.getvalue()
     expected_fragments = [
-        "rendered_table_continuation_enter tables=1 pdf_lines=5",
+        "rendered_table_continuation_enter tables=1 pdf_lines=4",
         "rendered_whole_table_candidate table_idx=0 caption=2.2.4",
-        "pdf_caption_matches=1 strict_caption_found=True start_page_usability=ambiguous",
-        "rendered_split_candidate table_idx=0 rows=3 skip=row_mapping_ambiguous",
-        "rendered_final_decision action=rendered_skip_ambiguous",
+        "pdf_caption_matches=1 strict_caption_found=True start_page_usability=no_complete_data_row",
+        "rendered_whole_table_candidate_selected table_idx=0 caption=2.2.4 reason=no_complete_data_row",
+        "rendered_final_decision action=table_start_orphan_move table_idx=0 blanks=2",
     ]
     missing = [fragment for fragment in expected_fragments if fragment not in logs]
 
-    if n != 0:
-        return _result(False, f"ambiguous logging scenario should not mutate, got {n}")
+    if n != 1:
+        return _result(False, f"table-start orphan logging scenario should mutate once, got {n}")
     if missing:
         return _result(False, f"missing log fragments: {missing!r}; logs={logs!r}")
-    return _result(True, "ambiguous rendered decision logs are emitted")
+    return _result(True, "table-start orphan rendered decision logs are emitted")
 
 
 def test_c_rendered_start_page_keeps_table_with_clear_complete_data_row() -> tuple[bool, str]:

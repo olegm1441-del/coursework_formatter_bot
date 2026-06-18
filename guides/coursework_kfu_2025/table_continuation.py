@@ -1671,6 +1671,46 @@ def _row_has_any_token_in_text(sig: RowSignature, text: str) -> bool:
     return bool(tokens & text_tokens)
 
 
+def _row_fragment_token_hits(sig: RowSignature, text: str) -> int:
+    text_tokens = _distinctive_tokens(text)
+    if not text_tokens:
+        return 0
+    hits = 0
+    for fragment in sig.fragments:
+        fragment_tokens = _distinctive_tokens(fragment)
+        if fragment_tokens and fragment_tokens & text_tokens:
+            hits += 1
+    return hits
+
+
+def _row_complete_in_page_texts(sig: RowSignature, page_texts: list[str]) -> bool:
+    joined = " ".join(page_texts)
+    if _row_matches_line(sig, joined):
+        return True
+    nonempty_fragments = [
+        fragment for fragment in sig.fragments
+        if _distinctive_tokens(fragment)
+    ]
+    if not nonempty_fragments:
+        return False
+    return _row_fragment_token_hits(sig, joined) == len(nonempty_fragments)
+
+
+def _page_has_complete_data_row(data_rows: list[RowSignature], page_texts: list[str]) -> bool:
+    return any(_row_complete_in_page_texts(sig, page_texts) for sig in data_rows)
+
+
+def _page_has_visible_data_row(data_rows: list[RowSignature], page_texts: list[str]) -> bool:
+    joined = " ".join(page_texts)
+    for sig in data_rows:
+        if _row_complete_in_page_texts(sig, page_texts):
+            return True
+        required_hits = min(2, len([fragment for fragment in sig.fragments if _distinctive_tokens(fragment)]))
+        if required_hits > 0 and _row_fragment_token_hits(sig, joined) >= required_hits:
+            return True
+    return False
+
+
 def _tokens_in_text(tokens: set[str], text: str) -> bool:
     if not tokens:
         return False
@@ -1790,13 +1830,6 @@ def _classify_start_page_usability(
     if header is None or not data_rows:
         return _START_AMBIGUOUS
 
-    data_keys = [sig.key for sig in data_rows]
-    if len(data_keys) != len(set(data_keys)):
-        return _START_AMBIGUOUS
-    unique_tokens = _unique_data_row_tokens(data_rows)
-    if any(not unique_tokens.get(sig.row_idx) for sig in data_rows):
-        return _START_AMBIGUOUS
-
     same_page_texts = [_norm_match_text(line.text) for line in same_page_lines]
     same_page_joined = " ".join(same_page_texts)
     header_line_indexes = _header_line_indexes(header, same_page_texts)
@@ -1804,13 +1837,24 @@ def _classify_start_page_usability(
         return _START_AMBIGUOUS
 
     data_page_texts = same_page_texts[(max(header_line_indexes) + 1):] if header_line_indexes else same_page_texts
-    data_page_joined = " ".join(data_page_texts)
-
-    for sig in data_rows:
-        if any(_row_matches_line(sig, line_text) for line_text in data_page_texts):
-            return _START_HAS_COMPLETE_DATA_ROW
-    if _has_complete_data_row_in_page_window(data_rows, unique_tokens, data_page_texts):
+    if _page_has_complete_data_row(data_rows, data_page_texts):
         return _START_HAS_COMPLETE_DATA_ROW
+
+    next_page = start_page + 1
+    next_page_texts = [
+        _norm_match_text(line.text)
+        for idx, line in enumerate(pdf_lines)
+        if idx > caption_idx and line.page_num == next_page
+    ]
+    if next_page_texts and _page_has_visible_data_row(data_rows, next_page_texts):
+        return _START_NO_COMPLETE_DATA_ROW
+
+    data_keys = [sig.key for sig in data_rows]
+    if len(data_keys) != len(set(data_keys)):
+        return _START_AMBIGUOUS
+    unique_tokens = _unique_data_row_tokens(data_rows)
+    if any(not unique_tokens.get(sig.row_idx) for sig in data_rows):
+        return _START_AMBIGUOUS
 
     first_row = data_rows[0]
     if _first_data_row_spills_to_next_page(
@@ -1824,6 +1868,7 @@ def _classify_start_page_usability(
     ):
         return _START_NO_COMPLETE_DATA_ROW
 
+    data_page_joined = " ".join(data_page_texts)
     rows_with_start_page_tokens = [
         sig for sig in data_rows if _tokens_in_text(unique_tokens[sig.row_idx], data_page_joined)
     ]
@@ -1930,6 +1975,121 @@ def _ensure_page_break_before(para_elem) -> bool:
     else:
         page_break.attrib.pop(qn("w:val"), None)
     return True
+
+
+def _is_blank_paragraph_xml(p_xml) -> bool:
+    if p_xml is None or p_xml.tag != qn("w:p"):
+        return False
+    return not "".join((node.text or "") for node in p_xml.findall(".//" + qn("w:t"))).strip()
+
+
+def _set_table_start_orphan_blank_spacing(p_xml) -> bool:
+    if p_xml is None or p_xml.tag != qn("w:p"):
+        return False
+
+    changed = False
+    p_pr = p_xml.find(qn("w:pPr"))
+    if p_pr is None:
+        p_pr = OxmlElement("w:pPr")
+        p_xml.insert(0, p_pr)
+        changed = True
+
+    spacing = p_pr.find(qn("w:spacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:spacing")
+        p_pr.append(spacing)
+        changed = True
+
+    desired = {
+        qn("w:before"): "0",
+        qn("w:after"): "0",
+        qn("w:line"): "840",
+        qn("w:lineRule"): "auto",
+    }
+    for attr, value in desired.items():
+        if spacing.get(attr) != value:
+            spacing.set(attr, value)
+            changed = True
+
+    if p_xml.find(qn("w:r")) is None:
+        run = OxmlElement("w:r")
+        text = OxmlElement("w:t")
+        text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        text.text = ""
+        run.append(text)
+        p_xml.append(run)
+        changed = True
+
+    return changed
+
+
+def _count_blank_paragraphs_before(para_elem) -> int:
+    parent = para_elem.getparent()
+    if parent is None:
+        return 0
+    children = list(parent)
+    try:
+        idx = children.index(para_elem)
+    except ValueError:
+        return 0
+    count = 0
+    j = idx - 1
+    while j >= 0 and _is_blank_paragraph_xml(children[j]):
+        count += 1
+        j -= 1
+    return count
+
+
+def _insert_table_start_orphan_blanks(para_elem, *, target_count: int = 2) -> bool:
+    parent = para_elem.getparent()
+    if parent is None:
+        return False
+
+    children = list(parent)
+    try:
+        idx = children.index(para_elem)
+    except ValueError:
+        return False
+
+    blanks: list = []
+    j = idx - 1
+    while j >= 0 and _is_blank_paragraph_xml(children[j]):
+        blanks.append(children[j])
+        j -= 1
+
+    changed = False
+    while len(blanks) < target_count:
+        blank = OxmlElement("w:p")
+        _set_table_start_orphan_blank_spacing(blank)
+        para_elem.addprevious(blank)
+        blanks.insert(0, blank)
+        changed = True
+
+    for blank in blanks[:target_count]:
+        if _set_table_start_orphan_blank_spacing(blank):
+            changed = True
+
+    return changed
+
+
+def _same_table_start_orphan_remains(docx_path: Path, table_idx: int) -> bool:
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(docx_path)
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        candidate = _find_rendered_whole_table_move_candidate(doc, pdf_lines)
+        return candidate is not None and candidate.table_idx == table_idx
+    except Exception as exc:
+        logger.warning(
+            "table_start_orphan_validation_failed table_idx=%s error=%s",
+            table_idx,
+            exc,
+        )
+        return True
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
 
 
 def _find_rendered_split_candidate(
@@ -4656,15 +4816,29 @@ def _apply_rendered_table_continuation_impl(
     diagnostics: dict[str, bool] = {"ambiguous": False}
     move_candidate = _find_rendered_whole_table_move_candidate(doc, pdf_lines, diagnostics)
     if move_candidate is not None:
-        if not _ensure_page_break_before(move_candidate.caption_para_xml):
+        validation_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_table_start_orphan_"))
+        validation_backup_path = validation_backup_dir / docx_path.name
+        shutil.copy2(docx_path, validation_backup_path)
+
+        if not _insert_table_start_orphan_blanks(move_candidate.caption_para_xml, target_count=2):
+            shutil.rmtree(validation_backup_dir, ignore_errors=True)
             logger.info(
-                "rendered_final_decision action=rendered_no_action reason=whole_table_candidate_already_has_page_break table_idx=%s",
+                "rendered_final_decision action=rendered_no_action reason=table_start_orphan_already_has_blanks table_idx=%s",
                 move_candidate.table_idx,
             )
             return 0
         doc.save(str(docx_path))
+        if _same_table_start_orphan_remains(docx_path, move_candidate.table_idx):
+            shutil.copy2(validation_backup_path, docx_path)
+            shutil.rmtree(validation_backup_dir, ignore_errors=True)
+            logger.info(
+                "rendered_final_decision action=rendered_no_action reason=table_start_orphan_validation_failed table_idx=%s",
+                move_candidate.table_idx,
+            )
+            return 0
+        shutil.rmtree(validation_backup_dir, ignore_errors=True)
         logger.info(
-            "rendered_final_decision action=rendered_whole_table_move table_idx=%s",
+            "rendered_final_decision action=table_start_orphan_move table_idx=%s blanks=2",
             move_candidate.table_idx,
         )
         return 1

@@ -929,13 +929,123 @@ def _detect_missing_numeric_rows(
     return issues
 
 
+def _line_matches_row_cells(row: dict, line_texts: list[str]) -> bool:
+    joined = " ".join(line_texts)
+    cell_texts = [text for text in row.get("cell_texts", []) if _normalize_text(text)]
+    if not cell_texts:
+        return False
+    if _row_fingerprint_from_cells(cell_texts) and _row_fingerprint_from_cells(cell_texts) in joined:
+        return True
+    hits = 0
+    for cell_text in cell_texts:
+        if _cell_line_score(cell_text, joined) >= 0.75:
+            hits += 1
+    required = min(2, len(cell_texts))
+    return hits >= required
+
+
+def _detect_table_start_orphans(
+    model: dict,
+    pdf_lines: list,
+    page_bounds: dict[str, tuple[int, int | None]] | None = None,
+) -> list[TableIssue]:
+    issues: list[TableIssue] = []
+    if not pdf_lines:
+        return issues
+
+    lines_by_page: dict[int, list] = {}
+    for line in pdf_lines:
+        lines_by_page.setdefault(int(getattr(line, "page_num", 0) or 0), []).append(line)
+
+    rows_by_logical: dict[str, list[dict]] = {}
+    for row in model["rows"]:
+        rows_by_logical.setdefault(row["logical_table_id"], []).append(row)
+
+    for logical in model["logical_tables"]:
+        table_num = logical["table_num"]
+        if not table_num:
+            continue
+        if len(logical["physical_table_indexes"]) != 1 or logical["continuation_marker_paragraphs"]:
+            continue
+
+        caption_lines = [
+            line for line in pdf_lines
+            if _caption_num(getattr(line, "text", "")) == table_num
+        ]
+        if len(caption_lines) != 1:
+            continue
+
+        caption_line = caption_lines[0]
+        start_page = int(getattr(caption_line, "page_num", 0) or 0)
+        if page_bounds and table_num in page_bounds:
+            bounded_start, _bounded_end = page_bounds[table_num]
+            if start_page != bounded_start:
+                continue
+
+        same_page_lines = [
+            line for line in lines_by_page.get(start_page, [])
+            if float(getattr(line, "top", 0.0) or 0.0) > float(getattr(caption_line, "top", 0.0) or 0.0)
+        ]
+        same_page_texts = [_normalize_text(getattr(line, "text", "")) for line in same_page_lines]
+        if not same_page_texts:
+            continue
+
+        logical_rows = rows_by_logical.get(logical["logical_table_id"], [])
+        header_rows = [
+            row for row in logical_rows
+            if row["role"] in {"semantic_header", "numeric_row", "duplicate_numeric_artifact"}
+        ]
+        data_rows = [row for row in logical_rows if row["role"] == "data_row"]
+        if not header_rows or not data_rows:
+            continue
+        if not any(_line_matches_row_cells(row, same_page_texts[:8]) for row in header_rows):
+            continue
+        if any(_line_matches_row_cells(row, same_page_texts) for row in data_rows):
+            continue
+
+        next_page = start_page + 1
+        next_page_lines = [
+            _normalize_text(getattr(line, "text", ""))
+            for line in lines_by_page.get(next_page, [])
+            if float(getattr(line, "top", 0.0) or 0.0) <= 220.0
+        ]
+        first_data_row = next((row for row in data_rows if _line_matches_row_cells(row, next_page_lines)), None)
+        if first_data_row is None:
+            continue
+
+        issues.append(
+            TableIssue(
+                issue_type="table_start_orphan",
+                table_num=table_num,
+                pages=[start_page, next_page],
+                evidence={
+                    "logical_table_id": logical["logical_table_id"],
+                    "physical_table_index": logical["physical_table_indexes"][0],
+                    "caption_page": start_page,
+                    "first_data_page": next_page,
+                    "first_data_row_index": first_data_row["row_index"],
+                    "first_data_row_fingerprint": first_data_row["normalized_fingerprint"][:90],
+                    "repair": "insert_two_blank_paragraphs_before_caption",
+                },
+                severity="fail",
+                safe_repair_class="table_start_orphan_move",
+                skip_reason=None,
+            )
+        )
+    return issues
+
+
 def _detect_single_physical_cross_page(
     model: dict,
     rendered_rows: list[dict],
     page_bounds: dict[str, tuple[int, int | None]] | None = None,
+    skip_logical_ids: set[str] | None = None,
 ) -> list[TableIssue]:
     issues: list[TableIssue] = []
+    skip_logical_ids = skip_logical_ids or set()
     for logical in model["logical_tables"]:
+        if logical["logical_table_id"] in skip_logical_ids:
+            continue
         table_num = logical["table_num"]
         if not table_num:
             continue
@@ -1102,7 +1212,21 @@ def build_universal_table_diagnostics(
             issues.append(_issue_from_rendered_violation(violation))
 
     issues.extend(_detect_missing_numeric_rows(model, rendered_rows_payload, page_bounds, marker_pages))
-    issues.extend(_detect_single_physical_cross_page(model, rendered_rows_payload, page_bounds))
+    table_start_orphans = _detect_table_start_orphans(model, pdf_lines, page_bounds)
+    issues.extend(table_start_orphans)
+    table_start_orphan_ids = {
+        issue.evidence.get("logical_table_id")
+        for issue in table_start_orphans
+        if issue.evidence.get("logical_table_id")
+    }
+    issues.extend(
+        _detect_single_physical_cross_page(
+            model,
+            rendered_rows_payload,
+            page_bounds,
+            skip_logical_ids=table_start_orphan_ids,
+        )
+    )
     issues.extend(_detect_ordinary_generated_numeric_row(model, rendered_rows_payload, page_bounds))
     issues.extend(_detect_source_bad_duplicates(model))
 

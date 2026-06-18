@@ -51,19 +51,19 @@ The Phase 3 marker-driven table-split subsystem (`guides/coursework_kfu_2025/tab
 - Do not split a table merely because it is "long" in the DOCX. Row count is a candidate filter (`_MIN_ROWS_FOR_SPLIT_CANDIDACY`), not a split trigger.
 - The marker-render row→page map drives the split decision; PDF/visual evidence is authoritative.
 
-### 2. Minimum valid first fragment
+### 2. Minimum valid first fragment and table-start orphan
 
-A first-page fragment is valid only if it contains, in this order:
+A first-page fragment of an actual split/continued table is valid only if it contains, in this order:
 
 - Table caption (`Таблица X.Y.Z`).
 - Table title (if present).
 - Semantic header row (if present in source).
-- Numeric column-numbering row (`1 2 3 …`) — see rule 3.
+- Numeric column-numbering row (`1 2 3 …`) if this table is actually split/continued — see rule 3.
 - At least **ONE real data row**.
 
 **The criterion is not** "avoid header + one small row with a huge blank below". A first fragment that contains the structural prefix above + one real data row is valid even if the page below has visible whitespace.
 
-Invalid first fragments:
+Invalid split/continuation first fragments:
 
 - caption only;
 - caption + title only;
@@ -71,13 +71,16 @@ Invalid first fragments:
 - caption + title + header + numeric row, zero data rows;
 - first data row pushed to the next page by inserting the synthetic numeric row (see rule 3 — split point must compensate).
 
+If an ordinary non-split table starts near the bottom of a page and that page contains only the caption/title/header and optionally a source numeric row, but zero complete real data rows while the first real data row starts on the next page, this is a **table-start orphan**. The MVP repair is to move the whole table start to the next page by inserting exactly **two blank paragraphs** before the table block, before the caption when a caption exists. Do not split the table, do not insert `Продолжение таблицы`, do not synthesize a numeric row, and do not convert the repair into a page-break-before rule.
+
 ### 3. Numeric column-numbering row
 
-The methodical KFU continuation format requires a numeric column-index row "1 2 3 … N" before data rows in **every** table fragment. This row is **not** a "repaired header" — it is a separate numeric index row.
+The methodical KFU continuation format requires a numeric column-index row "1 2 3 … N" before data rows in actual split/continued table fragments. This row is **not** a "repaired header" — it is a separate numeric index row.
 
 Required behaviour:
 
-- **First / original fragment**: must contain the numeric row directly above the data rows.
+- **Ordinary non-split table**: do not synthesize a numeric row.
+- **First / original split fragment**: must contain the numeric row directly above the data rows.
 - **Each continuation fragment**: must repeat the numeric row before its data rows.
 - **Preservation**: if the source table already has a numeric row at row index 1, reuse it; do not duplicate.
 - **Synthesis**: if the formatter synthesizes a numeric row for the continuation, it must also ensure the first fragment has the corresponding numeric row.
@@ -134,7 +137,7 @@ A split is invalid (must be skipped, with logged reason) if any of the following
 - The continuation label is detached from its continuation table by anything other than one blank.
 - The first fragment has zero data rows.
 - A synthetic numeric row pushed the first data row off the first fragment.
-- Numeric row missing from the first fragment.
+- Numeric row missing from the first split/continued fragment.
 - Numeric row missing from a continuation fragment.
 - Any original data row is missing across fragments.
 - Any original data row is duplicated across fragments.
