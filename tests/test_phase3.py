@@ -2027,6 +2027,168 @@ def test_cap_unit_no_lowercase_cyrillic_noop() -> tuple[bool, str]:
     return _result(True, "no lowercase Cyrillic → no-op")
 
 
+# ───────────────────────── Visual rules batch (VR) ─────────────────────────
+
+def test_vr_r11_heading2_first_letter_capitalized() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("1. Глава").style = "Heading 1"
+    doc.add_paragraph("Текст главы.")
+    doc.add_paragraph("1.2. для математиков").style = "Heading 2"
+    doc.add_paragraph("Текст подраздела.")
+    out = _hl_process_document(doc)
+    h2 = _hl_find(out, "математиков")
+    if h2 is None or not h2.text.strip().startswith("1.2. Для"):
+        return _result(False, f"heading2 not capitalized: {h2.text if h2 else None!r}")
+    return _result(True, "heading2 title first letter capitalized")
+
+
+def test_vr_r1r2_dash_and_ranges() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_dashes_in_runs
+    cases = {"задача – оформить": "задача - оформить", "текст — текст": "текст - текст",
+             "35—40": "35-40", "35 – 40": "35-40", "35–40": "35-40",
+             "C - товарооборот": "C - товарооборот", "слово–слово": "слово–слово"}
+    for src, want in cases.items():
+        d = Document(); p = d.add_paragraph(); p.add_run(src)
+        normalize_dashes_in_runs(p)
+        if p.text != want:
+            return _result(False, f"{src!r} -> {p.text!r} want {want!r}")
+    return _result(True, "spaced long-dash->hyphen; digit ranges->tight hyphen; unspaced/hyphen kept")
+
+
+def test_vr_r8_closing_quote_and_source_period() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import (
+        _ensure_body_terminal_period, format_source_line,
+    )
+    d = Document(); p = d.add_paragraph(); p.add_run("Их спрашивали «почему театры то?»")
+    _ensure_body_terminal_period(p)
+    if p.text != "Их спрашивали «почему театры то?».":
+        return _result(False, f"closing quote: {p.text!r}")
+    d = Document(); p = d.add_paragraph(); p.add_run("Вопрос?")
+    _ensure_body_terminal_period(p)
+    if p.text != "Вопрос?":
+        return _result(False, f"bare ?: {p.text!r}")
+    d = Document(); p = d.add_paragraph(); p.add_run("Источник: выдумано специально")
+    format_source_line(p)
+    if p.text != "Источник: выдумано специально.":
+        return _result(False, f"source period: {p.text!r}")
+    return _result(True, "closing-quote period + source/note period")
+
+
+def test_vr_r5_underline_removed() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    p = doc.add_paragraph(); r = p.add_run("подчеркнутый текст"); r.underline = True
+    out = _hl_process_document(doc)
+    tgt = _hl_find(out, "подчеркнутый")
+    if tgt is None:
+        return _result(False, "paragraph missing")
+    if any(rr.underline for rr in tgt.runs):
+        return _result(False, "underline survived")
+    return _result(True, "underline removed from body run")
+
+
+def test_vr_r10_hyperlink_restyled_target_preserved() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import _normalize_body_hyperlink_runs
+    doc = Document()
+    p = doc.add_paragraph(); p.add_run("Бот ")
+    hl = OxmlElement("w:hyperlink"); hl.set(qn("w:anchor"), "x")
+    r = OxmlElement("w:r"); rpr = OxmlElement("w:rPr")
+    u = OxmlElement("w:u"); u.set(qn("w:val"), "single"); rpr.append(u)
+    rs = OxmlElement("w:rStyle"); rs.set(qn("w:val"), "Hyperlink"); rpr.append(rs)
+    r.append(rpr); t = OxmlElement("w:t"); t.text = "ссылка"; r.append(t); hl.append(r)
+    p._element.append(hl)
+    _normalize_body_hyperlink_runs(p)
+    if len(p._element.findall(".//" + qn("w:hyperlink"))) != 1:
+        return _result(False, "hyperlink element lost")
+    rpr2 = p._element.find(".//" + qn("w:hyperlink") + "/" + qn("w:r") + "/" + qn("w:rPr"))
+    u2 = rpr2.find(qn("w:u"))
+    if u2 is None or u2.get(qn("w:val")) != "none":
+        return _result(False, "underline not removed")
+    sz = rpr2.find(qn("w:sz"))
+    if sz is None or sz.get(qn("w:val")) != "28":
+        return _result(False, "size not 14pt")
+    if rpr2.find(qn("w:rStyle")) is not None:
+        return _result(False, "Hyperlink rStyle not removed")
+    return _result(True, "hyperlink restyled TNR14/no-underline/no-rStyle, element preserved")
+
+
+def test_vr_r4_cell_shading_cleared() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import format_tables
+    doc = Document()
+    doc.add_paragraph("введение")
+    tbl = doc.add_table(rows=1, cols=1)
+    cell = tbl.rows[0].cells[0]; cell.text = "ячейка"
+    tcPr = cell._element.get_or_add_tcPr()
+    shd = OxmlElement("w:shd"); shd.set(qn("w:val"), "clear"); shd.set(qn("w:fill"), "FFFF00")
+    tcPr.append(shd)
+    format_tables(doc)
+    tcPr2 = cell._element.find(qn("w:tcPr"))
+    if tcPr2 is not None and tcPr2.find(qn("w:shd")) is not None:
+        return _result(False, "cell shading survived")
+    return _result(True, "cell shading (yellow fill) cleared")
+
+
+def test_vr_r6_glued_letter_list_gets_space() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Перечисление букв:")
+    doc.add_paragraph("А)мы встречаемся уже полгода")
+    doc.add_paragraph("б) ух ты давай")
+    doc.add_paragraph("в) так вот")
+    out = _hl_process_document(doc)
+    joined = "\n".join((p.text or "") for p in out.paragraphs)
+    if "А)мы" in joined:
+        return _result(False, f"glued letter marker not spaced: {joined!r}")
+    if "А) мы" not in joined and "а) мы" not in joined.lower():
+        return _result(False, f"letter item not normalized: {joined!r}")
+    return _result(True, "glued letter list marker got a space")
+
+
+def test_vr_r7_figure_inline_source_split() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import normalize_figure_caption_text
+    doc = Document()
+    cap = doc.add_paragraph("Рис. 1.3.1. Уровень хаоса в курсовой. Источник: Wikipedia.com")
+    normalize_figure_caption_text(cap)
+    texts = [p.text for p in doc.paragraphs]
+    if any("Источник:" in (cap.text or "") for _ in [0]) and "Источник:" in cap.text:
+        return _result(False, f"source not split from caption: {cap.text!r}")
+    if not any(t.strip().startswith("Источник: Wikipedia.com") for t in texts):
+        return _result(False, f"source paragraph not created: {texts!r}")
+    if not cap.text.strip().startswith("Рис. 1.3.1. Уровень хаоса"):
+        return _result(False, f"caption text wrong: {cap.text!r}")
+    return _result(True, "inline figure source split into its own paragraph")
+
+
+def test_vr_r8_paragraph_terminal_period() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("В конце войны денег не осталось ни у кого")
+    doc.add_paragraph("Уже с точкой.")
+    out = _hl_process_document(doc)
+    joined = "\n".join((p.text or "") for p in out.paragraphs)
+    if "ни у кого." not in joined:
+        return _result(False, f"terminal period not added: {joined!r}")
+    return _result(True, "body paragraph got terminal period")
+
+
+def test_vr_r3_list_punctuation() -> tuple[bool, str]:
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Список ниже:")
+    doc.add_paragraph("- нейронки часто ставят кривую нумерацию")
+    doc.add_paragraph("- хотя бот это фиксит")
+    out = _hl_process_document(doc)
+    items = [(p.text or "") for p in out.paragraphs if (p.text or "").strip().startswith("-")]
+    joined = " | ".join(items)
+    if not any(t.rstrip().endswith(";") for t in items):
+        return _result(False, f"no ';' between list items: {joined!r}")
+    if not any(t.rstrip().endswith(".") for t in items):
+        return _result(False, f"last item not ending with '.': {joined!r}")
+    return _result(True, "list items: ';' between, '.' on last")
+
+
 def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
     out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
     entry_paragraphs = [p for p in out.paragraphs if "\t" in (p.text or "")]
@@ -17208,6 +17370,16 @@ def run_all() -> None:
         ("CAP | unit hyperlink skipped",               test_cap_unit_hyperlink_paragraph_skipped),
         ("CAP | unit run preservation",                test_cap_unit_run_preservation),
         ("CAP | unit no-Cyrillic no-op",               test_cap_unit_no_lowercase_cyrillic_noop),
+        ("VR | R11 heading2 first-letter caps",        test_vr_r11_heading2_first_letter_capitalized),
+        ("VR | R1/R2 dash and ranges",                 test_vr_r1r2_dash_and_ranges),
+        ("VR | R5 underline removed",                  test_vr_r5_underline_removed),
+        ("VR | R10 hyperlink restyled",                test_vr_r10_hyperlink_restyled_target_preserved),
+        ("VR | R4 cell shading cleared",               test_vr_r4_cell_shading_cleared),
+        ("VR | R6 glued letter list space",            test_vr_r6_glued_letter_list_gets_space),
+        ("VR | R7 figure inline source split",         test_vr_r7_figure_inline_source_split),
+        ("VR | R8 paragraph terminal period",          test_vr_r8_paragraph_terminal_period),
+        ("VR | R8 closing-quote + source period",      test_vr_r8_closing_quote_and_source_period),
+        ("VR | R3 list punctuation",                   test_vr_r3_list_punctuation),
         ("TOC | soft-break plain TOC removed",         test_autotoc_softbreak_plain_toc_removed),
         ("TOC | soft-break TOC appendix continuation removed", test_autotoc_softbreak_toc_appendix_continuation_removed),
         ("TOC | body ВВЕДЕНИЕ preserved after softbreak cleanup", test_autotoc_body_intro_preserved_after_softbreak_toc),

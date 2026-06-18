@@ -1184,10 +1184,39 @@ def normalize_quotes_in_document(document, body_start=0):
                 for paragraph in cell.paragraphs:
                     normalize_quotes_in_paragraph_runs(paragraph, quote_state)
 
+_NUMBER_RANGE_DASH_RE = re.compile(r"(\d)\s*[\u2013\u2014]\s*(\d)")
+
+
+_SPACED_DASH_RE = re.compile(r"(?<=\s)[\u2013\u2014](?=\s)")
+
+
 def normalize_dashes_in_runs(paragraph):
+    """R1+R2 dash normalization (body text; references skipped by the caller):
+      * R2 \u2014 a dash (en/em) BETWEEN digits becomes a tight hyphen: 35\u201340 / 35 \u2014 40 -> 35-40;
+      * R1 \u2014 a long dash (\u2013/\u2014) with whitespace on BOTH sides becomes a plain hyphen
+             (` \u2013 ` / ` \u2014 ` -> ` - `).
+    Hyphens (`-`) themselves are never touched, so formula explanations (`\u0433\u0434\u0435 C - \u2026`),
+    which already use a spaced hyphen, are unaffected."""
+    # R2: number ranges -> tight hyphen (per-run; a range lives inside one run).
     for run in paragraph.runs:
-        if '\u2014' in run.text:
-            run.text = run.text.replace('\u2014', '\u2013')
+        if run.text:
+            new = _NUMBER_RANGE_DASH_RE.sub(r"\1-\2", run.text)
+            if new != run.text:
+                run.text = new
+    # R1: spaced long-dash -> spaced hyphen, length-preserving paragraph-level remap
+    # so it works even when the dash and its spaces span multiple runs.
+    runs = paragraph.runs
+    old = "".join(r.text for r in runs)
+    new = _SPACED_DASH_RE.sub("-", old)
+    if new != old and len(new) == len(old):
+        off = 0
+        for r in runs:
+            n = len(r.text)
+            if n:
+                seg = new[off:off + n]
+                if seg != r.text:
+                    r.text = seg
+                off += n
 
 
 def normalize_dashes_in_document(document, body_start):
@@ -1353,7 +1382,10 @@ _CYRILLIC_LIST_ALPHA = 'абвгдежзиклмнопрстуфхцчшщэюя
 # at least one space and the item body. Single letter only — multi-letter words,
 # ПРИЛОЖЕНИЕ А, and abbreviations do not match because the delimiter must
 # immediately follow the first (and only) letter character.
-_CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яёА-ЯЁA-Za-z])[).]\s+(.+)$', re.DOTALL)
+# R6: allow a GLUED letter+paren marker (`А)мы` -> recognized; the formatter then
+# inserts the space). The `.`-marker variant still requires a following space so
+# abbreviations like `т.е.` / `т.д.` are never misread as a lettered list item.
+_CYRILLIC_LETTER_LIST_RE = re.compile(r'^([а-яёА-ЯЁA-Za-z])(?:\)\s*|\.\s+)(.+)$', re.DOTALL)
 _NUMERIC_PAREN_LIST_RE   = re.compile(r'^(\d+)\)\s+(.+)$',   re.DOTALL)
 _NUMERIC_DOT_LIST_RE     = re.compile(r'^(\d+)\.\s+(.+)$',   re.DOTALL)
 # Manual L1 dash/bullet markers (ascii hyphen, en/em dash, common black bullet
@@ -3003,6 +3035,176 @@ def _capitalize_body_paragraph(paragraph) -> None:
             offset += n
 
 
+def _normalize_body_hyperlink_runs(paragraph) -> None:
+    """R10: restyle hyperlink display runs in a body paragraph to Times New Roman
+    14, black, NOT underlined — while preserving the <w:hyperlink> element and its
+    r:id target (clickable). Removes the inherited 'Hyperlink' character style
+    (rStyle) that forces blue+underline. Does not touch run text."""
+    for hl in paragraph._element.findall(".//" + qn("w:hyperlink")):
+        for r in hl.findall(qn("w:r")):
+            rPr = r.find(qn("w:rPr"))
+            if rPr is None:
+                rPr = OxmlElement("w:rPr")
+                r.insert(0, rPr)
+            rStyle = rPr.find(qn("w:rStyle"))
+            if rStyle is not None:
+                rPr.remove(rStyle)
+            rFonts = rPr.find(qn("w:rFonts"))
+            if rFonts is None:
+                rFonts = OxmlElement("w:rFonts")
+                rPr.append(rFonts)
+            for a in ("w:ascii", "w:hAnsi", "w:cs"):
+                rFonts.set(qn(a), FONT_NAME)
+            for tag in ("w:sz", "w:szCs"):
+                el = rPr.find(qn(tag))
+                if el is None:
+                    el = OxmlElement(tag)
+                    rPr.append(el)
+                el.set(qn("w:val"), str(int(BODY_FONT_SIZE_PT * 2)))
+            color = rPr.find(qn("w:color"))
+            if color is None:
+                color = OxmlElement("w:color")
+                rPr.append(color)
+            color.set(qn("w:val"), "000000")
+            for attr in ("w:themeColor", "w:themeTint", "w:themeShade"):
+                if qn(attr) in color.attrib:
+                    del color.attrib[qn(attr)]
+            u = rPr.find(qn("w:u"))
+            if u is None:
+                u = OxmlElement("w:u")
+                rPr.append(u)
+            u.set(qn("w:val"), "none")
+            for tag in ("w:b", "w:bCs", "w:i", "w:iCs"):
+                node = rPr.find(qn(tag))
+                if node is not None:
+                    rPr.remove(node)
+
+
+_BODY_CLOSING_CHARS = "»\"'›)]"
+
+
+def _append_terminal_period(paragraph) -> None:
+    """Place a '.' at the very end of the paragraph. If the paragraph ends with a
+    footnote reference, the period goes AFTER it (as its own run); otherwise it is
+    inserted right after the last visible character of the last text run."""
+    runs = paragraph.runs
+    for r in reversed(runs):
+        has_fn = r._element.find(qn("w:footnoteReference")) is not None
+        has_txt = bool(r.text and r.text.strip())
+        if has_fn and not has_txt:
+            new_r = paragraph.add_run(".")
+            set_run_font(new_r, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
+            return
+        if has_txt:
+            rt = r.text
+            j = len(rt)
+            while j > 0 and rt[j - 1].isspace():
+                j -= 1
+            r.text = rt[:j] + "." + rt[j:]
+            return
+
+
+def _ensure_body_terminal_period(paragraph) -> None:
+    """R8 (conservative): ensure an ordinary body paragraph ends with '.'. Adds the
+    period after a trailing closing quote/paren (`…то?»` -> `…то?».`) and after a
+    trailing footnote reference (`…ментов¹` -> `…ментов¹.`). Skips hyperlink, list,
+    and URL-ending paragraphs; bare terminal punctuation (. … ? ! : ; ,) is kept."""
+    if paragraph._element.findall(".//" + qn("w:hyperlink")):
+        return
+    if _get_kfu_list_type(paragraph):
+        return
+    runs = paragraph.runs
+    text = "".join(r.text for r in runs)
+    stripped = text.rstrip()
+    if not stripped:
+        return
+    cleaned = clean_spaces(stripped)
+    if _is_dash_or_bullet_list_text(cleaned) or _is_level1_list_text(cleaned):
+        return
+    if re.search(r"https?://\S+$", stripped):
+        return
+    last = stripped[-1]
+    if last in ".…?!:;,":
+        return
+    if last in _BODY_CLOSING_CHARS:
+        # trailing closing quote/paren: add a period after it unless the sentence
+        # inside already ended with one (`Привет.»` stays).
+        prev = stripped[-2] if len(stripped) >= 2 else ""
+        if prev in ".…":
+            return
+        _append_terminal_period(paragraph)
+        return
+    if last.isalpha() or last.isdigit() or last == "%":
+        _append_terminal_period(paragraph)
+
+
+def _is_list_item_paragraph(paragraph) -> bool:
+    if _get_kfu_list_type(paragraph):
+        return True
+    t = clean_spaces(paragraph.text)
+    return bool(_is_dash_or_bullet_list_text(t) or _is_level1_list_text(t))
+
+
+def _set_list_item_terminal(paragraph, target: str) -> None:
+    """Set a list item's terminal punctuation to *target* ('.' or ';'), run-level.
+    Leaves items ending with ? ! : untouched (meaningful punctuation kept)."""
+    runs = paragraph.runs
+    text = "".join(r.text for r in runs)
+    stripped = text.rstrip()
+    if not stripped:
+        return
+    if stripped[-1] in "?!:":
+        return
+    for r in reversed(runs):
+        if r.text and r.text.strip():
+            rt = r.text
+            j = len(rt)
+            while j > 0 and rt[j - 1].isspace():
+                j -= 1
+            k = j
+            if k > 0 and rt[k - 1] in ".,;":
+                k -= 1
+            new = rt[:k] + target + rt[j:]
+            if new != rt:
+                r.text = new
+            return
+
+
+def normalize_list_block_punctuation(document, body_start):
+    """R3 (conservative): within a run of >= 2 adjacent body list items, every item
+    except the last ends with ';' and the last ends with '.'. Skips references,
+    appendices, and any block containing a ':'-terminated (sub-list intro) item."""
+    paras = document.paragraphs
+    in_ref = False
+    in_appendix = False
+    i = body_start or 0
+    n = len(paras)
+    while i < n:
+        t = clean_spaces(paras[i].text)
+        if is_references_heading_text(t):
+            in_ref = True
+        if is_appendix_heading_text(t):
+            in_appendix = True
+        if in_ref or in_appendix or not _is_list_item_paragraph(paras[i]):
+            i += 1
+            continue
+        run = [paras[i]]
+        j = i + 1
+        while j < n:
+            tj = clean_spaces(paras[j].text)
+            if not tj or not _is_list_item_paragraph(paras[j]):
+                break
+            run.append(paras[j])
+            j += 1
+        if len(run) >= 2 and not any(
+            clean_spaces(p.text).rstrip().endswith(":") for p in run
+        ):
+            last = len(run) - 1
+            for k, p in enumerate(run):
+                _set_list_item_terminal(p, "." if k == last else ";")
+        i = max(j, i + 1)
+
+
 def format_body(paragraph, preserve_numbering=False):
     # Zone M: insert space before URLs glued to preceding text.
     # Two cases handled: plain paragraphs (full text replacement) and paragraphs
@@ -3268,6 +3470,32 @@ def format_heading1(paragraph):
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, italic=False, all_caps=False)
 
+_H2_TITLE_CAP_RE = re.compile(r"^(\s*\d+(?:\.\d+)+\.?\s+)([а-яё])")
+
+
+def _capitalize_heading_title_first_letter(paragraph) -> None:
+    """R11: uppercase the first lowercase-Cyrillic letter of an `N.M.` heading
+    title (`1.2. для математиков` -> `1.2. Для математиков`). Run-level, case-only,
+    preserves run boundaries; no-op if already capital / not a numbered subheading."""
+    runs = paragraph.runs
+    old = "".join(r.text for r in runs)
+    m = _H2_TITLE_CAP_RE.match(old)
+    if not m:
+        return
+    i = m.start(2)
+    new = old[:i] + old[i].upper() + old[i + 1:]
+    if new == old or len(new) != len(old):
+        return
+    off = 0
+    for r in runs:
+        n = len(r.text)
+        if n:
+            seg = new[off:off + n]
+            if seg != r.text:
+                r.text = seg
+            off += n
+
+
 def format_heading2(paragraph):
     remove_page_break_artifacts_from_paragraph(paragraph)
     remove_paragraph_numbering(paragraph)
@@ -3275,6 +3503,8 @@ def format_heading2(paragraph):
     set_paragraph_style_safe(paragraph, "Heading 2", "Заголовок 2")
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=None)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    _capitalize_heading_title_first_letter(paragraph)
 
     for run in paragraph.runs:
         set_run_font(run, size_pt=BODY_FONT_SIZE_PT, bold=True, all_caps=False)
@@ -3324,6 +3554,20 @@ def format_source_line(paragraph):
     set_paragraph_style_safe(paragraph, "Normal", "Обычный")
     clear_paragraph_outline_level(paragraph)
     remove_paragraph_numbering(paragraph)
+
+    # Источник:/Примечание: lines must end with a period ("Источник: выдумано
+    # специально" -> "… специально."). Skip if already terminal or empty marker (`:`).
+    _text = "".join(r.text for r in paragraph.runs)
+    _stripped = _text.rstrip()
+    if _stripped and _stripped[-1] not in ".!?…:":
+        for r in reversed(paragraph.runs):
+            if r.text and r.text.strip():
+                rt = r.text
+                j = len(rt)
+                while j > 0 and rt[j - 1].isspace():
+                    j -= 1
+                r.text = rt[:j] + "." + rt[j:]
+                break
 
     hard_reset_paragraph_format(paragraph, first_line_indent_cm=FIRST_LINE_INDENT_CM)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
@@ -3844,6 +4088,18 @@ def ensure_all_table_rows_cant_split(document):
         _ensure_table_rows_cant_split(table._element)
 
 
+def _clear_cell_shading(cell) -> None:
+    """R4: drop cell background fill (w:tcPr/w:shd) so the cell renders white,
+    instead of preserving an authored yellow/green fill. Geometry (tcW/grid/merge)
+    is untouched — only the shading element is removed."""
+    tcPr = cell._element.find(qn("w:tcPr"))
+    if tcPr is None:
+        return
+    shd = tcPr.find(qn("w:shd"))
+    if shd is not None:
+        tcPr.remove(shd)
+
+
 def format_tables(document):
     for table in document.tables:
         preserve_geometry = _safe_formatter_preserve_table_geometry(table)
@@ -3861,6 +4117,7 @@ def format_tables(document):
 
         for row_idx, row in enumerate(table.rows):
             for col_idx, cell in enumerate(row.cells):
+                _clear_cell_shading(cell)
                 cell_text = _get_table_cell_text(cell)
                 normalized_number = _format_table_number_for_column(
                     cell_text,
@@ -4283,6 +4540,11 @@ def normalize_table_continuation_text(paragraph):
             replace_paragraph_text(paragraph, f"Продолжение таблицы {m.group(1)}")
 
 
+_INLINE_FIG_SOURCE_RE = re.compile(
+    r"\s*(источник|примечание|составлено по|рассчитано по)\s*:", re.IGNORECASE
+)
+
+
 def normalize_figure_caption_text(paragraph):
     text = clean_spaces(paragraph.text)
     if not text:
@@ -4295,6 +4557,15 @@ def normalize_figure_caption_text(paragraph):
     number = m.group(2)
     title = clean_spaces(m.group(3) or "")
 
+    # R7: split an inline `Источник:` / `Примечание:` out of the figure caption
+    # into its own following source paragraph. Idempotent: once split, the caption
+    # no longer contains the marker.
+    source_text = None
+    src_m = _INLINE_FIG_SOURCE_RE.search(title)
+    if src_m and src_m.start() > 0:
+        source_text = title[src_m.start():].strip()
+        title = title[:src_m.start()].strip().rstrip(".")
+
     if title:
         normalized = f"Рис. {number}. {title}"
     else:
@@ -4302,6 +4573,10 @@ def normalize_figure_caption_text(paragraph):
 
     if text != normalized:
         replace_paragraph_text(paragraph, normalized)
+
+    if source_text:
+        new_p = insert_paragraph_after(paragraph, source_text)
+        format_source_line(new_p)
 
 
 def normalize_toc_line(text: str) -> str:
@@ -6308,6 +6583,10 @@ def remove_all_italic(doc):
 
     def clear_run(run):
         run.italic = False
+        # R5b: remove underline everywhere (same policy as italic). Hyperlink
+        # display runs live inside <w:hyperlink> and are NOT in paragraph.runs,
+        # so they are handled separately by _normalize_body_hyperlink_runs.
+        run.underline = False
 
         try:
             run.font.highlight_color = None
@@ -7132,10 +7411,16 @@ def process_document(input_path: Path, output_path: Path):
             continue
 
         format_body(paragraph)
+        # R10: restyle body hyperlinks (TNR14/black/no-underline, target preserved).
+        _normalize_body_hyperlink_runs(paragraph)
         # Body-text capitalization: ordinary body paragraphs only (every other
         # role has been filtered/continued above). Appendices excluded.
         if not _in_appendix:
             _capitalize_body_paragraph(paragraph)
+        # R8: ensure a terminal period on ordinary body prose (strict guards;
+        # hyperlink/list/appendix paragraphs excluded inside the helper).
+        if not _in_appendix:
+            _ensure_body_terminal_period(paragraph)
         prev_nonempty_kind = "body_text"
 
     run_with_pass_limit(
@@ -7196,5 +7481,9 @@ def process_document(input_path: Path, output_path: Path):
     # hanging=198` to dash/letter list blocks while heading guards continue to
     # protect chapter and subchapter paragraphs.
     normalize_plain_lists_in_document(doc, body_start)
+
+    # R3: list terminal punctuation (';' between items, '.' on the last) — runs
+    # last, once every list item is finalised with its KFU mark and text.
+    normalize_list_block_punctuation(doc, body_start)
 
     doc.save(str(output_path))
