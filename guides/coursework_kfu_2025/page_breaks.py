@@ -1,6 +1,24 @@
+import re
+
 from docx.oxml.ns import qn
 
 from .classifier import clean_spaces, parse_heading1, parse_heading2
+
+
+_CHAPTER_PREFIX_RE = re.compile(r"^\d+\.\s+\S")
+
+
+def _is_styled_heading1_chapter(paragraph, text: str) -> bool:
+    """A paragraph already promoted to Heading 1 that starts with `N.` is a chapter
+    by construction — even when its title is too messy for parse_heading1 (e.g. a
+    spawned `1. … Типа 1.Чето там …`). Such chapters still need a page break."""
+    try:
+        style = (paragraph.style.name or "").strip().lower()
+    except Exception:
+        style = ""
+    if style not in {"heading 1", "заголовок 1"}:
+        return False
+    return bool(_CHAPTER_PREFIX_RE.match(clean_spaces(text)))
 
 
 EXACT_PAGEBREAK_HEADINGS = {
@@ -109,7 +127,7 @@ def apply_page_breaks(document, body_start):
             paragraph.paragraph_format.page_break_before = False
             continue
 
-        if _needs_page_break_before(text):
+        if _needs_page_break_before(text) or _is_styled_heading1_chapter(paragraph, text):
             paragraph.paragraph_format.page_break_before = True
         else:
             paragraph.paragraph_format.page_break_before = False
