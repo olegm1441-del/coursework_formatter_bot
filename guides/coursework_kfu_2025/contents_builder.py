@@ -41,6 +41,7 @@ _FIGURE_RE = re.compile(r"^\s*(рис\.|рисунок)\s*\d+(?:\.\d+){0,2}\b", 
 _TOC_PAGE_TAIL_RE = re.compile(r"[\s.․‥…·•]+\d{1,4}\s*$")
 _APPENDIX_LOCAL_RE = re.compile(r"^приложение\s+(?:\d{1,3}|[a-zа-яё])\b")
 _H1_TOC_ENTRY_RE = re.compile(r"^\d+\.\s+\S")
+_HEADING1_CHAPTER_PREFIX_RE = re.compile(r"^(\d+)\.\s+\S")
 _H2_TOC_ENTRY_RE = re.compile(r"^\d+\.\d+\.?\s+\S")
 
 _STRUCTURAL_HEADINGS = {
@@ -385,6 +386,18 @@ def _collect_body_entries(document: Document, body_start: int) -> list[TocEntry]
             ):
                 entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
                 last_h1_chapter = parsed_h1["chapter_num"]
+                last_h2_in_chapter = None
+                continue
+
+        # Heading-1-styled chapter whose title is too "messy" for parse_heading1
+        # (internal periods, e.g. a spawned "1. … Типа 1.Чето там …"). It is a real
+        # chapter by construction (the formatter promoted it to Heading 1), so
+        # collect it with its full text rather than dropping it from the TOC.
+        if _is_heading1_style(paragraph):
+            m_ch = _HEADING1_CHAPTER_PREFIX_RE.match(text)
+            if m_ch:
+                entries.append(TocEntry(text, f"kpfu_toc_{len(entries) + 1}", idx))
+                last_h1_chapter = int(m_ch.group(1))
                 last_h2_in_chapter = None
                 continue
 

@@ -4352,14 +4352,16 @@ def _loose_child_h2(text):
 
 
 def _clean_spawn_title(base_title):
-    """First sentence of a messy chapter title, trimmed so parse_heading1 (and
-    therefore the TOC builder) will accept it."""
+    """Full chapter title for a spawned Heading 1 — the WHOLE paragraph, NOT cut
+    at the first period (`как хочешь главу маркируй. Типа 1.Чето там, или Глава 1
+    чето там, неважно`). Only a trailing sentence terminator is stripped (headings
+    don't end with a period); the TOC collector accepts it by Heading-1 style."""
     t = clean_spaces(base_title or "")
     if not t:
         return ""
-    head = re.split(r"\.\s", t, maxsplit=1)[0].strip().rstrip(".:;,").strip()
-    if len(head) > 120:
-        head = head[:120].rstrip()
+    head = t.rstrip(".:;, ").strip()
+    if len(head) > 200:
+        head = head[:200].rstrip()
     return head
 
 
@@ -7359,6 +7361,21 @@ def process_document(input_path: Path, output_path: Path):
             format_body_list_item(paragraph)
             prev_nonempty_kind = "body_list_item"
             continue
+        # Preserve an already-promoted Heading-1 chapter whose full title is too
+        # messy for parse_heading1 (e.g. a spawned "1. … Типа 1.Чето там …"): keep
+        # it as Heading 1 instead of demoting it to body text. Only fires when the
+        # normal parse_heading1 path below can't handle it, so clean chapters keep
+        # their existing (unchanged) formatting path.
+        if (
+            not parse_heading1(text)
+            and (paragraph.style.name or "").strip().lower() in {"heading 1", "заголовок 1"}
+            and re.match(r"^\d+\.\s+\S", text)
+            and not parse_heading2(text)
+        ):
+            format_heading1(paragraph)
+            prev_nonempty_kind = "heading1"
+            continue
+
         parsed_h1_final = parse_heading1(text)
         if parsed_h1_final and is_heading1_promotion_safe(paragraph, parsed_h1_final, toc_text=(
             toc_h1_map.get(parsed_h1_final["chapter_num"])
