@@ -3230,6 +3230,551 @@ def repair_manual_chain_overflow_before_marker(
     return repaired
 
 
+def _paragraph_text_xml(p_xml) -> str:
+    if p_xml is None or p_xml.tag != qn("w:p"):
+        return ""
+    return " ".join((node.text or "") for node in p_xml.findall(".//" + qn("w:t"))).strip()
+
+
+def _table_grid_signature(table) -> tuple[str, ...]:
+    grid = table._tbl.tblGrid
+    if grid is None:
+        return ()
+    return tuple(col.get(qn("w:w")) or "" for col in grid.findall(qn("w:gridCol")))
+
+
+def _table_width_signature(table) -> tuple[str | None, str | None] | None:
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW")) if tbl_pr is not None else None
+    if tbl_w is None:
+        return None
+    return (tbl_w.get(qn("w:type")), tbl_w.get(qn("w:w")))
+
+
+def _table_border_signature(table) -> tuple[tuple[str, str | None, str | None, str | None], ...] | None:
+    tbl_pr = table._tbl.tblPr
+    borders = tbl_pr.find(qn("w:tblBorders")) if tbl_pr is not None else None
+    if borders is None:
+        return None
+    return tuple(
+        (
+            child.tag.rsplit("}", 1)[-1],
+            child.get(qn("w:val")),
+            child.get(qn("w:sz")),
+            child.get(qn("w:color")),
+        )
+        for child in borders
+    )
+
+
+def _table_margin_signature(table) -> tuple[tuple[str, str | None, str | None], ...] | None:
+    tbl_pr = table._tbl.tblPr
+    margins = tbl_pr.find(qn("w:tblCellMar")) if tbl_pr is not None else None
+    if margins is None:
+        return None
+    return tuple(
+        (
+            child.tag.rsplit("}", 1)[-1],
+            child.get(qn("w:w")),
+            child.get(qn("w:type")),
+        )
+        for child in margins
+    )
+
+
+def _table_has_merged_cells_docx(table) -> bool:
+    for row in table.rows:
+        for cell in row.cells:
+            tc_pr = cell._tc.tcPr
+            if tc_pr is None:
+                continue
+            if tc_pr.find(qn("w:gridSpan")) is not None:
+                return True
+            if tc_pr.find(qn("w:vMerge")) is not None:
+                return True
+    return False
+
+
+def _docx_row_cell_texts(row) -> list[str]:
+    return [" ".join(cell.text.split()) for cell in row.cells]
+
+
+def _is_docx_numeric_row(values: list[str]) -> bool:
+    return len(values) >= 2 and values == [str(idx) for idx in range(1, len(values) + 1)]
+
+
+def _docx_row_fingerprint_values(values: list[str]) -> str:
+    return " ".join(" ".join(value.split()).lower() for value in values if " ".join(value.split()))
+
+
+def _docx_row_fingerprint(row) -> str:
+    return _docx_row_fingerprint_values(_docx_row_cell_texts(row))
+
+
+def _docx_data_fingerprints(table) -> list[str]:
+    out: list[str] = []
+    for idx, row in enumerate(table.rows):
+        values = _docx_row_cell_texts(row)
+        if idx == 0:
+            continue
+        if _is_docx_numeric_row(values):
+            continue
+        fp = _docx_row_fingerprint_values(values)
+        if fp:
+            out.append(fp)
+    return out
+
+
+def _docx_table_col_count(table) -> int:
+    return max((len(row.cells) for row in table.rows), default=0)
+
+
+def _strict_marker_table_num(text: str) -> str | None:
+    match = _STRICT_CONTINUATION_MARKER_RE.match(" ".join((text or "").split()))
+    if not match:
+        return None
+    number = re.search(r"\d+(?:\.\d+)*", match.group(0))
+    return number.group(0) if number else None
+
+
+def _caption_table_num(text: str) -> str | None:
+    match = re.match(r"^\s*Таблица\s+(\d+(?:\.\d+)*)\b", " ".join((text or "").split()), re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _source_or_note_text(text: str) -> bool:
+    return bool(re.match(r"^\s*(Источник|Примечание)\s*:", text or "", re.IGNORECASE))
+
+
+def _doc_table_xml_map(doc: Document) -> dict[object, int]:
+    return {table._tbl: idx for idx, table in enumerate(doc.tables)}
+
+
+def _find_strict_marker_paragraph(doc: Document, marker_text: str):
+    wanted = " ".join((marker_text or "").split())
+    for child in doc.element.body:
+        if child.tag == qn("w:p") and " ".join(_paragraph_text_xml(child).split()) == wanted:
+            return child
+    return None
+
+
+def _nearest_table_indexes_around_marker(doc: Document, marker_para) -> tuple[int, int] | None:
+    body = list(doc.element.body)
+    table_by_xml = _doc_table_xml_map(doc)
+    try:
+        marker_idx = body.index(marker_para)
+    except ValueError:
+        return None
+
+    previous = None
+    idx = marker_idx - 1
+    while idx >= 0:
+        child = body[idx]
+        if child.tag == qn("w:tbl"):
+            previous = child
+            break
+        if child.tag == qn("w:p") and _paragraph_text_xml(child):
+            return None
+        idx -= 1
+
+    following = None
+    idx = marker_idx + 1
+    while idx < len(body):
+        child = body[idx]
+        if child.tag == qn("w:tbl"):
+            following = child
+            break
+        if child.tag == qn("w:p") and _paragraph_text_xml(child):
+            return None
+        idx += 1
+
+    if previous is None or following is None:
+        return None
+    if previous not in table_by_xml or following not in table_by_xml:
+        return None
+    return table_by_xml[previous], table_by_xml[following]
+
+
+def _strict_marker_between_table_indexes(doc: Document, first_idx: int, second_idx: int, table_num: str):
+    try:
+        first_tbl = doc.tables[first_idx]._tbl
+        second_tbl = doc.tables[second_idx]._tbl
+    except IndexError:
+        return None
+    body = list(doc.element.body)
+    try:
+        first_pos = body.index(first_tbl)
+        second_pos = body.index(second_tbl)
+    except ValueError:
+        return None
+    if second_pos <= first_pos:
+        return None
+    expected = f"Продолжение таблицы {table_num}"
+    marker = None
+    for child in body[first_pos + 1:second_pos]:
+        if child.tag != qn("w:p"):
+            return None
+        text = " ".join(_paragraph_text_xml(child).split())
+        if not text:
+            continue
+        if text == expected and _STRICT_CONTINUATION_MARKER_RE.match(text):
+            if marker is not None:
+                return None
+            marker = child
+            continue
+        return None
+    return marker
+
+
+def _caption_before_table_matches(doc: Document, table_idx: int, table_num: str) -> bool:
+    body = list(doc.element.body)
+    try:
+        tbl_pos = body.index(doc.tables[table_idx]._tbl)
+    except (IndexError, ValueError):
+        return False
+    for child in reversed(body[:tbl_pos]):
+        if child.tag == qn("w:tbl"):
+            return False
+        if child.tag != qn("w:p"):
+            continue
+        text = _paragraph_text_xml(child)
+        if not text:
+            continue
+        caption_num = _caption_table_num(text)
+        if caption_num:
+            return caption_num == table_num
+    return False
+
+
+def _source_table_indexes_for_num(doc: Document, table_num: str) -> list[int]:
+    table_by_xml = _doc_table_xml_map(doc)
+    current_num: str | None = None
+    out: list[int] = []
+    any_marker_re = re.compile(
+        r"Продолжение\s+(?:таблицы|табл\.)\s+(\d+(?:\.\d+)*)",
+        re.IGNORECASE,
+    )
+    for child in doc.element.body:
+        if child.tag == qn("w:p"):
+            text = _paragraph_text_xml(child)
+            caption_num = _caption_table_num(text)
+            if caption_num:
+                current_num = caption_num
+                continue
+            marker = any_marker_re.search(text)
+            if marker:
+                current_num = marker.group(1)
+                continue
+            if current_num == table_num and _source_or_note_text(text):
+                current_num = None
+                continue
+        elif child.tag == qn("w:tbl") and current_num == table_num and child in table_by_xml:
+            out.append(table_by_xml[child])
+    return out
+
+
+def _source_has_numeric_row_for_table(source_docx_path: Path | None, table_num: str) -> bool | None:
+    if source_docx_path is None:
+        return None
+    try:
+        doc = Document(str(source_docx_path))
+    except Exception:
+        return None
+    table_indexes = _source_table_indexes_for_num(doc, table_num)
+    if not table_indexes:
+        return None
+    for table_idx in table_indexes:
+        for row in doc.tables[table_idx].rows:
+            if _is_docx_numeric_row(_docx_row_cell_texts(row)):
+                return True
+    return False
+
+
+def _source_has_meaningful_duplicate_for_table(source_docx_path: Path | None, table_num: str) -> bool | None:
+    if source_docx_path is None:
+        return None
+    try:
+        doc = Document(str(source_docx_path))
+    except Exception:
+        return None
+    table_indexes = _source_table_indexes_for_num(doc, table_num)
+    if not table_indexes:
+        return None
+    counts: dict[str, int] = {}
+    for table_idx in table_indexes:
+        for fp in _docx_data_fingerprints(doc.tables[table_idx]):
+            counts[fp] = counts.get(fp, 0) + 1
+    return any(count > 1 for count in counts.values())
+
+
+def _tables_have_exact_same_layout(left, right) -> bool:
+    if _docx_table_col_count(left) != _docx_table_col_count(right):
+        return False
+    if _table_grid_signature(left) != _table_grid_signature(right):
+        return False
+    if _table_width_signature(left) != _table_width_signature(right):
+        return False
+    if _table_margin_signature(left) != _table_margin_signature(right):
+        return False
+    if _table_border_signature(left) != _table_border_signature(right):
+        return False
+    return True
+
+
+def _exact_grid_same_page_candidate(
+    doc: Document,
+    violation: _SamePageContinuationMarkerViolation,
+    *,
+    source_docx_path: Path | None,
+) -> tuple[str, int, int, object] | None:
+    table_num = _strict_marker_table_num(violation.marker_text)
+    if not table_num or violation.confidence != "high":
+        return None
+    if violation.previous_table_page != violation.marker_page:
+        return None
+    if violation.following_table_page != violation.marker_page:
+        return None
+
+    marker_para = _find_strict_marker_paragraph(doc, violation.marker_text)
+    if marker_para is None:
+        return None
+    table_pair = _nearest_table_indexes_around_marker(doc, marker_para)
+    if table_pair is None:
+        return None
+    first_idx, second_idx = table_pair
+    if not _caption_before_table_matches(doc, first_idx, table_num):
+        return None
+
+    first = doc.tables[first_idx]
+    second = doc.tables[second_idx]
+    if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+        return None
+    if not _tables_have_exact_same_layout(first, second):
+        return None
+    if len(first.rows) < 2 or len(second.rows) < 2:
+        return None
+    if _docx_row_fingerprint(first.rows[0]) != _docx_row_fingerprint(second.rows[0]):
+        return None
+
+    has_numeric = any(_is_docx_numeric_row(_docx_row_cell_texts(row)) for row in first.rows)
+    has_numeric = has_numeric or any(_is_docx_numeric_row(_docx_row_cell_texts(row)) for row in second.rows)
+    if has_numeric and _source_has_numeric_row_for_table(source_docx_path, table_num) is not False:
+        return None
+    if _source_has_meaningful_duplicate_for_table(source_docx_path, table_num) is not False:
+        return None
+
+    first_data = set(_docx_data_fingerprints(first))
+    second_data = set(_docx_data_fingerprints(second))
+    if not second_data or first_data & second_data:
+        return None
+    return table_num, first_idx, second_idx, marker_para
+
+
+def _exact_grid_same_page_candidate_from_rendered(
+    doc: Document,
+    violation,
+    *,
+    source_docx_path: Path | None,
+) -> tuple[str, int, int, object] | None:
+    table_num = getattr(violation, "table_num", None)
+    violation_type = getattr(violation, "violation_type", None)
+    confidence = getattr(violation, "confidence", None)
+    evidence = getattr(violation, "evidence", {}) or {}
+    if not table_num or violation_type != "same_page_repeated_fragment" or confidence != "high":
+        return None
+    try:
+        first_idx = int(getattr(violation, "table_index"))
+        second_idx = int(evidence.get("following_table_index"))
+    except (TypeError, ValueError):
+        return None
+    if second_idx != first_idx + 1:
+        return None
+    marker_para = _strict_marker_between_table_indexes(doc, first_idx, second_idx, str(table_num))
+    if not _caption_before_table_matches(doc, first_idx, str(table_num)):
+        return None
+
+    first = doc.tables[first_idx]
+    second = doc.tables[second_idx]
+    if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+        return None
+    if not _tables_have_exact_same_layout(first, second):
+        return None
+    if len(first.rows) < 2 or len(second.rows) < 2:
+        return None
+    if _docx_row_fingerprint(first.rows[0]) != _docx_row_fingerprint(second.rows[0]):
+        return None
+    has_numeric = any(_is_docx_numeric_row(_docx_row_cell_texts(row)) for row in first.rows)
+    has_numeric = has_numeric or any(_is_docx_numeric_row(_docx_row_cell_texts(row)) for row in second.rows)
+    if has_numeric and _source_has_numeric_row_for_table(source_docx_path, str(table_num)) is not False:
+        return None
+    if _source_has_meaningful_duplicate_for_table(source_docx_path, str(table_num)) is not False:
+        return None
+    first_data = set(_docx_data_fingerprints(first))
+    second_data = set(_docx_data_fingerprints(second))
+    if not second_data or first_data & second_data:
+        return None
+    return str(table_num), first_idx, second_idx, marker_para
+
+
+def _append_second_fragment_data_rows(first, second) -> int:
+    appended = 0
+    for idx, row in enumerate(list(second.rows)):
+        values = _docx_row_cell_texts(row)
+        if idx == 0:
+            continue
+        if _is_docx_numeric_row(values):
+            continue
+        first._tbl.append(deepcopy(row._tr))
+        appended += 1
+    return appended
+
+
+def _remove_xml_node(node) -> None:
+    if node is None:
+        return
+    parent = node.getparent()
+    if parent is not None:
+        parent.remove(node)
+
+
+def _same_page_marker_text_remains(docx_path: Path, marker_text: str) -> bool:
+    wanted = " ".join((marker_text or "").split())
+    for violation in _same_page_continuation_marker_violations_for_docx(docx_path):
+        if " ".join(violation.marker_text.split()) == wanted:
+            return True
+    return False
+
+
+def _same_page_rendered_target_remains(docx_path: Path, table_num: str) -> bool:
+    for violation in _rendered_continuation_violations_for_docx(docx_path):
+        if (
+            getattr(violation, "table_num", None) == table_num
+            and getattr(violation, "violation_type", None) in {
+                "same_page_repeated_fragment",
+                "same_page_adjacent_fragment",
+            }
+        ):
+            return True
+    return False
+
+
+def normalize_exact_grid_same_page_repeated_fragments_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """
+    Merge only exact-grid same-page repeated fragments.
+
+    This is intentionally narrower than the future continuation engine: it
+    requires rendered same-page marker evidence, exact DOCX grid/layout match,
+    repeated semantic header, source-proven generated numeric rows, and no
+    source-bad data duplicates. Grid-mismatch cases remain warnings.
+    """
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    try:
+        marker_violations = _same_page_continuation_marker_violations_for_docx(docx_path)
+    except Exception as exc:
+        logger.info(
+            "same_page_exact_grid_normalize_marker_probe_skip path=%s reason=render_failed error=%s",
+            docx_path, exc,
+        )
+        marker_violations = []
+    try:
+        rendered_violations = _rendered_continuation_violations_for_docx(docx_path)
+    except Exception as exc:
+        logger.info(
+            "same_page_exact_grid_normalize_render_probe_skip path=%s reason=render_failed error=%s",
+            docx_path, exc,
+        )
+        rendered_violations = []
+    if not marker_violations and not rendered_violations:
+        return 0
+
+    repaired = 0
+    candidates: list[tuple[str, object]] = [
+        ("rendered", violation)
+        for violation in rendered_violations
+        if getattr(violation, "violation_type", None) == "same_page_repeated_fragment"
+    ]
+    candidates.extend(("marker", violation) for violation in marker_violations)
+    seen_tables: set[str] = set()
+    for source_kind, violation in candidates:
+        backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_same_page_exact_grid_"))
+        backup_path = backup_dir / docx_path.name
+        try:
+            shutil.copy2(docx_path, backup_path)
+            doc = Document(str(docx_path))
+            if source_kind == "rendered":
+                candidate = _exact_grid_same_page_candidate_from_rendered(
+                    doc,
+                    violation,
+                    source_docx_path=source_docx_path,
+                )
+            else:
+                candidate = _exact_grid_same_page_candidate(
+                    doc,
+                    violation,
+                    source_docx_path=source_docx_path,
+                )
+            if candidate is None:
+                continue
+            table_num, first_idx, second_idx, marker_para = candidate
+            if table_num in seen_tables:
+                continue
+            first = doc.tables[first_idx]
+            second = doc.tables[second_idx]
+            appended = _append_second_fragment_data_rows(first, second)
+            if appended <= 0:
+                continue
+            _remove_xml_node(marker_para)
+            _remove_xml_node(second._tbl)
+            doc.save(str(docx_path))
+
+            marker_text = f"Продолжение таблицы {table_num}"
+            if _same_page_marker_text_remains(docx_path, marker_text):
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_exact_grid_normalize_rollback table_num=%s reason=marker_remains",
+                    table_num,
+                )
+                continue
+            if _same_page_rendered_target_remains(docx_path, table_num):
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_exact_grid_normalize_rollback table_num=%s reason=same_page_rendered_target_remains",
+                    table_num,
+                )
+                continue
+            regressions = _rendered_continuation_deletion_regressions(docx_path)
+            if regressions:
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_exact_grid_normalize_rollback table_num=%s reason=rendered_regression violations=%s",
+                    table_num,
+                    _format_rendered_deletion_regressions(regressions),
+                )
+                continue
+
+            repaired += 1
+            seen_tables.add(table_num)
+            logger.info(
+                "same_page_exact_grid_normalize_applied table_num=%s first_table=%s second_table=%s appended_rows=%s",
+                table_num, first_idx, second_idx, appended,
+            )
+        except Exception as exc:
+            shutil.copy2(backup_path, docx_path)
+            logger.info(
+                "same_page_exact_grid_normalize_rollback marker=%r reason=exception error=%s",
+                getattr(violation, "marker_text", ""), exc,
+            )
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+    return repaired
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
