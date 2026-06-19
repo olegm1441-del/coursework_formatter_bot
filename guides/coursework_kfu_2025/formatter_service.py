@@ -18,6 +18,7 @@ from .table_continuation import (
     remove_empty_before_figure_captions,
     restore_docx_if_same_page_continuation_markers,
     remove_same_page_continuation_markers_inplace,
+    warn_same_page_continuation_marker_violations,
     repair_manual_chain_overflow_before_marker,
     normalize_exact_grid_same_page_repeated_fragments_inplace,
     normalize_compatible_grid_same_page_repeated_fragments_inplace,
@@ -284,7 +285,7 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         try:
             n_removed = remove_same_page_continuation_markers_inplace(
                 output_path,
-                report=None,
+                report=report,
             )
             if n_removed:
                 logger.info(
@@ -387,5 +388,18 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         report.warn(
             "Автопроверка переносов таблиц по PDF не выполнена. Проверьте таблицы вручную."
         )
+
+    try:
+        n_same_page_marker_warnings = warn_same_page_continuation_marker_violations(
+            output_path,
+            report=report,
+        )
+        if n_same_page_marker_warnings:
+            logger.warning(
+                "format_docx: final same-page marker validation review_needed=%d",
+                n_same_page_marker_warnings,
+            )
+    except Exception:
+        logger.exception("format_docx: final same-page marker warning validation failed")
 
     return str(output_path), report.warnings

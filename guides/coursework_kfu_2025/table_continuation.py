@@ -3814,6 +3814,46 @@ def _compatible_grid_same_page_candidate_from_rendered(
     return str(table_num), first_idx, second_idx, marker_para
 
 
+def _no_numeric_same_page_header_cleanup_candidate_from_rendered(
+    doc: Document,
+    violation,
+    *,
+    source_docx_path: Path | None,
+) -> tuple[str, int, int] | None:
+    table_num = getattr(violation, "table_num", None)
+    violation_type = getattr(violation, "violation_type", None)
+    confidence = getattr(violation, "confidence", None)
+    evidence = getattr(violation, "evidence", {}) or {}
+    if not table_num or violation_type != "same_page_repeated_fragment" or confidence != "high":
+        return None
+    if evidence.get("repeated_numeric_row_count") != 0:
+        return None
+    try:
+        first_idx = int(getattr(violation, "table_index"))
+        second_idx = int(evidence.get("following_table_index"))
+    except (TypeError, ValueError):
+        return None
+    if _strict_marker_between_table_indexes(doc, first_idx, second_idx, str(table_num)) is not None:
+        return None
+    if _source_has_numeric_row_for_table(source_docx_path, str(table_num)) is True:
+        return None
+    if not _same_page_candidate_common_checks(
+        doc,
+        str(table_num),
+        first_idx,
+        second_idx,
+        source_docx_path=source_docx_path,
+        require_exact_layout=False,
+        require_numeric_rows_in_both=False,
+    ):
+        return None
+    first = doc.tables[first_idx]
+    second = doc.tables[second_idx]
+    if _docx_table_has_numeric_row(first) or _docx_table_has_numeric_row(second):
+        return None
+    return str(table_num), first_idx, second_idx
+
+
 def _row_cell_widths(row) -> list[tuple[str | None, str | None]]:
     widths: list[tuple[str | None, str | None]] = []
     for cell in row.cells:
@@ -3860,6 +3900,13 @@ def _append_second_fragment_data_rows(first, second, *, normalize_to_first_grid:
             _apply_row_cell_widths(first.rows[-1], survivor_widths)
         appended += 1
     return appended
+
+
+def _remove_duplicate_second_fragment_header(second) -> bool:
+    if not second.rows:
+        return False
+    _remove_xml_node(second.rows[0]._tr)
+    return True
 
 
 def _clear_same_page_merge_repeat_metadata(table) -> None:
@@ -4037,98 +4084,157 @@ def normalize_compatible_grid_same_page_repeated_fragments_inplace(
     rendered high-confidence same-page fragments with equal column count,
     compatible width/margins/borders, no merged cells, repeated semantic header,
     formatter-generated numeric rows, and distinct source data rows.  The first
-    table's grid survives; appended rows are adapted to that layout.
+    table's grid survives; appended rows are adapted to that layout.  A narrower
+    no-numeric variant keeps both physical fragments and removes only the
+    duplicate header from the second fragment when merging would be unsafe.
     """
     docx_path = Path(docx_path)
     source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
-    try:
-        rendered_violations = _rendered_continuation_violations_for_docx(docx_path)
-    except Exception as exc:
-        logger.info(
-            "same_page_compatible_grid_normalize_render_probe_skip path=%s reason=render_failed error=%s",
-            docx_path, exc,
-        )
-        return 0
-
-    candidates = [
-        violation
-        for violation in rendered_violations
-        if getattr(violation, "violation_type", None) == "same_page_repeated_fragment"
-    ]
-    if not candidates:
-        return 0
-
     repaired = 0
     seen_tables: set[str] = set()
-    for violation in candidates:
-        backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_same_page_compatible_grid_"))
-        backup_path = backup_dir / docx_path.name
+    for _pass in range(20):
         try:
-            shutil.copy2(docx_path, backup_path)
-            doc = Document(str(docx_path))
-            candidate = _compatible_grid_same_page_candidate_from_rendered(
-                doc,
-                violation,
-                source_docx_path=source_docx_path,
-            )
-            if candidate is None:
-                continue
-            table_num, first_idx, second_idx, marker_para = candidate
-            if table_num in seen_tables:
-                continue
-            first = doc.tables[first_idx]
-            second = doc.tables[second_idx]
-            appended = _append_second_fragment_data_rows(
-                first,
-                second,
-                normalize_to_first_grid=True,
-            )
-            if appended <= 0:
-                continue
-            _clear_same_page_merge_repeat_metadata(first)
-            _remove_xml_node(marker_para)
-            _remove_xml_node(second._tbl)
-            doc.save(str(docx_path))
-
-            marker_text = f"Продолжение таблицы {table_num}"
-            if _same_page_marker_text_remains(docx_path, marker_text):
-                shutil.copy2(backup_path, docx_path)
-                logger.info(
-                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=marker_remains",
-                    table_num,
-                )
-                continue
-            if _same_page_rendered_target_remains(docx_path, table_num):
-                shutil.copy2(backup_path, docx_path)
-                logger.info(
-                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=same_page_rendered_target_remains",
-                    table_num,
-                )
-                continue
-            regressions = _rendered_continuation_deletion_regressions(docx_path)
-            if regressions:
-                shutil.copy2(backup_path, docx_path)
-                logger.info(
-                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=rendered_regression violations=%s",
-                    table_num,
-                    _format_rendered_deletion_regressions(regressions),
-                )
-                continue
-
-            repaired += 1
-            seen_tables.add(table_num)
-            logger.info(
-                "same_page_compatible_grid_normalize_applied table_num=%s first_table=%s second_table=%s appended_rows=%s",
-                table_num, first_idx, second_idx, appended,
-            )
+            rendered_violations = _rendered_continuation_violations_for_docx(docx_path)
         except Exception as exc:
-            shutil.copy2(backup_path, docx_path)
             logger.info(
-                "same_page_compatible_grid_normalize_rollback table_num=%s reason=exception error=%s",
-                getattr(violation, "table_num", ""), exc,
+                "same_page_compatible_grid_normalize_render_probe_skip path=%s reason=render_failed error=%s",
+                docx_path, exc,
             )
-        finally:
-            shutil.rmtree(backup_dir, ignore_errors=True)
+            break
+
+        candidates = [
+            violation
+            for violation in rendered_violations
+            if getattr(violation, "violation_type", None) == "same_page_repeated_fragment"
+        ]
+        if not candidates:
+            break
+
+        made_progress = False
+        for violation in candidates:
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_same_page_compatible_grid_"))
+            backup_path = backup_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                doc = Document(str(docx_path))
+                candidate = _compatible_grid_same_page_candidate_from_rendered(
+                    doc,
+                    violation,
+                    source_docx_path=source_docx_path,
+                )
+                if candidate is None:
+                    header_cleanup_candidate = _no_numeric_same_page_header_cleanup_candidate_from_rendered(
+                        doc,
+                        violation,
+                        source_docx_path=source_docx_path,
+                    )
+                    if header_cleanup_candidate is None:
+                        continue
+                    table_num, first_idx, second_idx = header_cleanup_candidate
+                    if table_num in seen_tables:
+                        continue
+                    first = doc.tables[first_idx]
+                    second = doc.tables[second_idx]
+                    if not _remove_duplicate_second_fragment_header(second):
+                        continue
+                    _clear_same_page_merge_repeat_metadata(first)
+                    _clear_same_page_merge_repeat_metadata(second)
+                    doc.save(str(docx_path))
+
+                    if _same_page_rendered_target_remains(docx_path, table_num):
+                        shutil.copy2(backup_path, docx_path)
+                        logger.info(
+                            "same_page_no_numeric_header_cleanup_rollback table_num=%s reason=same_page_rendered_target_remains",
+                            table_num,
+                        )
+                        continue
+                    if _same_table_start_orphan_remains(docx_path, first_idx):
+                        shutil.copy2(backup_path, docx_path)
+                        logger.info(
+                            "same_page_no_numeric_header_cleanup_rollback table_num=%s reason=table_start_orphan",
+                            table_num,
+                        )
+                        continue
+                    regressions = _rendered_continuation_deletion_regressions(docx_path)
+                    if regressions:
+                        shutil.copy2(backup_path, docx_path)
+                        logger.info(
+                            "same_page_no_numeric_header_cleanup_rollback table_num=%s reason=rendered_regression violations=%s",
+                            table_num,
+                            _format_rendered_deletion_regressions(regressions),
+                        )
+                        continue
+
+                    repaired += 1
+                    seen_tables.add(table_num)
+                    made_progress = True
+                    logger.info(
+                        "same_page_no_numeric_header_cleanup_applied table_num=%s first_table=%s second_table=%s",
+                        table_num, first_idx, second_idx,
+                    )
+                    break
+                else:
+                    table_num, first_idx, second_idx, marker_para = candidate
+                    if table_num in seen_tables:
+                        continue
+                    first = doc.tables[first_idx]
+                    second = doc.tables[second_idx]
+                    appended = _append_second_fragment_data_rows(
+                        first,
+                        second,
+                        normalize_to_first_grid=True,
+                    )
+                    if appended <= 0:
+                        continue
+                    _clear_same_page_merge_repeat_metadata(first)
+                    _remove_xml_node(marker_para)
+                    _remove_xml_node(second._tbl)
+                    doc.save(str(docx_path))
+
+                    marker_text = f"Продолжение таблицы {table_num}"
+                    if _same_page_marker_text_remains(docx_path, marker_text):
+                        shutil.copy2(backup_path, docx_path)
+                        logger.info(
+                            "same_page_compatible_grid_normalize_rollback table_num=%s reason=marker_remains",
+                            table_num,
+                        )
+                        continue
+                    if _same_page_rendered_target_remains(docx_path, table_num):
+                        shutil.copy2(backup_path, docx_path)
+                        logger.info(
+                            "same_page_compatible_grid_normalize_rollback table_num=%s reason=same_page_rendered_target_remains",
+                            table_num,
+                        )
+                        continue
+                    regressions = _rendered_continuation_deletion_regressions(docx_path)
+                    if regressions:
+                        shutil.copy2(backup_path, docx_path)
+                        logger.info(
+                            "same_page_compatible_grid_normalize_rollback table_num=%s reason=rendered_regression violations=%s",
+                            table_num,
+                            _format_rendered_deletion_regressions(regressions),
+                        )
+                        continue
+
+                    repaired += 1
+                    seen_tables.add(table_num)
+                    made_progress = True
+                    logger.info(
+                        "same_page_compatible_grid_normalize_applied table_num=%s first_table=%s second_table=%s appended_rows=%s",
+                        table_num, first_idx, second_idx, appended,
+                    )
+                    break
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=exception error=%s",
+                    getattr(violation, "table_num", ""), exc,
+                )
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+
+        if not made_progress:
+            break
     return repaired
 
 
@@ -4176,6 +4282,47 @@ def restore_docx_if_same_page_continuation_markers(
             ";".join(f"{v.marker_text}@p{v.marker_page}" for v in remaining),
         )
     return True
+
+
+def warn_same_page_continuation_marker_violations(
+    docx_path: Path,
+    *,
+    report: FormattingReport | None = None,
+) -> int:
+    if report is None:
+        return 0
+    try:
+        violations = _same_page_continuation_marker_violations_for_docx(Path(docx_path))
+    except Exception as exc:
+        logger.info(
+            "same_page_marker_warning_skip path=%s reason=validation_failed error=%s",
+            docx_path,
+            exc,
+        )
+        return 0
+    if not violations:
+        return 0
+
+    existing = set(report.warnings)
+    emitted = 0
+    seen: set[tuple[str, int]] = set()
+    for violation in violations:
+        table_num = _strict_marker_table_num(violation.marker_text) or "?"
+        page = int(violation.marker_page or 0)
+        key = (table_num, page)
+        if key in seen:
+            continue
+        seen.add(key)
+        warning = (
+            f"Проверьте таблицу {table_num}: "
+            f"на стр. {page} повторный фрагмент виден на той же странице."
+        )
+        if warning in existing:
+            continue
+        report.warn(warning)
+        existing.add(warning)
+        emitted += 1
+    return emitted
 
 
 def remove_same_page_continuation_markers_inplace(
