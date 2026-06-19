@@ -21,6 +21,7 @@ from .table_continuation import (
     repair_manual_chain_overflow_before_marker,
     normalize_exact_grid_same_page_repeated_fragments_inplace,
     normalize_compatible_grid_same_page_repeated_fragments_inplace,
+    apply_rendered_table_start_orphan_guard,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
@@ -322,6 +323,19 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
+
+    try:
+        n_final_orphan_moves = apply_rendered_table_start_orphan_guard(
+            output_path,
+            report=report,
+        )
+        if n_final_orphan_moves:
+            logger.info(
+                "format_docx: final table-start orphan guard moved %d table(s)",
+                n_final_orphan_moves,
+            )
+    except Exception:
+        logger.exception("format_docx: final table-start orphan guard failed")
 
     try:
         rendered_violations = _rendered_continuation_violations_for_docx(

@@ -3648,6 +3648,7 @@ def clear_cell_borders(cell):
 
 
 TABLE_BORDER_EDGES = ("top", "left", "bottom", "right", "insideH", "insideV")
+TABLE_HORIZONTAL_CELL_PADDING_DXA = "113"  # 0.2 cm ≈ 113 twips/dxa
 
 
 def _get_or_add_tbl_pr(table):
@@ -3721,6 +3722,52 @@ def _normalize_table_borders_preserve_geometry(table, *, color="000000", size="4
     _normalize_existing_cell_borders_single(table, color=color, size=size, space=space)
 
 
+def _set_margin_side(parent, side: str, value: str) -> None:
+    node = parent.find(qn(f"w:{side}"))
+    if node is None:
+        node = OxmlElement(f"w:{side}")
+        parent.append(node)
+    node.set(qn("w:w"), value)
+    node.set(qn("w:type"), "dxa")
+
+
+def _remove_margin_side(parent, side: str) -> None:
+    node = parent.find(qn(f"w:{side}"))
+    if node is not None:
+        parent.remove(node)
+
+
+def ensure_table_horizontal_cell_padding(table, value: str = TABLE_HORIZONTAL_CELL_PADDING_DXA) -> None:
+    """
+    Enforce the product table padding rule: 0.2 cm left/right cell padding.
+
+    Top/bottom margins are left alone. Per-cell horizontal overrides are removed
+    so table-level left/right margins are the effective source of truth.
+    """
+    tblPr = _get_or_add_tbl_pr(table)
+    margins = tblPr.find(qn("w:tblCellMar"))
+    if margins is None:
+        margins = OxmlElement("w:tblCellMar")
+        tblPr.append(margins)
+
+    for side in ("start", "end"):
+        _remove_margin_side(margins, side)
+    _set_margin_side(margins, "left", value)
+    _set_margin_side(margins, "right", value)
+
+    for tc in table._tbl.findall(".//" + qn("w:tc")):
+        tcPr = tc.find(qn("w:tcPr"))
+        if tcPr is None:
+            continue
+        tcMar = tcPr.find(qn("w:tcMar"))
+        if tcMar is None:
+            continue
+        for side in ("left", "right", "start", "end"):
+            _remove_margin_side(tcMar, side)
+        if len(tcMar) == 0:
+            tcPr.remove(tcMar)
+
+
 def _safe_formatter_table_geometry_policy(table) -> str:
     """
     Classify table geometry before Phase 1 width/border normalization.
@@ -3783,11 +3830,8 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
         tblPr.append(tblLayout)
 
     tblLayout.set(qn("w:type"), "fixed")
-    # И дополнительно убираем tblCellMar,
-    # чтобы не было лишнего визуального "внутреннего отступа контура" в Word.
-    node = tblPr.find(qn("w:tblCellMar"))
-    if node is not None:
-        tblPr.remove(node)
+    # Горизонтальные внутренние отступы задаются единообразно ниже:
+    # 0.2 см слева и справа для всех таблиц.
 
     _ensure_tbl_borders_single(table, color=color, size=size, space=space)
 
@@ -3819,6 +3863,7 @@ def force_table_outer_borders_single(table, color="000000", size="4", space="0")
 def apply_table_borders(table):
     if _safe_formatter_preserve_table_geometry(table):
         _normalize_table_borders_preserve_geometry(table, size="4")
+        ensure_table_horizontal_cell_padding(table)
         return
 
     # Один источник истины для рамок — tblBorders на уровне таблицы.
@@ -3827,6 +3872,8 @@ def apply_table_borders(table):
     for row in table.rows:
         for cell in row.cells:
             clear_cell_borders(cell)
+
+    ensure_table_horizontal_cell_padding(table)
             
 def force_zero_indent_in_table_paragraph(paragraph):
     """

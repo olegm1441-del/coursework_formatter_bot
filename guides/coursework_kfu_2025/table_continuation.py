@@ -1826,7 +1826,11 @@ def _classify_start_page_usability(
         return _START_AMBIGUOUS
 
     header = next((sig for sig in table_sig.rows if sig.row_idx == 0), None)
-    data_rows = [sig for sig in table_sig.rows if sig.row_idx > 0]
+    data_rows = [
+        sig
+        for sig in table_sig.rows
+        if sig.row_idx > 0 and not _is_docx_numeric_row(list(sig.fragments))
+    ]
     if header is None or not data_rows:
         return _START_AMBIGUOUS
 
@@ -2090,6 +2094,107 @@ def _same_table_start_orphan_remains(docx_path: Path, table_idx: int) -> bool:
     finally:
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+
+def apply_rendered_table_start_orphan_guard(docx_path: str | Path, report=None) -> int:
+    """
+    Final rendered table-start orphan guard.
+
+    This intentionally applies only the accepted whole-table-start move:
+    exactly two blank paragraphs before the caption/table block, no page break,
+    no continuation marker, and no table split. It is safe to run after later
+    geometry-changing table passes such as same-page fragment normalization.
+    """
+    docx_path = Path(docx_path)
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(docx_path)
+        pdf_lines = analyze_pdf_lines(pdf_path)
+    except LibreOfficeNotFoundError as exc:
+        _warn_rendered_split_unavailable(report, str(exc))
+        logger.info(
+            "table_start_orphan_guard_skip path=%s reason=libreoffice_unavailable",
+            docx_path,
+        )
+        return 0
+    except Exception as exc:
+        _warn_rendered_split_unavailable(report, str(exc))
+        logger.info(
+            "table_start_orphan_guard_skip path=%s reason=render_or_pdf_analysis_failed error=%s",
+            docx_path,
+            exc,
+        )
+        return 0
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    try:
+        doc = Document(str(docx_path))
+    except Exception as exc:
+        logger.info(
+            "table_start_orphan_guard_skip path=%s reason=docx_load_failed error=%s",
+            docx_path,
+            exc,
+        )
+        return 0
+
+    diagnostics: dict[str, bool] = {"ambiguous": False}
+    move_candidate = _find_rendered_whole_table_move_candidate(doc, pdf_lines, diagnostics)
+    if move_candidate is None:
+        logger.info(
+            "table_start_orphan_guard_skip path=%s reason=%s",
+            docx_path,
+            "ambiguous" if diagnostics.get("ambiguous") else "no_candidate",
+        )
+        return 0
+
+    validation_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_final_table_start_orphan_"))
+    validation_backup_path = validation_backup_dir / docx_path.name
+    try:
+        shutil.copy2(docx_path, validation_backup_path)
+        if not _insert_table_start_orphan_blanks(move_candidate.caption_para_xml, target_count=2):
+            logger.info(
+                "table_start_orphan_guard_skip path=%s table_idx=%s reason=already_has_target_blanks",
+                docx_path,
+                move_candidate.table_idx,
+            )
+            return 0
+
+        doc.save(str(docx_path))
+        if _same_table_start_orphan_remains(docx_path, move_candidate.table_idx):
+            shutil.copy2(validation_backup_path, docx_path)
+            logger.info(
+                "table_start_orphan_guard_rollback path=%s table_idx=%s reason=orphan_remains",
+                docx_path,
+                move_candidate.table_idx,
+            )
+            return 0
+
+        logger.info(
+            "table_start_orphan_guard_applied path=%s table_idx=%s blanks=2",
+            docx_path,
+            move_candidate.table_idx,
+        )
+        return 1
+    except Exception as exc:
+        try:
+            shutil.copy2(validation_backup_path, docx_path)
+        except Exception:
+            logger.exception(
+                "table_start_orphan_guard_rollback_failed path=%s table_idx=%s",
+                docx_path,
+                move_candidate.table_idx,
+            )
+        logger.info(
+            "table_start_orphan_guard_rollback path=%s table_idx=%s reason=exception error=%s",
+            docx_path,
+            move_candidate.table_idx,
+            exc,
+        )
+        return 0
+    finally:
+        shutil.rmtree(validation_backup_dir, ignore_errors=True)
 
 
 def _find_rendered_split_candidate(
