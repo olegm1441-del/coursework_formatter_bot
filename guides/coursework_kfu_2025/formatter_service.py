@@ -20,6 +20,7 @@ from .table_continuation import (
     remove_same_page_continuation_markers_inplace,
     repair_manual_chain_overflow_before_marker,
     normalize_exact_grid_same_page_repeated_fragments_inplace,
+    normalize_compatible_grid_same_page_repeated_fragments_inplace,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
 from .docx_utils import FormattingReport
@@ -307,6 +308,20 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: exact-grid same-page fragment normalization failed")
+
+    try:
+        n_same_page_compatible = normalize_compatible_grid_same_page_repeated_fragments_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_same_page_compatible:
+            logger.info(
+                "format_docx: normalized %d compatible-grid same-page table fragment(s)",
+                n_same_page_compatible,
+            )
+    except Exception:
+        logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
 
     try:
         rendered_violations = _rendered_continuation_violations_for_docx(

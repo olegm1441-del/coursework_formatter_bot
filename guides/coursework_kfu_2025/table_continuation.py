@@ -3329,6 +3329,10 @@ def _docx_table_col_count(table) -> int:
     return max((len(row.cells) for row in table.rows), default=0)
 
 
+def _docx_table_has_numeric_row(table) -> bool:
+    return any(_is_docx_numeric_row(_docx_row_cell_texts(row)) for row in table.rows)
+
+
 def _strict_marker_table_num(text: str) -> str | None:
     match = _STRICT_CONTINUATION_MARKER_RE.match(" ".join((text or "").split()))
     if not match:
@@ -3521,6 +3525,18 @@ def _tables_have_exact_same_layout(left, right) -> bool:
     return True
 
 
+def _tables_have_compatible_same_page_layout(left, right) -> bool:
+    if _docx_table_col_count(left) != _docx_table_col_count(right):
+        return False
+    if _table_width_signature(left) != _table_width_signature(right):
+        return False
+    if _table_margin_signature(left) != _table_margin_signature(right):
+        return False
+    if _table_border_signature(left) != _table_border_signature(right):
+        return False
+    return True
+
+
 def _exact_grid_same_page_candidate(
     doc: Document,
     violation: _SamePageContinuationMarkerViolation,
@@ -3616,8 +3632,118 @@ def _exact_grid_same_page_candidate_from_rendered(
     return str(table_num), first_idx, second_idx, marker_para
 
 
-def _append_second_fragment_data_rows(first, second) -> int:
+def _same_page_candidate_common_checks(
+    doc: Document,
+    table_num: str,
+    first_idx: int,
+    second_idx: int,
+    *,
+    source_docx_path: Path | None,
+    require_exact_layout: bool,
+    require_numeric_rows_in_both: bool = False,
+) -> bool:
+    if second_idx != first_idx + 1:
+        return False
+    if not _caption_before_table_matches(doc, first_idx, table_num):
+        return False
+    try:
+        first = doc.tables[first_idx]
+        second = doc.tables[second_idx]
+    except IndexError:
+        return False
+    if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+        return False
+    if require_exact_layout:
+        if not _tables_have_exact_same_layout(first, second):
+            return False
+    elif not _tables_have_compatible_same_page_layout(first, second):
+        return False
+    if len(first.rows) < 2 or len(second.rows) < 2:
+        return False
+    if _docx_row_fingerprint(first.rows[0]) != _docx_row_fingerprint(second.rows[0]):
+        return False
+    first_has_numeric = _docx_table_has_numeric_row(first)
+    second_has_numeric = _docx_table_has_numeric_row(second)
+    if require_numeric_rows_in_both and not (first_has_numeric and second_has_numeric):
+        return False
+    has_numeric = first_has_numeric or second_has_numeric
+    if has_numeric and _source_has_numeric_row_for_table(source_docx_path, table_num) is not False:
+        return False
+    if _source_has_meaningful_duplicate_for_table(source_docx_path, table_num) is not False:
+        return False
+    first_data = set(_docx_data_fingerprints(first))
+    second_data = set(_docx_data_fingerprints(second))
+    if not second_data or first_data & second_data:
+        return False
+    return True
+
+
+def _compatible_grid_same_page_candidate_from_rendered(
+    doc: Document,
+    violation,
+    *,
+    source_docx_path: Path | None,
+) -> tuple[str, int, int, object] | None:
+    table_num = getattr(violation, "table_num", None)
+    violation_type = getattr(violation, "violation_type", None)
+    confidence = getattr(violation, "confidence", None)
+    evidence = getattr(violation, "evidence", {}) or {}
+    if not table_num or violation_type != "same_page_repeated_fragment" or confidence != "high":
+        return None
+    try:
+        first_idx = int(getattr(violation, "table_index"))
+        second_idx = int(evidence.get("following_table_index"))
+    except (TypeError, ValueError):
+        return None
+    marker_para = _strict_marker_between_table_indexes(doc, first_idx, second_idx, str(table_num))
+    if not _same_page_candidate_common_checks(
+        doc,
+        str(table_num),
+        first_idx,
+        second_idx,
+        source_docx_path=source_docx_path,
+        require_exact_layout=False,
+        require_numeric_rows_in_both=True,
+    ):
+        return None
+    return str(table_num), first_idx, second_idx, marker_para
+
+
+def _row_cell_widths(row) -> list[tuple[str | None, str | None]]:
+    widths: list[tuple[str | None, str | None]] = []
+    for cell in row.cells:
+        tc_pr = cell._tc.tcPr
+        tc_w = tc_pr.find(qn("w:tcW")) if tc_pr is not None else None
+        widths.append(
+            (
+                tc_w.get(qn("w:w")) if tc_w is not None else None,
+                tc_w.get(qn("w:type")) if tc_w is not None else None,
+            )
+        )
+    return widths
+
+
+def _apply_row_cell_widths(row, widths: list[tuple[str | None, str | None]]) -> None:
+    for idx, cell in enumerate(row.cells):
+        if idx >= len(widths):
+            break
+        width, width_type = widths[idx]
+        if width is None and width_type is None:
+            continue
+        tc_pr = cell._tc.get_or_add_tcPr()
+        tc_w = tc_pr.find(qn("w:tcW"))
+        if tc_w is None:
+            tc_w = OxmlElement("w:tcW")
+            tc_pr.insert(0, tc_w)
+        if width is not None:
+            tc_w.set(qn("w:w"), width)
+        if width_type is not None:
+            tc_w.set(qn("w:type"), width_type)
+
+
+def _append_second_fragment_data_rows(first, second, *, normalize_to_first_grid: bool = False) -> int:
     appended = 0
+    survivor_widths = _row_cell_widths(first.rows[0]) if normalize_to_first_grid and first.rows else []
     for idx, row in enumerate(list(second.rows)):
         values = _docx_row_cell_texts(row)
         if idx == 0:
@@ -3625,8 +3751,25 @@ def _append_second_fragment_data_rows(first, second) -> int:
         if _is_docx_numeric_row(values):
             continue
         first._tbl.append(deepcopy(row._tr))
+        if normalize_to_first_grid and survivor_widths:
+            _apply_row_cell_widths(first.rows[-1], survivor_widths)
         appended += 1
     return appended
+
+
+def _clear_same_page_merge_repeat_metadata(table) -> None:
+    for row in table.rows:
+        tr_pr = row._tr.trPr
+        if tr_pr is not None:
+            for tbl_header in list(tr_pr.findall(qn("w:tblHeader"))):
+                tr_pr.remove(tbl_header)
+        for paragraph in row._tr.findall(".//" + qn("w:p")):
+            p_pr = paragraph.find(qn("w:pPr"))
+            if p_pr is None:
+                continue
+            for tag in ("w:pageBreakBefore", "w:keepNext"):
+                for node in list(p_pr.findall(qn(tag))):
+                    p_pr.remove(node)
 
 
 def _remove_xml_node(node) -> None:
@@ -3729,6 +3872,7 @@ def normalize_exact_grid_same_page_repeated_fragments_inplace(
             appended = _append_second_fragment_data_rows(first, second)
             if appended <= 0:
                 continue
+            _clear_same_page_merge_repeat_metadata(first)
             _remove_xml_node(marker_para)
             _remove_xml_node(second._tbl)
             doc.save(str(docx_path))
@@ -3769,6 +3913,114 @@ def normalize_exact_grid_same_page_repeated_fragments_inplace(
             logger.info(
                 "same_page_exact_grid_normalize_rollback marker=%r reason=exception error=%s",
                 getattr(violation, "marker_text", ""), exc,
+            )
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+    return repaired
+
+
+def normalize_compatible_grid_same_page_repeated_fragments_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """
+    Merge compatible-grid same-page repeated fragments.
+
+    This deliberately handles only the next bounded class after exact-grid:
+    rendered high-confidence same-page fragments with equal column count,
+    compatible width/margins/borders, no merged cells, repeated semantic header,
+    formatter-generated numeric rows, and distinct source data rows.  The first
+    table's grid survives; appended rows are adapted to that layout.
+    """
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    try:
+        rendered_violations = _rendered_continuation_violations_for_docx(docx_path)
+    except Exception as exc:
+        logger.info(
+            "same_page_compatible_grid_normalize_render_probe_skip path=%s reason=render_failed error=%s",
+            docx_path, exc,
+        )
+        return 0
+
+    candidates = [
+        violation
+        for violation in rendered_violations
+        if getattr(violation, "violation_type", None) == "same_page_repeated_fragment"
+    ]
+    if not candidates:
+        return 0
+
+    repaired = 0
+    seen_tables: set[str] = set()
+    for violation in candidates:
+        backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_same_page_compatible_grid_"))
+        backup_path = backup_dir / docx_path.name
+        try:
+            shutil.copy2(docx_path, backup_path)
+            doc = Document(str(docx_path))
+            candidate = _compatible_grid_same_page_candidate_from_rendered(
+                doc,
+                violation,
+                source_docx_path=source_docx_path,
+            )
+            if candidate is None:
+                continue
+            table_num, first_idx, second_idx, marker_para = candidate
+            if table_num in seen_tables:
+                continue
+            first = doc.tables[first_idx]
+            second = doc.tables[second_idx]
+            appended = _append_second_fragment_data_rows(
+                first,
+                second,
+                normalize_to_first_grid=True,
+            )
+            if appended <= 0:
+                continue
+            _clear_same_page_merge_repeat_metadata(first)
+            _remove_xml_node(marker_para)
+            _remove_xml_node(second._tbl)
+            doc.save(str(docx_path))
+
+            marker_text = f"Продолжение таблицы {table_num}"
+            if _same_page_marker_text_remains(docx_path, marker_text):
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=marker_remains",
+                    table_num,
+                )
+                continue
+            if _same_page_rendered_target_remains(docx_path, table_num):
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=same_page_rendered_target_remains",
+                    table_num,
+                )
+                continue
+            regressions = _rendered_continuation_deletion_regressions(docx_path)
+            if regressions:
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_compatible_grid_normalize_rollback table_num=%s reason=rendered_regression violations=%s",
+                    table_num,
+                    _format_rendered_deletion_regressions(regressions),
+                )
+                continue
+
+            repaired += 1
+            seen_tables.add(table_num)
+            logger.info(
+                "same_page_compatible_grid_normalize_applied table_num=%s first_table=%s second_table=%s appended_rows=%s",
+                table_num, first_idx, second_idx, appended,
+            )
+        except Exception as exc:
+            shutil.copy2(backup_path, docx_path)
+            logger.info(
+                "same_page_compatible_grid_normalize_rollback table_num=%s reason=exception error=%s",
+                getattr(violation, "table_num", ""), exc,
             )
         finally:
             shutil.rmtree(backup_dir, ignore_errors=True)
