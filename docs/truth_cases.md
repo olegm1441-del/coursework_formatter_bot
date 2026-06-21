@@ -62,6 +62,16 @@ Any future table-split patch must either fix the "bad" tables above or explicitl
 
 `Пример_че_может_бот.docx`, `Таблица 1.1.3` is the current table-start orphan truth case. If the rendered start page contains only `Таблица 1.1.3`, the title/header, and zero complete real data rows while the first row (`Кейс 1`) starts on the next page, the formatter must move the whole table start by inserting exactly two blank paragraphs before the caption. It must not split the table, insert `Продолжение таблицы 1.1.3`, or synthesize a numeric row for this ordinary non-split table.
 
+**Demo is NOT a clean guard.** Human review confirms `Таблица 1.1.3` still has bad placement: in the current output it spans two pages with no continuation marker. The rendered acceptance gate therefore classifies Demo as **NO-GO** (`single_table_crosses_pages_without_marker`, p5→6). This is correct detection, not a regression — do not weaken the gate to make Demo pass. Demo becomes clean only when the Stage B/C repairs land.
+
+#### Rendered acceptance-gate verdicts (Stage A baseline)
+
+The `evaluate_table_layout_acceptance` gate must hold these verdicts (smoke `/tmp/kfu_table_acceptance_gate_*`):
+
+- **Bondarev** — NO-GO: `same_page_continuation` (2.1.4/p32), `single_table_crosses_pages_without_marker` (1.2.1/p16), `orphaned_header_row` (2.3.1/p43), `appendix_label_not_on_new_page` (Прил. Б/p62), plus `fragment_grid_mismatch` review for 2.3.1/2.3.3.
+- **Demo** — NO-GO: `single_table_crosses_pages_without_marker` (1.1.3/p5).
+- **Rybakov** — GO: zero blockers (its multi-page tables carry valid continuation markers; fragment grids drift 0.0). No false positives here is a hard regression guard.
+
 ### bad2 / example_coursework_bad2
 
 - Useful for TOC checks only when the active batch touches contents/front matter.

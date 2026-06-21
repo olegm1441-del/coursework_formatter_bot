@@ -653,3 +653,323 @@ def validate_rendered_continuations(
             )
 
     return violations
+
+
+# --------------------------------------------------------------------------- #
+# Stage A — rendered table layout acceptance gate
+#
+# These detectors turn *visible* rendered table defects into structured,
+# severity-bearing blockers so the smoke / deploy decision can no longer report
+# GO when the PDF layout is broken. The function is pure (no rendering, no I/O):
+# callers render once, then pass the extracted lines + DOCX identities here.
+#
+#   severity == "fail"               -> NO-GO; a human would reject this layout.
+#   severity == "needs_human_review" -> not clean; uncertain, must be reviewed.
+# --------------------------------------------------------------------------- #
+
+_APPENDIX_LABEL_RE = re.compile(r"^\s*приложение\s+[а-яёa-z]\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class TableLayoutBlocker:
+    blocker_type: str
+    severity: str  # "fail" | "needs_human_review"
+    table_num: str | None
+    page: int | None
+    evidence: dict[str, object] = field(default_factory=dict)
+
+
+def _all_caption_pages(pdf_lines: list[PdfLine]) -> list[int]:
+    return sorted({line.page_num for line in pdf_lines if _CAPTION_RE.match(_line_text(line))})
+
+
+def _table_page_span(
+    pdf_lines: list[PdfLine],
+    identity: RenderedTableIdentity,
+) -> list[int]:
+    """Pages from this table's caption up to (but excluding) the next caption."""
+    caption_pages = [line.page_num for line in _caption_lines(pdf_lines, identity.caption_num or "")]
+    if not caption_pages:
+        return []
+    first = min(caption_pages)
+    next_caption = next((p for p in _all_caption_pages(pdf_lines) if p > first), None)
+    pages = sorted({line.page_num for line in pdf_lines})
+    return [p for p in pages if p >= first and (next_caption is None or p < next_caption)]
+
+
+def _same_page_continuation_blockers(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        num = identity.caption_num
+        if not num:
+            continue
+        caption_pages = {line.page_num for line in _caption_lines(pdf_lines, num)}
+        flagged: set[int] = set()
+        for marker in _strict_marker_lines(pdf_lines, num):
+            page = marker.page_num
+            if page in flagged:
+                continue
+            same_page = page in caption_pages
+            if not same_page:
+                above_text = " ".join(
+                    _norm_text(line.text)
+                    for line in pdf_lines
+                    if line.page_num == page and line.top < marker.top - 1.0
+                )
+                if _first_meaningful_row_on_page(identity, above_text, min_overlap=0.7):
+                    same_page = True
+            if same_page:
+                flagged.add(page)
+                out.append(
+                    TableLayoutBlocker(
+                        blocker_type="same_page_continuation",
+                        severity="fail",
+                        table_num=num,
+                        page=page,
+                        evidence={"marker_text": _line_text(marker)},
+                    )
+                )
+    return out
+
+
+def _orphaned_header_blockers(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        num = identity.caption_num
+        if not num or not identity.header_fingerprint:
+            continue
+        span = _table_page_span(pdf_lines, identity)
+        if not span or not _meaningful_rows(identity):
+            continue
+        data_pages = {
+            p for p in span
+            if _first_meaningful_row_on_page(identity, _page_text(pdf_lines, p), min_overlap=0.7)
+        }
+        for page in span:
+            page_text = _page_text(pdf_lines, page)
+            header_present = any(
+                _contains_fingerprint(page_text, header, min_overlap=0.7)
+                for header in identity.header_fingerprint
+            )
+            numeric_present = bool(
+                identity.numeric_row_fingerprint
+                and _numeric_row_count(_page_lines(pdf_lines, page), identity.numeric_row_fingerprint)
+            )
+            if (header_present or numeric_present) and page not in data_pages:
+                if any(dp > page for dp in data_pages):
+                    out.append(
+                        TableLayoutBlocker(
+                            blocker_type="orphaned_header_row",
+                            severity="fail",
+                            table_num=num,
+                            page=page,
+                            evidence={"header": _snippet(identity.header_fingerprint[0])},
+                        )
+                    )
+    return out
+
+
+def _appendix_label_blockers(pdf_lines: list[PdfLine]) -> list[TableLayoutBlocker]:
+    out: list[TableLayoutBlocker] = []
+    for line in pdf_lines:
+        if not _APPENDIX_LABEL_RE.match(_line_text(line)):
+            continue
+        page = line.page_num
+        substantial_above = [
+            other
+            for other in pdf_lines
+            if other.page_num == page
+            and other.top < line.top - 1.0
+            and _tokens(other.text)
+            and not _norm_text(other.text).startswith("приложени")
+        ]
+        if substantial_above:
+            out.append(
+                TableLayoutBlocker(
+                    blocker_type="appendix_label_not_on_new_page",
+                    severity="fail",
+                    table_num=None,
+                    page=page,
+                    evidence={
+                        "label": _line_text(line),
+                        "content_above": _snippet(substantial_above[-1].text),
+                    },
+                )
+            )
+    return out
+
+
+def _grid_col_widths(tbl_xml) -> list[int] | None:
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is None:
+        return None
+    return [int(col.get(qn("w:w"), "0") or 0) for col in grid.findall(qn("w:gridCol"))]
+
+
+def _is_blank_or_marker_paragraph(node) -> bool:
+    if node.tag != qn("w:p"):
+        return False
+    text = " ".join((t.text or "") for t in node.findall(".//" + qn("w:t"))).strip()
+    if not text:
+        return True
+    return classify_continuation_marker_line(text).table_num is not None
+
+
+def _fragment_grid_mismatch_blockers(doc: Document) -> list[TableLayoutBlocker]:
+    out: list[TableLayoutBlocker] = []
+    body = list(doc.element.body)
+    tbl_positions = [i for i, node in enumerate(body) if node.tag == qn("w:tbl")]
+    for a, b in zip(tbl_positions, tbl_positions[1:]):
+        between = body[a + 1:b]
+        if any(not _is_blank_or_marker_paragraph(node) for node in between):
+            continue
+        sig_a = _grid_col_widths(body[a])
+        sig_b = _grid_col_widths(body[b])
+        if not sig_a or not sig_b:
+            continue
+        if len(sig_a) != len(sig_b):
+            out.append(
+                TableLayoutBlocker(
+                    blocker_type="fragment_grid_mismatch",
+                    severity="fail",
+                    table_num=None,
+                    page=None,
+                    evidence={"cols_first": len(sig_a), "cols_second": len(sig_b)},
+                )
+            )
+            continue
+        total_a = sum(sig_a) or 1
+        total_b = sum(sig_b) or 1
+        max_dev = max(
+            abs(wa / total_a - wb / total_b) for wa, wb in zip(sig_a, sig_b)
+        )
+        # A correct split preserves column widths byte-equivalently (invariants
+        # Rule 8). Rybakov's valid splits drift by 0.0; the small tolerance only
+        # absorbs twip rounding noise.
+        if max_dev > 0.02:
+            out.append(
+                TableLayoutBlocker(
+                    blocker_type="fragment_grid_mismatch",
+                    severity="needs_human_review",
+                    table_num=None,
+                    page=None,
+                    evidence={"max_col_width_deviation": round(max_dev, 3)},
+                )
+            )
+    return out
+
+
+def _cross_page_without_marker_blockers(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    """A single logical table whose data rows render across >1 page with no
+    valid ``Продолжение таблицы N`` continuation marker. KFU requires the marker
+    on every continuation page; a marked split (Rybakov) is accepted."""
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        num = identity.caption_num
+        if not num:
+            continue
+        span = _table_page_span(pdf_lines, identity)
+        if len(span) < 2:
+            continue
+        data_pages = sorted(
+            p for p in span
+            if _first_meaningful_row_on_page(identity, _page_text(pdf_lines, p), min_overlap=0.7)
+        )
+        if len(data_pages) < 2:
+            continue
+        first, last = data_pages[0], data_pages[-1]
+        marker_pages = {line.page_num for line in _strict_marker_lines(pdf_lines, num)}
+        has_marker = any(first < mp <= last for mp in marker_pages)
+        if not has_marker:
+            out.append(
+                TableLayoutBlocker(
+                    blocker_type="single_table_crosses_pages_without_marker",
+                    severity="fail",
+                    table_num=num,
+                    page=first,
+                    evidence={"data_pages": data_pages},
+                )
+            )
+    return out
+
+
+def _squeeze_blockers(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        if not identity.caption_num:
+            continue
+        span = _table_page_span(pdf_lines, identity)
+        if not span:
+            continue
+        # Count lone word-fragment lines (a single non-numeric token of <=2
+        # chars, e.g. a Cyrillic "в" left over from a broken "месяцев"). Numeric
+        # lines are excluded so page numbers / footers never count. A genuine
+        # squeeze concentrates many such fragments on ONE page; require that
+        # concentration so clean multi-page tables (Rybakov) do not false-fire.
+        worst_page: int | None = None
+        worst = 0
+        for page in span:
+            count = 0
+            for line in _page_lines(pdf_lines, page):
+                text = _line_text(line)
+                if _CAPTION_RE.match(text) or _STRICT_MARKER_RE.match(text):
+                    continue
+                tokens = text.split()
+                if (
+                    len(tokens) == 1
+                    and len(text) <= 2
+                    and not text.isdigit()
+                    and re.search(r"[a-zа-яё]", text, re.IGNORECASE)
+                ):
+                    count += 1
+            if count > worst:
+                worst, worst_page = count, page
+        if worst >= 5:
+            out.append(
+                TableLayoutBlocker(
+                    blocker_type="cell_text_overflow_or_illegible_squeeze",
+                    severity="needs_human_review",
+                    table_num=identity.caption_num,
+                    page=worst_page,
+                    evidence={"short_fragment_lines_on_page": worst},
+                )
+            )
+    return out
+
+
+def evaluate_table_layout_acceptance(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+    *,
+    doc: Document | None = None,
+) -> list[TableLayoutBlocker]:
+    """
+    Evaluate rendered table layout and return structured blockers.
+
+    A non-empty result with any ``severity == "fail"`` blocker means the
+    rendered table layout is NO-GO. ``needs_human_review`` blockers mean the
+    output is not provably clean and a human must look. Pure function: callers
+    render the PDF once and pass extracted ``pdf_lines`` + DOCX identities (and
+    optionally the ``doc`` for DOCX-grid checks).
+    """
+    blockers: list[TableLayoutBlocker] = []
+    blockers.extend(_same_page_continuation_blockers(pdf_lines, table_identities))
+    blockers.extend(_cross_page_without_marker_blockers(pdf_lines, table_identities))
+    blockers.extend(_orphaned_header_blockers(pdf_lines, table_identities))
+    blockers.extend(_appendix_label_blockers(pdf_lines))
+    blockers.extend(_squeeze_blockers(pdf_lines, table_identities))
+    if doc is not None:
+        blockers.extend(_fragment_grid_mismatch_blockers(doc))
+    return blockers

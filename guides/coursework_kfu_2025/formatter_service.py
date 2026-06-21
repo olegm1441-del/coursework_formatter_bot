@@ -30,15 +30,33 @@ from .layout_render import render_docx_to_pdf
 from .pdf_layout_analyzer import analyze_pdf_lines
 from .rendered_table_validation import (
     RenderedContinuationViolation,
+    TableLayoutBlocker,
     build_rendered_table_identities,
+    evaluate_table_layout_acceptance,
     validate_rendered_continuations,
 )
 
 logger = logging.getLogger(__name__)
 
+_TRUTHY = {"1", "true", "yes", "on"}
+
 
 def _flag_value(name: str) -> str:
     return os.getenv(name, "<unset>")
+
+
+def _rendered_table_continuation_enabled() -> bool:
+    """
+    Stage 0 conservative table mode.
+
+    Default (env unset / falsey): the risky rendered table-continuation
+    insertion path and the same-page fragment merge passes are skipped, so the
+    formatter never creates a same-page ``Продолжение таблицы`` split or a
+    synthetic numeric row — it prefers leaving a table whole. Set
+    ``KPFU_RENDERED_TABLE_CONTINUATION=1`` to re-enable the experimental path
+    (still subject to the rendered acceptance gate).
+    """
+    return os.getenv("KPFU_RENDERED_TABLE_CONTINUATION", "").strip().lower() in _TRUTHY
 
 
 def _rendered_continuation_violations_for_docx(
@@ -144,6 +162,66 @@ def _append_rendered_continuation_warnings(
         )
 
 
+_LAYOUT_BLOCKER_MESSAGES = {
+    "same_page_continuation": "таблица {num}: продолжение таблицы оказалось на той же странице (стр. {page}).",
+    "single_table_crosses_pages_without_marker": "таблица {num}: переходит на следующую страницу без маркера «Продолжение таблицы» (стр. {page}).",
+    "orphaned_header_row": "таблица {num}: шапка таблицы осталась без строк данных (стр. {page}).",
+    "fragment_grid_mismatch": "таблица {num}: фрагменты одной таблицы имеют разную сетку столбцов.",
+    "appendix_label_not_on_new_page": "приложение начинается не с новой страницы (стр. {page}).",
+    "cell_text_overflow_or_illegible_squeeze": "таблица {num}: столбцы выглядят сжатыми, текст переносится по буквам (стр. {page}).",
+}
+
+
+def _emit_table_layout_acceptance_warnings(
+    output_path: Path,
+    report: FormattingReport,
+) -> list[TableLayoutBlocker]:
+    """
+    Render the final document once and surface rendered table-layout blockers.
+
+    Visible defects become structured, severity-bearing blockers that are logged
+    and added to the user-facing report. ``fail``-level blockers mean the
+    rendered table layout is NO-GO; the smoke/deploy decision reads them via
+    ``evaluate_table_layout_acceptance``. ``format_docx`` still returns the file.
+    """
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(output_path)
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(output_path))
+        identities = build_rendered_table_identities(doc)
+        blockers = evaluate_table_layout_acceptance(pdf_lines, identities, doc=doc)
+    except Exception:
+        logger.exception("format_docx: table layout acceptance gate failed to evaluate")
+        return []
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    fail_count = sum(1 for b in blockers if b.severity == "fail")
+    review_count = sum(1 for b in blockers if b.severity == "needs_human_review")
+    for blocker in blockers:
+        template = _LAYOUT_BLOCKER_MESSAGES.get(blocker.blocker_type)
+        if template is not None:
+            detail = template.format(num=blocker.table_num or "?", page=blocker.page or "?")
+            prefix = "Проверьте" if blocker.severity == "fail" else "Возможно, проверьте"
+            report.warn(f"{prefix} вёрстку таблиц — {detail}")
+        logger.warning(
+            "table_layout_blocker type=%s severity=%s table_num=%s page=%s evidence=%s",
+            blocker.blocker_type,
+            blocker.severity,
+            blocker.table_num,
+            blocker.page,
+            blocker.evidence,
+        )
+    logger.warning(
+        "format_docx: table layout acceptance gate fail=%d needs_review=%d",
+        fail_count,
+        review_count,
+    )
+    return blockers
+
+
 def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     """
     Format *input_path* and write the result to *output_path*.
@@ -237,93 +315,103 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: pre-backup canonical TOC rebuild failed, continuing")
 
-    # Rendered table continuation entry.  The backup is taken from the
-    # stripped + rebuilt state so that any gate restoration returns a document
-    # that already has exactly one canonical СОДЕРЖАНИЕ and zero same-page
-    # continuation violations.
-    table_gate_backup_dir: Path | None = None
-    table_gate_backup_path: Path | None = None
-    try:
-        table_gate_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_format_table_gate_"))
-        table_gate_backup_path = table_gate_backup_dir / output_path.name
-        shutil.copy2(output_path, table_gate_backup_path)
-        n_rendered = apply_rendered_table_continuation(output_path, report=report)
-        if n_rendered:
-            logger.info("format_docx: rendered table continuation splits=%d", n_rendered)
-    except Exception:
-        logger.exception("format_docx: rendered table continuation failed")
-
-    # Safety gate: if the rendered-continuation markers land on the same page
-    # as the surrounding table segments, revert to the pre-rendered backup
-    # (which already has the canonical TOC and zero same-page violations).
-    _gate_restored = False
-    if table_gate_backup_path is not None:
+    # Stage 0 conservative table mode: only run the risky rendered continuation
+    # + same-page merge passes when explicitly enabled. By default tables are
+    # left whole — the formatter never creates a same-page «Продолжение
+    # таблицы» split or a synthesized numeric row (see audit / Stage 0).
+    if not _rendered_table_continuation_enabled():
+        logger.info(
+            "format_docx: conservative table mode — rendered continuation/merge skipped "
+            "(KPFU_RENDERED_TABLE_CONTINUATION unset)"
+        )
+    else:
+        # Rendered table continuation entry.  The backup is taken from the
+        # stripped + rebuilt state so that any gate restoration returns a
+        # document that already has exactly one canonical СОДЕРЖАНИЕ and zero
+        # same-page continuation violations.
+        table_gate_backup_dir: Path | None = None
+        table_gate_backup_path: Path | None = None
         try:
-            if restore_docx_if_same_page_continuation_markers(
-                output_path,
-                table_gate_backup_path,
-                report=report,
-                context="format_docx_final",
-            ):
-                _gate_restored = True
-                logger.warning(
-                    "format_docx: final same-page continuation marker gate restored pre-rendered table state"
-                )
+            table_gate_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_format_table_gate_"))
+            table_gate_backup_path = table_gate_backup_dir / output_path.name
+            shutil.copy2(output_path, table_gate_backup_path)
+            n_rendered = apply_rendered_table_continuation(output_path, report=report)
+            if n_rendered:
+                logger.info("format_docx: rendered table continuation splits=%d", n_rendered)
         except Exception:
-            logger.exception("format_docx: final same-page continuation marker validation failed")
-        finally:
-            if table_gate_backup_dir is not None:
-                shutil.rmtree(table_gate_backup_dir, ignore_errors=True)
+            logger.exception("format_docx: rendered table continuation failed")
 
-    # When the gate restored the canonical backup, DOCX-only markers that were
-    # calibrated for the old student TOC layout may now be same-page in the
-    # canonical layout (old TOC was typically larger by 1 page).  Remove them:
-    # these markers are stale artefacts of the old layout — the table actually
-    # fits on one page with the canonical TOC, so no continuation header is
-    # needed.
-    if _gate_restored:
+        # Safety gate: if the rendered-continuation markers land on the same page
+        # as the surrounding table segments, revert to the pre-rendered backup
+        # (which already has the canonical TOC and zero same-page violations).
+        _gate_restored = False
+        if table_gate_backup_path is not None:
+            try:
+                if restore_docx_if_same_page_continuation_markers(
+                    output_path,
+                    table_gate_backup_path,
+                    report=report,
+                    context="format_docx_final",
+                ):
+                    _gate_restored = True
+                    logger.warning(
+                        "format_docx: final same-page continuation marker gate restored pre-rendered table state"
+                    )
+            except Exception:
+                logger.exception("format_docx: final same-page continuation marker validation failed")
+            finally:
+                if table_gate_backup_dir is not None:
+                    shutil.rmtree(table_gate_backup_dir, ignore_errors=True)
+
+        # When the gate restored the canonical backup, DOCX-only markers that
+        # were calibrated for the old student TOC layout may now be same-page in
+        # the canonical layout (old TOC was typically larger by 1 page).  Remove
+        # them: these markers are stale artefacts of the old layout — the table
+        # actually fits on one page with the canonical TOC, so no continuation
+        # header is needed.
+        if _gate_restored:
+            try:
+                n_removed = remove_same_page_continuation_markers_inplace(
+                    output_path,
+                    report=report,
+                )
+                if n_removed:
+                    logger.info(
+                        "format_docx: removed %d same-page DOCX-only markers from canonical backup after gate",
+                        n_removed,
+                    )
+            except Exception:
+                logger.exception(
+                    "format_docx: failed to remove same-page markers from canonical backup"
+                )
+
         try:
-            n_removed = remove_same_page_continuation_markers_inplace(
+            n_same_page_exact = normalize_exact_grid_same_page_repeated_fragments_inplace(
                 output_path,
+                source_docx_path=input_path,
                 report=report,
             )
-            if n_removed:
+            if n_same_page_exact:
                 logger.info(
-                    "format_docx: removed %d same-page DOCX-only markers from canonical backup after gate",
-                    n_removed,
+                    "format_docx: normalized %d exact-grid same-page table fragment(s)",
+                    n_same_page_exact,
                 )
         except Exception:
-            logger.exception(
-                "format_docx: failed to remove same-page markers from canonical backup"
-            )
+            logger.exception("format_docx: exact-grid same-page fragment normalization failed")
 
-    try:
-        n_same_page_exact = normalize_exact_grid_same_page_repeated_fragments_inplace(
-            output_path,
-            source_docx_path=input_path,
-            report=report,
-        )
-        if n_same_page_exact:
-            logger.info(
-                "format_docx: normalized %d exact-grid same-page table fragment(s)",
-                n_same_page_exact,
+        try:
+            n_same_page_compatible = normalize_compatible_grid_same_page_repeated_fragments_inplace(
+                output_path,
+                source_docx_path=input_path,
+                report=report,
             )
-    except Exception:
-        logger.exception("format_docx: exact-grid same-page fragment normalization failed")
-
-    try:
-        n_same_page_compatible = normalize_compatible_grid_same_page_repeated_fragments_inplace(
-            output_path,
-            source_docx_path=input_path,
-            report=report,
-        )
-        if n_same_page_compatible:
-            logger.info(
-                "format_docx: normalized %d compatible-grid same-page table fragment(s)",
-                n_same_page_compatible,
-            )
-    except Exception:
-        logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
+            if n_same_page_compatible:
+                logger.info(
+                    "format_docx: normalized %d compatible-grid same-page table fragment(s)",
+                    n_same_page_compatible,
+                )
+        except Exception:
+            logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
 
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(
@@ -401,5 +489,11 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: final same-page marker warning validation failed")
+
+    # Stage A: rendered table layout acceptance gate. Surfaces visible table
+    # layout defects (same-page continuation, orphaned header, grid mismatch,
+    # appendix not on a new page, severe squeeze) as structured blockers in the
+    # report + logs. fail-level blockers mean the rendered layout is NO-GO.
+    _emit_table_layout_acceptance_warnings(output_path, report)
 
     return str(output_path), report.warnings

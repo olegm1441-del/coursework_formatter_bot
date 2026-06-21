@@ -33,6 +33,7 @@ Default behavior must be conservative.
 - Do not fix “nearby issues” unless I ask.
 
 ### Quality bar
+- For table layout, the rendered PDF is the source of truth. Structural/diagnostic checks (row preservation, cell padding, warning counts) are necessary but not sufficient — a table change is not "done" until the rendered acceptance gate (`evaluate_table_layout_acceptance`) is clean or its blockers are explicitly accepted.
 - Prefer the smallest correct change.
 - Prefer clarity over cleverness.
 - Preserve backward compatibility unless the task explicitly requires a breaking change.

@@ -163,6 +163,26 @@ A patch that changes table-split behaviour is accepted only if **all** of the fo
 - All formatter test suites pass (`test_phase3.py`, `test_reference_subheading_spacing.py`, `test_ux_texts.py`).
 - PDF visual smoke is provided side-by-side (before/after) for at least Бондарев, нейромаркетинг, and курсовая пример 1.
 
+## Rendered Table Layout Acceptance Gate (Stage 0 + Stage A)
+
+Structural success (row preservation, cell padding, warning counts) is **not** layout success. The gate makes visible rendered table defects explicit.
+
+### Stage 0 — conservative table mode
+- `KPFU_RENDERED_TABLE_CONTINUATION` (default unset/false): the risky rendered continuation insertion + exact/compatible same-page merge passes are skipped, so the formatter never **creates** a same-page `Продолжение таблицы` split or a synthesized numeric row. Tables are left whole; a whole table that flows across a page is less wrong than a bad same-page split.
+- Set to `1`/`true` to re-enable the experimental path (still subject to the gate).
+- Only the rendered path (`apply_rendered_table_continuation`) inserts markers; the DOCX-only `apply_table_continuation` and the orphan-move guard do not, so gating that one entry point is sufficient.
+
+### Stage A — `evaluate_table_layout_acceptance` (in `rendered_table_validation.py`)
+Pure function over rendered `pdf_lines` + DOCX identities (+ optional `doc`). Blocker severities: `fail` (NO-GO) / `needs_human_review` (not provably clean). `format_docx` surfaces blockers as report warnings + structured logs and still returns the file; smoke/deploy reads the blockers for GO/NO-GO. Detectors:
+- `same_page_continuation` (fail) — `Продолжение таблицы N` on the same page as a fragment of N.
+- `single_table_crosses_pages_without_marker` (fail) — a table's data rows span >1 page with no valid continuation marker (a *marked* split, e.g. Rybakov, is accepted).
+- `orphaned_header_row` (fail) — a page carries the header/numeric of N but zero data rows while data appears on a later page.
+- `appendix_label_not_on_new_page` (fail) — `ПРИЛОЖЕНИЕ X` with substantial non-appendix content above it on its page.
+- `fragment_grid_mismatch` (fail on column-count change; `needs_human_review` on >2% per-column width drift) — adjacent fragments must preserve the grid (Rule 8).
+- `cell_text_overflow_or_illegible_squeeze` (`needs_human_review`) — ≥5 lone non-numeric ≤2-char fragment lines concentrated on one page of a table region; numeric/page-number lines excluded so clean tables do not false-fire.
+
+This gate detects defects only; the actual table repairs are Stage B–E.
+
 ## Forbidden Dangerous Operations
 
 - No global paragraph merge/delete passes without structural guards.
