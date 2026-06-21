@@ -2189,6 +2189,81 @@ def test_vr_r3_list_punctuation() -> tuple[bool, str]:
     return _result(True, "list items: ';' between, '.' on last")
 
 
+def test_vr_list_intro_colon() -> tuple[bool, str]:
+    """A body paragraph that introduces a (lettered) list ends with ':' not '.'.
+    A regular sentence followed by a heading keeps its '.'."""
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("Текст введения.")
+    doc.add_paragraph("Так то база это ставить еще буквами типа")
+    doc.add_paragraph("а) первый пункт")
+    doc.add_paragraph("б) второй пункт")
+    doc.add_paragraph("Обычное предложение без списка после")
+    out = _hl_process_document(doc)
+    tx = [(p.text or "") for p in out.paragraphs]
+    intro = next((t for t in tx if "буквами типа" in t), "")
+    if not intro.rstrip().endswith(":"):
+        return _result(False, f"list-intro not ':' -> {intro!r}")
+    plain = next((t for t in tx if "Обычное предложение" in t), "")
+    if plain.rstrip().endswith(":"):
+        return _result(False, f"non-intro wrongly got ':' -> {plain!r}")
+    # lettered markers preserved (not lowercased by colon reprocessing)
+    if any(t.strip().startswith("А) первый") for t in tx) and any("а) первый" in t for t in tx):
+        pass
+    return _result(True, "list intro -> ':'; non-intro keeps '.'")
+
+
+def test_vr_table_title_capitalized() -> tuple[bool, str]:
+    from guides.coursework_kfu_2025.safe_formatter import format_table_title
+    doc = Document()
+    p = doc.add_paragraph("таблица о том, почему оформление лучше делать ботом")
+    format_table_title(p)
+    if not p.text.startswith("Таблица о том"):
+        return _result(False, f"table title not capitalized: {p.text!r}")
+    # already-capital unchanged
+    p2 = doc.add_paragraph("Длинная таблица с признаками хаоса")
+    format_table_title(p2)
+    if not p2.text.startswith("Длинная"):
+        return _result(False, f"capital title altered: {p2.text!r}")
+    return _result(True, "table title first letter capitalized")
+
+
+def test_vr_unnumbered_strong_formula_numbered() -> tuple[bool, str]:
+    """ROI=(эффект-затраты)/затраты*100% (strong math symbols, no 'где') is
+    recognized as a formula and gets the next number in the subsection (1.2.2)."""
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("1. Глава").style = "Heading 1"
+    doc.add_paragraph("1.2. Подраздел для математиков").style = "Heading 2"
+    doc.add_paragraph("Текст.")
+    doc.add_paragraph("C = V * R, (1.2.1)")
+    doc.add_paragraph("Итого результат.")
+    doc.add_paragraph("ROI=(эффект-затраты)/затраты*100%,")
+    doc.add_paragraph("Текст после формулы.")
+    out = _hl_process_document(doc)
+    roi = next((p.text for p in out.paragraphs if "ROI" in (p.text or "")), "")
+    if "(1.2.2)" not in roi:
+        return _result(False, f"ROI not numbered 1.2.2: {roi!r}")
+    return _result(True, "unnumbered strong-symbol formula numbered (1.2.2)")
+
+
+def test_vr_prose_with_equals_not_formula() -> tuple[bool, str]:
+    """A prose sentence with a stray '=' / '-' but NO strong math symbols is NOT
+    turned into a numbered formula (guards against false positives)."""
+    doc = Document()
+    doc.add_paragraph("введение")
+    doc.add_paragraph("1. Глава").style = "Heading 1"
+    doc.add_paragraph("1.1. Подраздел").style = "Heading 2"
+    doc.add_paragraph("итого = выручка минус затраты на проект")
+    doc.add_paragraph("Следующий текст.")
+    out = _hl_process_document(doc)
+    prose = next((p.text for p in out.paragraphs if "выручка минус" in (p.text or "")), "")
+    import re as _re
+    if _re.search(r"\(\d+\.\d+\.\d+\)", prose):
+        return _result(False, f"prose wrongly numbered as formula: {prose!r}")
+    return _result(True, "prose with '=' but no strong math not numbered")
+
+
 def test_autotoc_dot_leader_and_pages_preserved_with_blank() -> tuple[bool, str]:
     out = _run_static_contents_rebuild(_make_autotoc_doc(old_heading="Содержание"), _default_autotoc_lines())
     entry_paragraphs = [p for p in out.paragraphs if "\t" in (p.text or "")]
@@ -17380,6 +17455,10 @@ def run_all() -> None:
         ("VR | R8 paragraph terminal period",          test_vr_r8_paragraph_terminal_period),
         ("VR | R8 closing-quote + source period",      test_vr_r8_closing_quote_and_source_period),
         ("VR | R3 list punctuation",                   test_vr_r3_list_punctuation),
+        ("VR | list-intro colon",                      test_vr_list_intro_colon),
+        ("VR | table title capitalized",               test_vr_table_title_capitalized),
+        ("VR | unnumbered strong formula numbered",    test_vr_unnumbered_strong_formula_numbered),
+        ("VR | prose with '=' not formula",            test_vr_prose_with_equals_not_formula),
         ("TOC | soft-break plain TOC removed",         test_autotoc_softbreak_plain_toc_removed),
         ("TOC | soft-break TOC appendix continuation removed", test_autotoc_softbreak_toc_appendix_continuation_removed),
         ("TOC | body ВВЕДЕНИЕ preserved after softbreak cleanup", test_autotoc_body_intro_preserved_after_softbreak_toc),

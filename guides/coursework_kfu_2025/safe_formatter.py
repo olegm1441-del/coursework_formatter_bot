@@ -298,10 +298,14 @@ def normalize_formula_blocks(document, body_start):
             paragraphs = document.paragraphs
 
         if not is_formula_paragraph_text(text):
-            if (
-                is_unnumbered_formula_paragraph_text(text)
-                and _next_nonempty_paragraph_starts_formula_explanation(paragraphs, idx)
-            ):
+            # An unnumbered formula is numbered when it is followed by a `где …`
+            # explanation, OR (no `где`) when it carries strong math symbols
+            # (parentheses, / * ^ %, ×, ÷) — e.g. `ROI=(эффект-затраты)/затраты*100%`.
+            # The latter guard keeps ordinary prose with a stray `=`/`-` out.
+            _is_unnum_formula = is_unnumbered_formula_paragraph_text(text)
+            _has_expl_next = _next_nonempty_paragraph_starts_formula_explanation(paragraphs, idx)
+            _has_strong_math = bool(re.search(r"[/*×÷^%()]", text))
+            if _is_unnum_formula and (_has_expl_next or _has_strong_math):
                 formula_number = _find_formula_number_from_preceding_prose(paragraphs, idx, body_start)
                 if not formula_number:
                     formula_number = _next_formula_number_from_heading_context(paragraphs, idx, body_start)
@@ -3083,16 +3087,16 @@ def _normalize_body_hyperlink_runs(paragraph) -> None:
 _BODY_CLOSING_CHARS = "»\"'›)]"
 
 
-def _append_terminal_period(paragraph) -> None:
-    """Place a '.' at the very end of the paragraph. If the paragraph ends with a
-    footnote reference, the period goes AFTER it (as its own run); otherwise it is
+def _append_terminal_period(paragraph, char: str = ".") -> None:
+    """Place *char* at the very end of the paragraph. If the paragraph ends with a
+    footnote reference, the char goes AFTER it (as its own run); otherwise it is
     inserted right after the last visible character of the last text run."""
     runs = paragraph.runs
     for r in reversed(runs):
         has_fn = r._element.find(qn("w:footnoteReference")) is not None
         has_txt = bool(r.text and r.text.strip())
         if has_fn and not has_txt:
-            new_r = paragraph.add_run(".")
+            new_r = paragraph.add_run(char)
             set_run_font(new_r, size_pt=BODY_FONT_SIZE_PT, bold=False, italic=False, all_caps=False)
             return
         if has_txt:
@@ -3100,7 +3104,7 @@ def _append_terminal_period(paragraph) -> None:
             j = len(rt)
             while j > 0 and rt[j - 1].isspace():
                 j -= 1
-            r.text = rt[:j] + "." + rt[j:]
+            r.text = rt[:j] + char + rt[j:]
             return
 
 
@@ -3108,7 +3112,9 @@ def _ensure_body_terminal_period(paragraph) -> None:
     """R8 (conservative): ensure an ordinary body paragraph ends with '.'. Adds the
     period after a trailing closing quote/paren (`…то?»` -> `…то?».`) and after a
     trailing footnote reference (`…ментов¹` -> `…ментов¹.`). Skips hyperlink, list,
-    and URL-ending paragraphs; bare terminal punctuation (. … ? ! : ; ,) is kept."""
+    and URL-ending paragraphs; existing terminal punctuation (. … ? ! : ; ,) is kept.
+    (A list-introduction's '.' is later turned into ':' by ensure_list_intro_colon,
+    which runs AFTER list normalisation so the colon never triggers reprocessing.)"""
     if paragraph._element.findall(".//" + qn("w:hyperlink")):
         return
     if _get_kfu_list_type(paragraph):
@@ -3203,6 +3209,72 @@ def normalize_list_block_punctuation(document, body_start):
             for k, p in enumerate(run):
                 _set_list_item_terminal(p, "." if k == last else ";")
         i = max(j, i + 1)
+
+
+def ensure_list_intro_colon(document, body_start):
+    """A body paragraph that introduces a list (its next non-blank paragraph is a
+    list item) ends with ':' instead of '.'. MUST run AFTER all list normalisation
+    so the added colon never re-triggers colon-list reprocessing. Skips headings,
+    list items, references, appendices, and hyperlink/URL paragraphs; keeps an
+    existing ':' / '?' / '!' / ';'."""
+    paras = document.paragraphs
+    in_ref = False
+    in_appendix = False
+    for idx in range(body_start or 0, len(paras)):
+        p = paras[idx]
+        t = clean_spaces(p.text)
+        if not t:
+            continue
+        if is_references_heading_text(t):
+            in_ref = True
+        if is_appendix_heading_text(t):
+            in_appendix = True
+        if in_ref or in_appendix:
+            continue
+        if (p.style.name or "").strip().lower() in {"heading 1", "heading 2", "заголовок 1", "заголовок 2"}:
+            continue
+        if _is_list_item_paragraph(p):
+            continue
+        if p._element.findall(".//" + qn("w:hyperlink")):
+            continue
+        nxt = _next_nonblank_paragraph(paras, idx)
+        if nxt is None:
+            continue
+        nxt_t = clean_spaces(nxt.text)
+        if not nxt_t:
+            continue
+        # The next paragraph must be a GENUINE list item — a dash/bullet, lettered
+        # (а)/б)) or numeric-paren (1)/2)) item, or a KFU-marked list paragraph —
+        # and NOT a heading. Numeric-DOT "N." is deliberately excluded because it
+        # also matches chapter headings ("1. КАК ХОЧЕШЬ …") and numbered sentences.
+        nxt_is_heading = (nxt.style.name or "").strip().lower() in {
+            "heading 1", "heading 2", "заголовок 1", "заголовок 2"
+        }
+        nxt_is_list = (not nxt_is_heading) and (
+            bool(_get_kfu_list_type(nxt))
+            or _is_dash_or_bullet_list_text(nxt_t)
+            or _is_letter_list_text(nxt_t)
+            or bool(_NUMERIC_PAREN_LIST_RE.match(nxt_t))
+        )
+        if not nxt_is_list:
+            continue
+        runs = p.runs
+        stripped = "".join(r.text for r in runs).rstrip()
+        if not stripped or stripped[-1] in ":?!;":
+            continue
+        if re.search(r"https?://\S+$", stripped):
+            continue
+        for r in reversed(runs):
+            if r.text and r.text.strip():
+                rt = r.text
+                j = len(rt)
+                while j > 0 and rt[j - 1].isspace():
+                    j -= 1
+                k = j
+                if k > 0 and rt[k - 1] in ".,":
+                    k -= 1
+                r.text = rt[:k] + ":" + rt[j:]
+                break
 
 
 def format_body(paragraph, preserve_numbering=False):
@@ -3536,6 +3608,12 @@ def strip_single_terminal_period(text: str) -> str:
 
 def format_table_title(paragraph):
     text = strip_single_terminal_period(paragraph.text)
+    # Capitalize the first letter of the table title
+    # ("таблица о том …" -> "Таблица о том …").
+    _m_first = re.search(r"[A-Za-zА-Яа-яЁё]", text)
+    if _m_first and text[_m_first.start()].islower():
+        _i = _m_first.start()
+        text = text[:_i] + text[_i].upper() + text[_i + 1:]
     if text != clean_spaces(paragraph.text):
         replace_paragraph_text(paragraph, text)
 
@@ -7549,5 +7627,9 @@ def process_document(input_path: Path, output_path: Path):
     # R3: list terminal punctuation (';' between items, '.' on the last) — runs
     # last, once every list item is finalised with its KFU mark and text.
     normalize_list_block_punctuation(doc, body_start)
+
+    # List-introduction paragraphs end with ':' — applied AFTER list normalisation
+    # so the added colon never re-triggers colon-list reprocessing.
+    ensure_list_intro_colon(doc, body_start)
 
     doc.save(str(output_path))
