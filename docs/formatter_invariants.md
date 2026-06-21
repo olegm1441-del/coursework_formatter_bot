@@ -168,9 +168,12 @@ A patch that changes table-split behaviour is accepted only if **all** of the fo
 Structural success (row preservation, cell padding, warning counts) is **not** layout success. The gate makes visible rendered table defects explicit.
 
 ### Stage 0 — conservative table mode
-- `KPFU_RENDERED_TABLE_CONTINUATION` (default unset/false): the risky rendered continuation insertion + exact/compatible same-page merge passes are skipped, so the formatter never **creates** a same-page `Продолжение таблицы` split or a synthesized numeric row. Tables are left whole; a whole table that flows across a page is less wrong than a bad same-page split.
-- Set to `1`/`true` to re-enable the experimental path (still subject to the gate).
-- Only the rendered path (`apply_rendered_table_continuation`) inserts markers; the DOCX-only `apply_table_continuation` and the orphan-move guard do not, so gating that one entry point is sufficient.
+- `KPFU_RENDERED_TABLE_CONTINUATION` (default unset/false): only the risky rendered continuation **insertion** path (`apply_rendered_table_continuation`) is skipped, so the formatter never **creates** a new same-page `Продолжение таблицы` split. Set to `1`/`true` to re-enable that experimental insertion (still subject to the gate).
+- The same-page **merge-back** normalizers (`normalize_exact_grid_…`, `normalize_compatible_grid_…`) run **unconditionally**, including in conservative mode: they are cleanup that *removes* same-page splits (e.g. an unnecessary student manual chain whose two halves now fit on one page) and each has its own rendered rollback. They merge only grid-compatible fragments; grid-incompatible same-page chains are safely left (and flagged by the gate) for Stage C/D.
+- Only the insertion path inserts markers; the DOCX-only `apply_table_continuation` and the orphan-move guard do not.
+
+### Appendix label page breaks
+Every appendix START label (`ПРИЛОЖЕНИЕ N`, e.g. `ПРИЛОЖЕНИЕ Б`) begins a new appendix and gets `page_break_before` in `apply_page_breaks` — not only the first appendix after the references block. The plural section heading `ПРИЛОЖЕНИЯ` and body phrases like `приложение к договору …` are excluded. The gate's `appendix_label_not_on_new_page` detector is the rendered guard for this.
 
 ### Stage A — `evaluate_table_layout_acceptance` (in `rendered_table_validation.py`)
 Pure function over rendered `pdf_lines` + DOCX identities (+ optional `doc`). Blocker severities: `fail` (NO-GO) / `needs_human_review` (not provably clean). `format_docx` surfaces blockers as report warnings + structured logs and still returns the file; smoke/deploy reads the blockers for GO/NO-GO. Detectors:

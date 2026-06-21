@@ -315,14 +315,16 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: pre-backup canonical TOC rebuild failed, continuing")
 
-    # Stage 0 conservative table mode: only run the risky rendered continuation
-    # + same-page merge passes when explicitly enabled. By default tables are
-    # left whole — the formatter never creates a same-page «Продолжение
-    # таблицы» split or a synthesized numeric row (see audit / Stage 0).
+    # Stage 0 conservative table mode: only the risky rendered continuation
+    # *insertion* path is gated off by default (it can create same-page
+    # «Продолжение таблицы» splits / synthesized numeric rows). The same-page
+    # merge-back normalizers below are CLEANUP that *removes* same-page splits
+    # (e.g. unnecessary student manual chains that now fit on one page), so they
+    # run unconditionally — with their own rendered rollback.
     if not _rendered_table_continuation_enabled():
         logger.info(
-            "format_docx: conservative table mode — rendered continuation/merge skipped "
-            "(KPFU_RENDERED_TABLE_CONTINUATION unset)"
+            "format_docx: conservative table mode — rendered continuation insertion skipped "
+            "(KPFU_RENDERED_TABLE_CONTINUATION unset); same-page merge-back still runs"
         )
     else:
         # Rendered table continuation entry.  The backup is taken from the
@@ -385,33 +387,38 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
                     "format_docx: failed to remove same-page markers from canonical backup"
                 )
 
-        try:
-            n_same_page_exact = normalize_exact_grid_same_page_repeated_fragments_inplace(
-                output_path,
-                source_docx_path=input_path,
-                report=report,
+    # Same-page merge-back (CLEANUP). Runs in conservative mode too: it merges
+    # same-page repeated fragments (e.g. an unnecessary student manual chain
+    # whose two halves now fit on one page) back into a single table and drops
+    # the stray marker. Each merge has its own rendered rollback, so it never
+    # worsens pagination.
+    try:
+        n_same_page_exact = normalize_exact_grid_same_page_repeated_fragments_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_same_page_exact:
+            logger.info(
+                "format_docx: normalized %d exact-grid same-page table fragment(s)",
+                n_same_page_exact,
             )
-            if n_same_page_exact:
-                logger.info(
-                    "format_docx: normalized %d exact-grid same-page table fragment(s)",
-                    n_same_page_exact,
-                )
-        except Exception:
-            logger.exception("format_docx: exact-grid same-page fragment normalization failed")
+    except Exception:
+        logger.exception("format_docx: exact-grid same-page fragment normalization failed")
 
-        try:
-            n_same_page_compatible = normalize_compatible_grid_same_page_repeated_fragments_inplace(
-                output_path,
-                source_docx_path=input_path,
-                report=report,
+    try:
+        n_same_page_compatible = normalize_compatible_grid_same_page_repeated_fragments_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_same_page_compatible:
+            logger.info(
+                "format_docx: normalized %d compatible-grid same-page table fragment(s)",
+                n_same_page_compatible,
             )
-            if n_same_page_compatible:
-                logger.info(
-                    "format_docx: normalized %d compatible-grid same-page table fragment(s)",
-                    n_same_page_compatible,
-                )
-        except Exception:
-            logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
+    except Exception:
+        logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
 
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(

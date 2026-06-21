@@ -67,6 +67,20 @@ def _cleanup_existing_page_break_artifacts(document, body_start):
             _remove_page_breaks_from_run(run)
 
 
+_APPENDIX_START_LABEL_RE = re.compile(r"^приложение\s*\S+$", re.IGNORECASE)
+
+
+def _is_appendix_start_label(text: str) -> bool:
+    """A standalone appendix label that begins a NEW appendix, e.g. ``ПРИЛОЖЕНИЕ
+    Б`` / ``Приложение 2``. Excludes the plural section heading ``ПРИЛОЖЕНИЯ``
+    and body phrases like ``приложение к договору ...`` (more than one token)."""
+    t = clean_spaces(text)
+    low = t.lower()
+    if low in {"приложения", "приложение"}:
+        return False
+    return bool(_APPENDIX_START_LABEL_RE.match(t))
+
+
 def _needs_page_break_before(text: str) -> bool:
     t = clean_spaces(text)
     low = t.lower()
@@ -75,6 +89,12 @@ def _needs_page_break_before(text: str) -> bool:
         return False
 
     if low in EXACT_PAGEBREAK_HEADINGS:
+        return True
+
+    # Every appendix START label begins a new appendix and must start on a new
+    # page — not only the first one after the references block. Without this,
+    # a second appendix (ПРИЛОЖЕНИЕ Б) after appendix-A content stays mid-page.
+    if _is_appendix_start_label(t):
         return True
 
     parsed_h1 = parse_heading1(t)
