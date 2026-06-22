@@ -3108,13 +3108,37 @@ def _append_terminal_period(paragraph, char: str = ".") -> None:
             return
 
 
-def _ensure_body_terminal_period(paragraph) -> None:
+def _next_is_genuine_list_intro(nxt) -> bool:
+    """True when *nxt* is a GENUINE list item — a dash/bullet, lettered (а)/б)) or
+    numeric-paren (1)/2)) item, or a KFU-marked list paragraph — and not a heading.
+    Numeric-DOT 'N.' is deliberately excluded because it also matches chapter
+    headings ('1. КАК ХОЧЕШЬ …') and numbered sentences. Shared by R8 (which leaves
+    a dangling intro bare) and ensure_list_intro_colon (which adds the ':')."""
+    if nxt is None:
+        return False
+    t = clean_spaces(nxt.text)
+    if not t:
+        return False
+    if (nxt.style.name or "").strip().lower() in {
+        "heading 1", "heading 2", "заголовок 1", "заголовок 2"
+    }:
+        return False
+    return bool(
+        _get_kfu_list_type(nxt)
+        or _is_dash_or_bullet_list_text(t)
+        or _is_letter_list_text(t)
+        or _NUMERIC_PAREN_LIST_RE.match(t)
+    )
+
+
+def _ensure_body_terminal_period(paragraph, next_paragraph=None) -> None:
     """R8 (conservative): ensure an ordinary body paragraph ends with '.'. Adds the
     period after a trailing closing quote/paren (`…то?»` -> `…то?».`) and after a
     trailing footnote reference (`…ментов¹` -> `…ментов¹.`). Skips hyperlink, list,
     and URL-ending paragraphs; existing terminal punctuation (. … ? ! : ; ,) is kept.
-    (A list-introduction's '.' is later turned into ':' by ensure_list_intro_colon,
-    which runs AFTER list normalisation so the colon never triggers reprocessing.)"""
+    A BARE phrase that introduces a list (next non-blank is a genuine list item) is
+    left untouched here so ensure_list_intro_colon can later append ':' to it — a
+    sentence that already ends with '.'/'!'/'?' keeps its punctuation regardless."""
     if paragraph._element.findall(".//" + qn("w:hyperlink")):
         return
     if _get_kfu_list_type(paragraph):
@@ -3131,6 +3155,9 @@ def _ensure_body_terminal_period(paragraph) -> None:
         return
     last = stripped[-1]
     if last in ".…?!:;,":
+        return
+    # Dangling list-intro phrase ("… типа") stays bare; the colon pass handles it.
+    if _next_is_genuine_list_intro(next_paragraph):
         return
     if last in _BODY_CLOSING_CHARS:
         # trailing closing quote/paren: add a period after it unless the sentence
@@ -3212,11 +3239,12 @@ def normalize_list_block_punctuation(document, body_start):
 
 
 def ensure_list_intro_colon(document, body_start):
-    """A body paragraph that introduces a list (its next non-blank paragraph is a
-    list item) ends with ':' instead of '.'. MUST run AFTER all list normalisation
-    so the added colon never re-triggers colon-list reprocessing. Skips headings,
-    list items, references, appendices, and hyperlink/URL paragraphs; keeps an
-    existing ':' / '?' / '!' / ';'."""
+    """A *dangling* phrase that introduces a list (no terminal punctuation, e.g.
+    "… типа") gets a ':' appended. MUST run AFTER all list normalisation so the
+    added colon never re-triggers colon-list reprocessing. A complete sentence that
+    already ends with '.'/'!'/'?'/';' before the list keeps its punctuation — the
+    colon is NOT forced — and an existing ':' is left as-is. Skips headings, list
+    items, references, appendices, and hyperlink/URL paragraphs."""
     paras = document.paragraphs
     in_ref = False
     in_appendix = False
@@ -3237,30 +3265,13 @@ def ensure_list_intro_colon(document, body_start):
             continue
         if p._element.findall(".//" + qn("w:hyperlink")):
             continue
-        nxt = _next_nonblank_paragraph(paras, idx)
-        if nxt is None:
-            continue
-        nxt_t = clean_spaces(nxt.text)
-        if not nxt_t:
-            continue
-        # The next paragraph must be a GENUINE list item — a dash/bullet, lettered
-        # (а)/б)) or numeric-paren (1)/2)) item, or a KFU-marked list paragraph —
-        # and NOT a heading. Numeric-DOT "N." is deliberately excluded because it
-        # also matches chapter headings ("1. КАК ХОЧЕШЬ …") and numbered sentences.
-        nxt_is_heading = (nxt.style.name or "").strip().lower() in {
-            "heading 1", "heading 2", "заголовок 1", "заголовок 2"
-        }
-        nxt_is_list = (not nxt_is_heading) and (
-            bool(_get_kfu_list_type(nxt))
-            or _is_dash_or_bullet_list_text(nxt_t)
-            or _is_letter_list_text(nxt_t)
-            or bool(_NUMERIC_PAREN_LIST_RE.match(nxt_t))
-        )
-        if not nxt_is_list:
+        if not _next_is_genuine_list_intro(_next_nonblank_paragraph(paras, idx)):
             continue
         runs = p.runs
         stripped = "".join(r.text for r in runs).rstrip()
-        if not stripped or stripped[-1] in ":?!;":
+        # Only a DANGLING intro (no terminal punctuation) gets a ':'. A sentence that
+        # already ends with '.'/','/'!'/'?'/';'/':'/'…' is left untouched.
+        if not stripped or stripped[-1] in ".,:?!;…":
             continue
         if re.search(r"https?://\S+$", stripped):
             continue
@@ -3270,10 +3281,7 @@ def ensure_list_intro_colon(document, body_start):
                 j = len(rt)
                 while j > 0 and rt[j - 1].isspace():
                     j -= 1
-                k = j
-                if k > 0 and rt[k - 1] in ".,":
-                    k -= 1
-                r.text = rt[:k] + ":" + rt[j:]
+                r.text = rt[:j] + ":" + rt[j:]
                 break
 
 
@@ -7562,7 +7570,7 @@ def process_document(input_path: Path, output_path: Path):
         # R8: ensure a terminal period on ordinary body prose (strict guards;
         # hyperlink/list/appendix paragraphs excluded inside the helper).
         if not _in_appendix:
-            _ensure_body_terminal_period(paragraph)
+            _ensure_body_terminal_period(paragraph, next_paragraph=next_nb_final)
         prev_nonempty_kind = "body_text"
 
     run_with_pass_limit(

@@ -12513,6 +12513,7 @@ def test_marker_runtime_real_bondarev_keeps_headings_safe() -> tuple[bool, str]:
 
         old_enable = os.environ.get("KPFU_ENABLE_MARKER_SPLIT")
         old_apply = os.environ.get("KPFU_APPLY_MARKER_SPLIT")
+        old_mode_e2 = os.environ.get("KPFU_MARKER_SPLIT_MODE")
         try:
             os.environ.pop("KPFU_ENABLE_MARKER_SPLIT", None)
             os.environ.pop("KPFU_APPLY_MARKER_SPLIT", None)
