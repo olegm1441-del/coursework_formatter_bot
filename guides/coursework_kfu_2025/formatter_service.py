@@ -22,6 +22,7 @@ from .table_continuation import (
     repair_manual_chain_overflow_before_marker,
     normalize_exact_grid_same_page_repeated_fragments_inplace,
     normalize_compatible_grid_same_page_repeated_fragments_inplace,
+    cleanup_same_page_incompatible_chains_inplace,
     apply_rendered_table_start_orphan_guard,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
@@ -167,6 +168,7 @@ _LAYOUT_BLOCKER_MESSAGES = {
     "single_table_crosses_pages_without_marker": "таблица {num}: переходит на следующую страницу без маркера «Продолжение таблицы» (стр. {page}).",
     "orphaned_header_row": "таблица {num}: шапка таблицы осталась без строк данных (стр. {page}).",
     "fragment_grid_mismatch": "таблица {num}: фрагменты одной таблицы имеют разную сетку столбцов.",
+    "same_page_repeated_header": "таблица {num}: шапка таблицы повторяется на одной странице (стр. {page}).",
     "appendix_label_not_on_new_page": "приложение начинается не с новой страницы (стр. {page}).",
     "cell_text_overflow_or_illegible_squeeze": "таблица {num}: столбцы выглядят сжатыми, текст переносится по буквам (стр. {page}).",
 }
@@ -175,6 +177,7 @@ _LAYOUT_BLOCKER_MESSAGES = {
 def _emit_table_layout_acceptance_warnings(
     output_path: Path,
     report: FormattingReport,
+    source_identities: list | None = None,
 ) -> list[TableLayoutBlocker]:
     """
     Render the final document once and surface rendered table-layout blockers.
@@ -190,7 +193,9 @@ def _emit_table_layout_acceptance_warnings(
         pdf_lines = analyze_pdf_lines(pdf_path)
         doc = Document(str(output_path))
         identities = build_rendered_table_identities(doc)
-        blockers = evaluate_table_layout_acceptance(pdf_lines, identities, doc=doc)
+        blockers = evaluate_table_layout_acceptance(
+            pdf_lines, identities, doc=doc, source_identities=source_identities
+        )
     except Exception:
         logger.exception("format_docx: table layout acceptance gate failed to evaluate")
         return []
@@ -420,6 +425,29 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: compatible-grid same-page fragment normalization failed")
 
+    # Fallback cleanup for grid-incompatible same-page chains the mergers refuse:
+    # drop the same-page marker + the second fragment's duplicate header/numeric,
+    # keep both physical tables. Cleanup only; never reshapes grids or data rows.
+    #
+    # Gated to the experimental path: its trigger relies on an internal render of
+    # marginal student chains placed right at page boundaries, which makes the
+    # formatted output non-reproducible across runs. Conservative default keeps
+    # the stable baseline output; a deterministic DOCX-level trigger is Stage D.
+    if _rendered_table_continuation_enabled():
+        try:
+            n_incompatible = cleanup_same_page_incompatible_chains_inplace(
+                output_path,
+                source_docx_path=input_path,
+                report=report,
+            )
+            if n_incompatible:
+                logger.info(
+                    "format_docx: cleaned %d grid-incompatible same-page chain(s)",
+                    n_incompatible,
+                )
+        except Exception:
+            logger.exception("format_docx: incompatible-grid same-page cleanup failed")
+
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(
             output_path,
@@ -501,6 +529,6 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # layout defects (same-page continuation, orphaned header, grid mismatch,
     # appendix not on a new page, severe squeeze) as structured blockers in the
     # report + logs. fail-level blockers mean the rendered layout is NO-GO.
-    _emit_table_layout_acceptance_warnings(output_path, report)
+    _emit_table_layout_acceptance_warnings(output_path, report, source_identities=source_table_identities)
 
     return str(output_path), report.warnings

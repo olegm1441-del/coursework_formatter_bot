@@ -181,10 +181,18 @@ Pure function over rendered `pdf_lines` + DOCX identities (+ optional `doc`). Bl
 - `single_table_crosses_pages_without_marker` (fail) — a table's data rows span >1 page with no valid continuation marker (a *marked* split, e.g. Rybakov, is accepted).
 - `orphaned_header_row` (fail) — a page carries the header/numeric of N but zero data rows while data appears on a later page.
 - `appendix_label_not_on_new_page` (fail) — `ПРИЛОЖЕНИЕ X` with substantial non-appendix content above it on its page.
-- `fragment_grid_mismatch` (fail on column-count change; `needs_human_review` on >2% per-column width drift) — adjacent fragments must preserve the grid (Rule 8).
+- `fragment_grid_mismatch` (fail on column-count change; `needs_human_review` on >2% per-column width drift) — adjacent fragments must preserve the grid (Rule 8). Attributed to the nearest captioned table + its first page (Stage C/E).
+- `same_page_repeated_header` (fail) — a table's semantic header rendered 2+ times on the **same** page (deduped against `same_page_continuation` for the same table/page). A header repeated on a *continuation* page is allowed (Stage C/B).
 - `cell_text_overflow_or_illegible_squeeze` (`needs_human_review`) — ≥5 lone non-numeric ≤2-char fragment lines concentrated on one page of a table region; numeric/page-number lines excluded so clean tables do not false-fire.
 
+**Source-bad downgrade (Stage C/D):** pass `source_identities` to the gate. A table whose meaningful-row duplication is *proven* by the source (e.g. Bondarev `1.2.1`) cannot be repaired without deleting source content, so its layout `fail`s are downgraded to `needs_human_review` (`evidence.source_bad=True`) — still visible, never silently passed. The formatter must not auto-delete those rows.
+
 This gate detects defects only; the actual table repairs are Stage B–E.
+
+### Stage C status — same-page student manual chains (1.3.1 / 2.1.4 / 2.1.5 …)
+These are student manual continuation chains (`Продолжение табл. X` in source) whose two fragments have **incompatible grids**, so the exact/compatible mergers refuse them. `cleanup_same_page_incompatible_chains_inplace` can drop the marker + the second fragment's duplicate header/numeric (keeping both physical tables, never reshaping grids, with rendered rollback), and its safety core is unit-tested. It is **gated behind `KPFU_RENDERED_TABLE_CONTINUATION`** (off by default) because its trigger relies on an internal render of fragments placed right at page boundaries.
+
+**Known nondeterminism (pre-existing):** a *fixed* DOCX renders deterministically (verified: identical gate output across repeated renders), but `format_docx` itself produces **non-reproducible output** across runs — the Bondarev page count varies (e.g. 65↔66), shifting these boundary-marginal student chains between same-page and cross-page, so their `same_page_continuation` / `single_table_crosses_pages_without_marker` fails flicker run-to-run. A reliable fix needs a **deterministic DOCX-level** trigger (detect the student chain structurally and remove the unnecessary marker without depending on a render) — this is the Stage D follow-up.
 
 ## Forbidden Dangerous Operations
 

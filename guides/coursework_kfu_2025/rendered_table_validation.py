@@ -821,11 +821,35 @@ def _is_blank_or_marker_paragraph(node) -> bool:
     return classify_continuation_marker_line(text).table_num is not None
 
 
-def _fragment_grid_mismatch_blockers(doc: Document) -> list[TableLayoutBlocker]:
+def _attribute_table(
+    table_index: int,
+    identities_by_index: dict[int, RenderedTableIdentity],
+    pdf_lines: list[PdfLine],
+) -> tuple[str | None, int | None]:
+    """Best-effort (caption_num, first_page) for the table at doc.tables[index].
+    Walks back to the nearest captioned fragment for unlabelled continuations."""
+    num = None
+    for idx in range(table_index, -1, -1):
+        identity = identities_by_index.get(idx)
+        if identity is not None and identity.caption_num:
+            num = identity.caption_num
+            break
+    if not num:
+        return None, None
+    caption_pages = [line.page_num for line in _caption_lines(pdf_lines, num)]
+    return num, (min(caption_pages) if caption_pages else None)
+
+
+def _fragment_grid_mismatch_blockers(
+    doc: Document,
+    table_identities: list[RenderedTableIdentity],
+    pdf_lines: list[PdfLine],
+) -> list[TableLayoutBlocker]:
     out: list[TableLayoutBlocker] = []
+    identities_by_index = {it.table_index: it for it in table_identities}
     body = list(doc.element.body)
     tbl_positions = [i for i, node in enumerate(body) if node.tag == qn("w:tbl")]
-    for a, b in zip(tbl_positions, tbl_positions[1:]):
+    for table_index, (a, b) in enumerate(zip(tbl_positions, tbl_positions[1:])):
         between = body[a + 1:b]
         if any(not _is_blank_or_marker_paragraph(node) for node in between):
             continue
@@ -833,13 +857,15 @@ def _fragment_grid_mismatch_blockers(doc: Document) -> list[TableLayoutBlocker]:
         sig_b = _grid_col_widths(body[b])
         if not sig_a or not sig_b:
             continue
+        # the first table of the pair is the table_index-th w:tbl in the body
+        num, page = _attribute_table(table_index, identities_by_index, pdf_lines)
         if len(sig_a) != len(sig_b):
             out.append(
                 TableLayoutBlocker(
                     blocker_type="fragment_grid_mismatch",
                     severity="fail",
-                    table_num=None,
-                    page=None,
+                    table_num=num,
+                    page=page,
                     evidence={"cols_first": len(sig_a), "cols_second": len(sig_b)},
                 )
             )
@@ -857,12 +883,71 @@ def _fragment_grid_mismatch_blockers(doc: Document) -> list[TableLayoutBlocker]:
                 TableLayoutBlocker(
                     blocker_type="fragment_grid_mismatch",
                     severity="needs_human_review",
-                    table_num=None,
-                    page=None,
+                    table_num=num,
+                    page=page,
                     evidence={"max_col_width_deviation": round(max_dev, 3)},
                 )
             )
     return out
+
+
+def _same_page_repeated_header_blockers(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    """A table's semantic header rendered two+ times on the SAME page (a repeated
+    header inside a same-page fragment), even without a continuation marker. A
+    header repeated on a *different* (continuation) page is allowed."""
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        num = identity.caption_num
+        if not num or not identity.header_fingerprint:
+            continue
+        header = identity.header_fingerprint[0]
+        if len(_tokens(header)) < 3:
+            continue
+        flagged: set[int] = set()
+        for page in _table_page_span(pdf_lines, identity):
+            # lines on this page that essentially reproduce the whole header row
+            hits = [
+                line for line in _page_lines(pdf_lines, page)
+                if _contains_fingerprint(_line_text(line), header, min_overlap=0.85)
+            ]
+            # collapse wrapped header lines: count occurrences separated by a gap
+            occurrences = 0
+            last_top = None
+            for line in sorted(hits, key=lambda l: l.top):
+                if last_top is None or line.top - last_top > 30.0:
+                    occurrences += 1
+                last_top = line.top
+            if occurrences >= 2 and page not in flagged:
+                flagged.add(page)
+                out.append(
+                    TableLayoutBlocker(
+                        blocker_type="same_page_repeated_header",
+                        severity="fail",
+                        table_num=num,
+                        page=page,
+                        evidence={"header": _snippet(header), "occurrences": occurrences},
+                    )
+                )
+    return out
+
+
+def _source_bad_caption_nums(
+    table_identities: list[RenderedTableIdentity],
+    source_identities: list[RenderedTableIdentity] | None,
+) -> set[str]:
+    """Caption numbers whose meaningful-row duplication is proven by the source
+    (the formatter must not auto-delete these — they are manual/source-bad)."""
+    if not source_identities:
+        return set()
+    source_by_num = {it.caption_num: it for it in source_identities if it.caption_num}
+    bad: set[str] = set()
+    for identity in table_identities:
+        if identity.caption_num and _source_bad_duplicate_rows(identity, source_by_num):
+            bad.add(identity.caption_num)
+    return bad
 
 
 def _cross_page_without_marker_blockers(
@@ -954,6 +1039,7 @@ def evaluate_table_layout_acceptance(
     table_identities: list[RenderedTableIdentity],
     *,
     doc: Document | None = None,
+    source_identities: list[RenderedTableIdentity] | None = None,
 ) -> list[TableLayoutBlocker]:
     """
     Evaluate rendered table layout and return structured blockers.
@@ -962,14 +1048,47 @@ def evaluate_table_layout_acceptance(
     rendered table layout is NO-GO. ``needs_human_review`` blockers mean the
     output is not provably clean and a human must look. Pure function: callers
     render the PDF once and pass extracted ``pdf_lines`` + DOCX identities (and
-    optionally the ``doc`` for DOCX-grid checks).
+    optionally the ``doc`` for DOCX-grid checks and ``source_identities`` to
+    recognise source-proven row duplication).
+
+    Source-bad classification (D): a table whose meaningful-row duplication is
+    proven by the source cannot be repaired without deleting source content
+    (forbidden), so its layout *fails* are downgraded to ``needs_human_review``
+    (still visible, never silently passed).
     """
     blockers: list[TableLayoutBlocker] = []
-    blockers.extend(_same_page_continuation_blockers(pdf_lines, table_identities))
+    same_page = _same_page_continuation_blockers(pdf_lines, table_identities)
+    blockers.extend(same_page)
+    # A repeated header on a page already flagged as a same-page continuation is
+    # the same defect — don't double-count it.
+    sp_keys = {(b.table_num, b.page) for b in same_page}
+    blockers.extend(
+        b for b in _same_page_repeated_header_blockers(pdf_lines, table_identities)
+        if (b.table_num, b.page) not in sp_keys
+    )
     blockers.extend(_cross_page_without_marker_blockers(pdf_lines, table_identities))
     blockers.extend(_orphaned_header_blockers(pdf_lines, table_identities))
     blockers.extend(_appendix_label_blockers(pdf_lines))
     blockers.extend(_squeeze_blockers(pdf_lines, table_identities))
     if doc is not None:
-        blockers.extend(_fragment_grid_mismatch_blockers(doc))
+        blockers.extend(_fragment_grid_mismatch_blockers(doc, table_identities, pdf_lines))
+
+    source_bad = _source_bad_caption_nums(table_identities, source_identities)
+    if source_bad:
+        downgraded: list[TableLayoutBlocker] = []
+        for b in blockers:
+            if b.severity == "fail" and b.table_num in source_bad:
+                downgraded.append(
+                    TableLayoutBlocker(
+                        blocker_type=b.blocker_type,
+                        severity="needs_human_review",
+                        table_num=b.table_num,
+                        page=b.page,
+                        evidence={**b.evidence, "source_bad": True,
+                                  "reason": "source_proven_duplicated_rows"},
+                    )
+                )
+            else:
+                downgraded.append(b)
+        blockers = downgraded
     return blockers

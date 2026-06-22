@@ -4238,6 +4238,203 @@ def normalize_compatible_grid_same_page_repeated_fragments_inplace(
     return repaired
 
 
+def _same_page_meaningful_row_fps(first, second, header_fp: str) -> list[str]:
+    """Sorted multiset of meaningful (non-header, non-numeric) row fingerprints
+    across both fragments. Invariant to header/numeric-row removal, so it can
+    verify that a cleanup preserved every real data row exactly once."""
+    out: list[str] = []
+    for table in (first, second):
+        for row in table.rows:
+            values = _docx_row_cell_texts(row)
+            if _is_docx_numeric_row(values):
+                continue
+            fp = _docx_row_fingerprint(row)
+            if not fp or fp == header_fp:
+                continue
+            out.append(fp)
+    return sorted(out)
+
+
+def _remove_second_fragment_duplicate_leading_rows(first, second) -> int:
+    """Remove the second fragment's LEADING rows that merely duplicate the first
+    fragment's header / numeric row. Stops at the first non-duplicate (data) row
+    so meaningful data is never removed, and never empties the table."""
+    if not first.rows or not second.rows:
+        return 0
+    first_header_fp = _docx_row_fingerprint(first.rows[0])
+    first_has_numeric = _docx_table_has_numeric_row(first)
+    removed = 0
+    while len(second.rows) > 1:
+        row = second.rows[0]
+        values = _docx_row_cell_texts(row)
+        is_dup_header = _docx_row_fingerprint(row) == first_header_fp
+        is_dup_numeric = _is_docx_numeric_row(values) and first_has_numeric
+        if not (is_dup_header or is_dup_numeric):
+            break
+        _remove_xml_node(row._tr)
+        removed += 1
+    return removed
+
+
+def _incompatible_grid_same_page_cleanup_candidate_from_rendered(
+    doc: Document,
+    violation,
+    *,
+    source_docx_path: Path | None,
+) -> tuple[str, int, int, object] | None:
+    """Same-page repeated fragment that the exact/compatible mergers refused
+    (typically because the two fragments have incompatible grids). Safe to clean
+    when the second fragment merely REPEATS the header and carries distinct data:
+    we drop the duplicate header/numeric + the same-page marker and keep BOTH
+    physical tables (no merge, no grid reshape). Source-proven duplicates are
+    left untouched (classified manual/source-bad elsewhere)."""
+    table_num = getattr(violation, "table_num", None)
+    if (
+        not table_num
+        or getattr(violation, "violation_type", None) != "same_page_repeated_fragment"
+        or getattr(violation, "confidence", None) != "high"
+    ):
+        return None
+    evidence = getattr(violation, "evidence", {}) or {}
+    try:
+        first_idx = int(getattr(violation, "table_index"))
+        second_idx = int(evidence.get("following_table_index"))
+    except (TypeError, ValueError):
+        return None
+    if second_idx != first_idx + 1:
+        return None
+    if not _caption_before_table_matches(doc, first_idx, str(table_num)):
+        return None
+    try:
+        first = doc.tables[first_idx]
+        second = doc.tables[second_idx]
+    except IndexError:
+        return None
+    if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+        return None
+    if len(first.rows) < 2 or len(second.rows) < 2:
+        return None
+    # second fragment must START with a proven duplicate of the first header
+    if _docx_row_fingerprint(second.rows[0]) != _docx_row_fingerprint(first.rows[0]):
+        return None
+    # never touch source-proven duplicated content (manual / source-bad)
+    if _source_has_meaningful_duplicate_for_table(source_docx_path, str(table_num)) is not False:
+        return None
+    # data rows must be distinct and present in the second fragment
+    first_data = set(_docx_data_fingerprints(first))
+    second_data = set(_docx_data_fingerprints(second))
+    if not second_data or (first_data & second_data):
+        return None
+    marker_para = _strict_marker_between_table_indexes(doc, first_idx, second_idx, str(table_num))
+    return str(table_num), first_idx, second_idx, marker_para
+
+
+def cleanup_same_page_incompatible_chains_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Fallback after exact/compatible merge: for grid-incompatible same-page
+    repeated fragments, remove the same-page continuation marker and the second
+    fragment's duplicate header/numeric rows, keeping both physical tables. Never
+    reshapes grids, never alters meaningful data rows. Rolls back if a same-page
+    target/marker remains, a data row is lost/duplicated/reordered, a table-start
+    orphan appears, or any rendered deletion regression is detected."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    repaired = 0
+    seen_tables: set[str] = set()
+    for _pass in range(20):
+        try:
+            rendered_violations = _rendered_continuation_violations_for_docx(docx_path)
+        except Exception as exc:
+            logger.info(
+                "same_page_incompatible_cleanup_render_probe_skip path=%s reason=render_failed error=%s",
+                docx_path, exc,
+            )
+            break
+        candidates = [
+            v for v in rendered_violations
+            if getattr(v, "violation_type", None) == "same_page_repeated_fragment"
+        ]
+        if not candidates:
+            break
+        made_progress = False
+        for violation in candidates:
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_same_page_incompatible_"))
+            backup_path = backup_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                doc = Document(str(docx_path))
+                candidate = _incompatible_grid_same_page_cleanup_candidate_from_rendered(
+                    doc, violation, source_docx_path=source_docx_path,
+                )
+                if candidate is None:
+                    continue
+                table_num, first_idx, second_idx, marker_para = candidate
+                if table_num in seen_tables:
+                    continue
+                first = doc.tables[first_idx]
+                second = doc.tables[second_idx]
+                header_fp = _docx_row_fingerprint(first.rows[0])
+                before_data = _same_page_meaningful_row_fps(first, second, header_fp)
+                removed = _remove_second_fragment_duplicate_leading_rows(first, second)
+                if removed <= 0:
+                    continue
+                after_data = _same_page_meaningful_row_fps(first, second, header_fp)
+                if after_data != before_data:
+                    # a meaningful data row would change — refuse
+                    continue
+                if marker_para is not None:
+                    _remove_xml_node(marker_para)
+                _clear_same_page_merge_repeat_metadata(first)
+                _clear_same_page_merge_repeat_metadata(second)
+                doc.save(str(docx_path))
+
+                marker_text = f"Продолжение таблицы {table_num}"
+                if marker_para is not None and _same_page_marker_text_remains(docx_path, marker_text):
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info("same_page_incompatible_cleanup_rollback table_num=%s reason=marker_remains", table_num)
+                    continue
+                if _same_page_rendered_target_remains(docx_path, table_num):
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info("same_page_incompatible_cleanup_rollback table_num=%s reason=same_page_rendered_target_remains", table_num)
+                    continue
+                if _same_table_start_orphan_remains(docx_path, first_idx):
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info("same_page_incompatible_cleanup_rollback table_num=%s reason=table_start_orphan", table_num)
+                    continue
+                regressions = _rendered_continuation_deletion_regressions(docx_path)
+                if regressions:
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info(
+                        "same_page_incompatible_cleanup_rollback table_num=%s reason=rendered_regression violations=%s",
+                        table_num, _format_rendered_deletion_regressions(regressions),
+                    )
+                    continue
+
+                repaired += 1
+                seen_tables.add(table_num)
+                made_progress = True
+                logger.info(
+                    "same_page_incompatible_cleanup_applied table_num=%s first_table=%s second_table=%s removed_rows=%s marker=%s",
+                    table_num, first_idx, second_idx, removed, marker_para is not None,
+                )
+                break
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "same_page_incompatible_cleanup_rollback table_num=%s reason=exception error=%s",
+                    getattr(violation, "table_num", ""), exc,
+                )
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        if not made_progress:
+            break
+    return repaired
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
