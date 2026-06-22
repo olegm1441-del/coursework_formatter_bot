@@ -36,6 +36,11 @@ from .rendered_table_validation import (
     evaluate_table_layout_acceptance,
     validate_rendered_continuations,
 )
+from .document_structure_validation import (
+    evaluate_document_structure,
+    source_has_appendix,
+    source_has_toc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,16 +183,20 @@ def _emit_table_layout_acceptance_warnings(
     output_path: Path,
     report: FormattingReport,
     source_identities: list | None = None,
+    source_text: str | None = None,
 ) -> list[TableLayoutBlocker]:
     """
-    Render the final document once and surface rendered table-layout blockers.
+    Render the final document once and surface rendered table-layout blockers AND
+    document-structure regressions (missing TOC / required sections / appendices).
 
     Visible defects become structured, severity-bearing blockers that are logged
     and added to the user-facing report. ``fail``-level blockers mean the
-    rendered table layout is NO-GO; the smoke/deploy decision reads them via
-    ``evaluate_table_layout_acceptance``. ``format_docx`` still returns the file.
+    rendered output is NO-GO; the smoke/deploy decision reads them via
+    ``evaluate_table_layout_acceptance`` / ``evaluate_document_structure``.
+    ``format_docx`` still returns the file.
     """
     pdf_path: Path | None = None
+    structure_issues = []
     try:
         pdf_path = render_docx_to_pdf(output_path)
         pdf_lines = analyze_pdf_lines(pdf_path)
@@ -196,12 +205,29 @@ def _emit_table_layout_acceptance_warnings(
         blockers = evaluate_table_layout_acceptance(
             pdf_lines, identities, doc=doc, source_identities=source_identities
         )
+        if source_text is not None:
+            structure_issues = evaluate_document_structure(
+                pdf_lines,
+                expect_toc=source_has_toc(source_text),
+                expect_appendix=source_has_appendix(source_text),
+            )
     except Exception:
-        logger.exception("format_docx: table layout acceptance gate failed to evaluate")
+        logger.exception("format_docx: table/structure acceptance gate failed to evaluate")
         return []
     finally:
         if pdf_path is not None:
             shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    for issue in structure_issues:
+        if issue.severity == "fail":
+            report.warn(
+                f"Проверьте структуру документа — нарушение «{issue.issue_type}»"
+                + (f" (стр. {issue.page})" if issue.page else "")
+            )
+        logger.warning(
+            "document_structure_issue type=%s severity=%s page=%s evidence=%s",
+            issue.issue_type, issue.severity, issue.page, issue.evidence,
+        )
 
     fail_count = sum(1 for b in blockers if b.severity == "fail")
     review_count = sum(1 for b in blockers if b.severity == "needs_human_review")
@@ -246,8 +272,11 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         raise ValueError("Поддерживаются только .docx файлы")
 
     report = FormattingReport()
+    source_text: str | None = None
     try:
-        source_table_identities = build_rendered_table_identities(Document(str(input_path)))
+        source_doc = Document(str(input_path))
+        source_table_identities = build_rendered_table_identities(source_doc)
+        source_text = "\n".join((p.text or "") for p in source_doc.paragraphs)
     except Exception:
         source_table_identities = None
 
@@ -529,6 +558,8 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # layout defects (same-page continuation, orphaned header, grid mismatch,
     # appendix not on a new page, severe squeeze) as structured blockers in the
     # report + logs. fail-level blockers mean the rendered layout is NO-GO.
-    _emit_table_layout_acceptance_warnings(output_path, report, source_identities=source_table_identities)
+    _emit_table_layout_acceptance_warnings(
+        output_path, report, source_identities=source_table_identities, source_text=source_text
+    )
 
     return str(output_path), report.warnings
