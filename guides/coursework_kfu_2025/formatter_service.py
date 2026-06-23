@@ -23,6 +23,7 @@ from .table_continuation import (
     normalize_exact_grid_same_page_repeated_fragments_inplace,
     normalize_compatible_grid_same_page_repeated_fragments_inplace,
     cleanup_same_page_incompatible_chains_inplace,
+    cleanup_same_page_continuation_blockers_inplace,
     apply_rendered_table_start_orphan_guard,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
@@ -477,6 +478,26 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
                 )
         except Exception:
             logger.exception("format_docx: incompatible-grid same-page cleanup failed")
+
+    # Deterministic same-page manual continuation cleanup, driven by the
+    # acceptance-gate `same_page_continuation` blocker (reliable table+page) — not
+    # by the narrower `same_page_repeated_fragment` signal. Merges compatible-grid
+    # chains, else drops the same-page marker + duplicate header keeping both
+    # tables. Every applied cleanup is re-render verified (removes the fail, adds
+    # no new fail, preserves all content) or rolled back.
+    try:
+        n_sp_cont = cleanup_same_page_continuation_blockers_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_sp_cont:
+            logger.info(
+                "format_docx: cleaned %d same-page continuation chain(s)",
+                n_sp_cont,
+            )
+    except Exception:
+        logger.exception("format_docx: same-page continuation cleanup failed")
 
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(

@@ -157,9 +157,72 @@ def test_candidate_skips_when_second_starts_with_data() -> tuple[bool, str]:
     return _result(True, "candidate skips when second fragment starts with data")
 
 
+def _chain_doc(num="1.3.1", second_first_row=None):
+    """caption -> table(header+data) -> 'Продолжение таблицы N' -> table(dup header+data)."""
+    doc = Document()
+    doc.add_paragraph(f"Таблица {num}")
+    _mk_table(doc, [["Орган", "Функция", "Срок"],
+                    ["совет", "надзор за правлением", "ежегодно"]], [3000, 3000, 3000])
+    doc.add_paragraph(f"Продолжение таблицы {num}")
+    second = second_first_row or ["Орган", "Функция", "Срок"]
+    _mk_table(doc, [second,
+                    ["правление", "оперативное управление", "ежеквартально"]], [2200, 3600, 3200])
+    return doc
+
+
+def test_continuation_candidate_found_from_table_num() -> tuple[bool, str]:
+    # candidate is located from the same_page_continuation table number via its
+    # marker — independent of any `same_page_repeated_fragment` signal
+    saved = tc._source_has_meaningful_duplicate_for_table
+    tc._source_has_meaningful_duplicate_for_table = lambda *a, **k: False
+    try:
+        doc = _chain_doc("1.3.1")
+        cand = tc._same_page_continuation_cleanup_candidate(doc, "1.3.1", source_docx_path=None)
+    finally:
+        tc._source_has_meaningful_duplicate_for_table = saved
+    if cand is None:
+        return _result(False, "candidate not found from table number + marker")
+    first_idx, second_idx, marker_para = cand
+    if (first_idx, second_idx) != (0, 1) or marker_para is None:
+        return _result(False, f"wrong candidate: {(first_idx, second_idx, marker_para is not None)}")
+    return _result(True, "same-page continuation candidate found from acceptance-blocker table number")
+
+
+def test_continuation_candidate_requires_marker() -> tuple[bool, str]:
+    saved = tc._source_has_meaningful_duplicate_for_table
+    tc._source_has_meaningful_duplicate_for_table = lambda *a, **k: False
+    try:
+        doc = Document()
+        doc.add_paragraph("Таблица 1.3.1")
+        _mk_table(doc, [["Орган", "Функция"], ["совет", "надзор"]], [3000, 3000])
+        # no marker, just a following table
+        _mk_table(doc, [["Орган", "Функция"], ["правление", "управление"]], [3000, 3000])
+        cand = tc._same_page_continuation_cleanup_candidate(doc, "1.3.1", source_docx_path=None)
+    finally:
+        tc._source_has_meaningful_duplicate_for_table = saved
+    if cand is not None:
+        return _result(False, "candidate must require a continuation marker")
+    return _result(True, "no marker -> no continuation cleanup candidate")
+
+
+def test_continuation_candidate_skips_source_bad() -> tuple[bool, str]:
+    saved = tc._source_has_meaningful_duplicate_for_table
+    tc._source_has_meaningful_duplicate_for_table = lambda *a, **k: True
+    try:
+        cand = tc._same_page_continuation_cleanup_candidate(_chain_doc("1.3.1"), "1.3.1", source_docx_path=None)
+    finally:
+        tc._source_has_meaningful_duplicate_for_table = saved
+    if cand is not None:
+        return _result(False, "source-bad table must not be a cleanup candidate")
+    return _result(True, "source-bad table skipped by continuation cleanup candidate")
+
+
 def main() -> int:
     tests = [
         ("remove dup leading rows preserves data", test_remove_duplicate_leading_rows_preserves_data),
+        ("continuation candidate from table_num", test_continuation_candidate_found_from_table_num),
+        ("continuation candidate requires marker", test_continuation_candidate_requires_marker),
+        ("continuation candidate skips source-bad", test_continuation_candidate_skips_source_bad),
         ("removal never empties/drops data", test_remove_never_empties_or_drops_data),
         ("candidate fires on incompatible chain", test_candidate_fires_on_incompatible_marker_chain),
         ("candidate skips source-bad", test_candidate_skips_source_bad),

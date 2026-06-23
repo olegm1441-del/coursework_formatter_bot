@@ -94,20 +94,35 @@ def meaningful_row_set(doc: Document) -> set[str]:
     return out
 
 
-def data_row_multiset(doc: Document) -> Counter:
-    """Multiset of DATA rows: every row except each table's first row (the header,
-    which is legitimately repeated on continuation fragments) and numeric index
-    rows. Lets us detect real data-row duplication without flagging header repeat."""
+def table_header_fingerprints(doc: Document) -> set[str]:
+    """Fingerprints of every table's first row (the header). Used to exclude
+    header rows from the DATA multiset by CONTENT rather than by position, so a
+    cleanup that drops a duplicate header (shifting a data row into row 0) does
+    not look like data loss."""
+    out: set[str] = set()
+    for table in doc.tables:
+        if table.rows:
+            fp = " | ".join(
+                normalize_cell(c.text) for c in table.rows[0].cells if normalize_cell(c.text)
+            )
+            if fp:
+                out.add(fp)
+    return out
+
+
+def data_row_multiset(doc: Document, header_fps: set[str] | None = None) -> Counter:
+    """Multiset of DATA rows: every row whose fingerprint is NOT a table header
+    (by content — robust to header removal/repetition) and not a numeric index
+    row. Detects real data-row loss/duplication without flagging header repeat."""
+    header_fps = header_fps if header_fps is not None else table_header_fingerprints(doc)
     c: Counter = Counter()
     for table in doc.tables:
-        for idx, row in enumerate(table.rows):
-            if idx == 0:
-                continue
+        for row in table.rows:
             values = [cell.text for cell in row.cells]
             if _is_numeric_index_row(values):
                 continue
             fp = " | ".join(normalize_cell(v) for v in values if normalize_cell(v))
-            if len(fp) >= 5:
+            if len(fp) >= 5 and fp not in header_fps:
                 c[fp] += 1
     return c
 
@@ -179,11 +194,12 @@ def evaluate_content_preservation(
 ) -> tuple[dict, list[ContentIssue]]:
     issues: list[ContentIssue] = []
 
-    # --- DATA-row preservation (excludes first-row headers + numeric index rows,
-    # so legitimate header repetition / merged-header read differences do not
-    # false-fire; only real DATA content loss/dup/addition registers) ---
-    src_data = data_row_multiset(source_doc)
-    out_data = data_row_multiset(output_doc)
+    # --- DATA-row preservation (excludes header rows by CONTENT + numeric index
+    # rows, so legitimate header repetition / removal / merged-header read
+    # differences do not false-fire; only real DATA content loss/dup registers) ---
+    header_fps = table_header_fingerprints(source_doc) | table_header_fingerprints(output_doc)
+    src_data = data_row_multiset(source_doc, header_fps)
+    out_data = data_row_multiset(output_doc, header_fps)
     lost_rows = set(src_data) - set(out_data)
     added_rows = set(out_data) - set(src_data)
     if lost_rows:

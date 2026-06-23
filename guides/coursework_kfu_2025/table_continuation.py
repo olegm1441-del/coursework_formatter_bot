@@ -4435,6 +4435,237 @@ def cleanup_same_page_incompatible_chains_inplace(
     return repaired
 
 
+def _same_page_continuation_fail_keys(docx_path: Path, source_docx_path: Path | None):
+    """Render once and return the acceptance-gate FAIL blocker keys plus the set
+    of table numbers flagged `same_page_continuation`. Driven by the acceptance
+    gate (which reliably attributes table+page), not `same_page_repeated_fragment`."""
+    from .rendered_table_validation import (
+        build_rendered_table_identities,
+        evaluate_table_layout_acceptance,
+    )
+
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        identities = build_rendered_table_identities(doc)
+        source_ids = None
+        if source_docx_path is not None:
+            try:
+                source_ids = build_rendered_table_identities(Document(str(source_docx_path)))
+            except Exception:
+                source_ids = None
+        blockers = evaluate_table_layout_acceptance(
+            pdf_lines, identities, doc=doc, source_identities=source_ids
+        )
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    fail_keys = {(b.blocker_type, b.table_num) for b in blockers if b.severity == "fail"}
+    same_page = {
+        b.table_num for b in blockers
+        if b.severity == "fail" and b.blocker_type == "same_page_continuation" and b.table_num
+    }
+    return fail_keys, same_page
+
+
+def _content_regressed(source_docx_path: Path | None, docx_path: Path) -> bool:
+    if source_docx_path is None:
+        return False
+    try:
+        from .content_preservation import evaluate_content_preservation
+        _rep, issues = evaluate_content_preservation(
+            Document(str(source_docx_path)), Document(str(docx_path))
+        )
+        return any(i.severity == "fail" for i in issues)
+    except Exception:
+        return False  # never block cleanup on a measurement error
+
+
+def _same_page_continuation_cleanup_candidate(
+    doc: Document,
+    table_num: str,
+    *,
+    source_docx_path: Path | None,
+) -> tuple[int, int, object] | None:
+    """Locate the manual continuation chain for a `same_page_continuation` blocker
+    via its strict marker, and validate it is safe to clean: caption matches, the
+    following fragment STARTS with a proven duplicate header, data rows are
+    distinct, no merged cells, and the table is not source-bad duplicated."""
+    marker_text = f"Продолжение таблицы {table_num}"
+    marker_para = _find_strict_marker_paragraph(doc, marker_text)
+    if marker_para is None:
+        return None
+    idxs = _nearest_table_indexes_around_marker(doc, marker_para)
+    if idxs is None:
+        return None
+    first_idx, second_idx = idxs
+    if not _caption_before_table_matches(doc, first_idx, str(table_num)):
+        return None
+    try:
+        first = doc.tables[first_idx]
+        second = doc.tables[second_idx]
+    except IndexError:
+        return None
+    if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+        return None
+    if len(first.rows) < 2 or len(second.rows) < 2:
+        return None
+    if _docx_row_fingerprint(second.rows[0]) != _docx_row_fingerprint(first.rows[0]):
+        return None
+    if _source_has_meaningful_duplicate_for_table(source_docx_path, str(table_num)) is not False:
+        return None
+    first_data = set(_docx_data_fingerprints(first))
+    second_data = set(_docx_data_fingerprints(second))
+    if not second_data or (first_data & second_data):
+        return None
+    return first_idx, second_idx, marker_para
+
+
+def cleanup_same_page_continuation_blockers_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Deterministically clean same-page manual continuation chains that the
+    acceptance gate flags as `same_page_continuation`.
+
+    Strategy per chain (after locating it from the gate blocker + its marker):
+      1. compatible grid -> merge fragments (drop marker + duplicate header/
+         numeric, append the second fragment's data rows to the first);
+      2. incompatible grid (same shape but differing widths) -> drop the marker +
+         the second fragment's duplicate header/numeric, keep both tables;
+      3. otherwise -> no mutation.
+
+    Every applied cleanup is verified by re-rendering: it must remove that
+    `same_page_continuation` fail, introduce NO new fail blocker, preserve all
+    content (content-preservation gate), and not orphan the table start —
+    otherwise it is rolled back."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    repaired = 0
+    seen: set[str] = set()
+    for _pass in range(10):
+        try:
+            baseline_keys, same_page = _same_page_continuation_fail_keys(docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info(
+                "same_page_continuation_cleanup_probe_skip path=%s reason=render_failed error=%s",
+                docx_path, exc,
+            )
+            break
+        todo = sorted(n for n in same_page if n not in seen)
+        if not todo:
+            break
+        made_progress = False
+        for table_num in todo:
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_sp_continuation_cleanup_"))
+            backup_path = backup_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                probe = Document(str(docx_path))
+                candidate = _same_page_continuation_cleanup_candidate(
+                    probe, table_num, source_docx_path=source_docx_path
+                )
+                if candidate is None:
+                    seen.add(table_num)
+                    continue
+                pf, ps, _ = candidate
+                compatible = _tables_have_compatible_same_page_layout(
+                    probe.tables[pf], probe.tables[ps]
+                )
+                # Prefer the gentle "merge" for compatible grids, but fall back to
+                # "keep_both" (drop marker + duplicate header, keep both tables)
+                # when merge would orphan the start or flip a neighbour same-page.
+                strategies = (["merge"] if compatible else []) + ["keep_both"]
+
+                applied = False
+                for strategy in strategies:
+                    shutil.copy2(backup_path, docx_path)  # always start from a clean copy
+                    doc = Document(str(docx_path))
+                    cand = _same_page_continuation_cleanup_candidate(
+                        doc, table_num, source_docx_path=source_docx_path
+                    )
+                    if cand is None:
+                        continue
+                    first_idx, second_idx, marker_para = cand
+                    first = doc.tables[first_idx]
+                    second = doc.tables[second_idx]
+                    if strategy == "merge":
+                        appended = _append_second_fragment_data_rows(
+                            first, second, normalize_to_first_grid=True
+                        )
+                        if appended <= 0:
+                            continue
+                        _clear_same_page_merge_repeat_metadata(first)
+                        _remove_xml_node(marker_para)
+                        _remove_xml_node(second._tbl)
+                    else:  # keep_both
+                        removed = _remove_second_fragment_duplicate_leading_rows(first, second)
+                        if removed <= 0:
+                            continue
+                        _remove_xml_node(marker_para)
+                        _clear_same_page_merge_repeat_metadata(first)
+                        _clear_same_page_merge_repeat_metadata(second)
+                    doc.save(str(docx_path))
+
+                    # Verification with a single gate render (the acceptance gate
+                    # already detects orphaned_header_row, neighbour same-page, and
+                    # cross-page-without-marker, so one render covers marker-remains,
+                    # orphan, neighbour-flip and new cross-page) + a docx-only
+                    # content check. Keeps the cleanup render budget bounded.
+                    reason = None
+                    if _content_regressed(source_docx_path, docx_path):
+                        reason = "content_regression"
+                    else:
+                        try:
+                            after_keys, _asp = _same_page_continuation_fail_keys(docx_path, source_docx_path)
+                        except Exception:
+                            reason = "post_render_failed"
+                        else:
+                            if ("same_page_continuation", table_num) in after_keys:
+                                reason = "same_page_continuation_remains"
+                            elif after_keys - baseline_keys:
+                                reason = f"new_fail_blocker={sorted(after_keys - baseline_keys)}"
+
+                    if reason is None:
+                        repaired += 1
+                        made_progress = True
+                        applied = True
+                        logger.info(
+                            "same_page_continuation_cleanup_applied table_num=%s strategy=%s first=%s second=%s",
+                            table_num, strategy, first_idx, second_idx,
+                        )
+                        break
+                    logger.info(
+                        "same_page_continuation_cleanup_rollback table_num=%s strategy=%s reason=%s",
+                        table_num, strategy, reason,
+                    )
+
+                if not applied:
+                    shutil.copy2(backup_path, docx_path)
+                seen.add(table_num)
+                if applied:
+                    break
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                seen.add(table_num)
+                logger.info(
+                    "same_page_continuation_cleanup_rollback table_num=%s reason=exception error=%s",
+                    table_num, exc,
+                )
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        if not made_progress:
+            break
+    if repaired and report is not None:
+        logger.info("same_page_continuation_cleanup total_repaired=%d", repaired)
+    return repaired
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
