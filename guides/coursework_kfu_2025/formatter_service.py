@@ -458,10 +458,11 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # drop the same-page marker + the second fragment's duplicate header/numeric,
     # keep both physical tables. Cleanup only; never reshapes grids or data rows.
     #
-    # Gated to the experimental path: its trigger relies on an internal render of
-    # marginal student chains placed right at page boundaries, which makes the
-    # formatted output non-reproducible across runs. Conservative default keeps
-    # the stable baseline output; a deterministic DOCX-level trigger is Stage D.
+    # Gated to the experimental path. Verified (this round, Bondarev 3×) that it
+    # does NOT fire for the remaining incompatible student chains (1.3.1/2.1.4/
+    # 2.1.5) — their internal render does not emit a `same_page_repeated_fragment`
+    # candidate — so enabling it by default only adds a render with no benefit.
+    # A deterministic DOCX-level trigger is the Stage D follow-up.
     if _rendered_table_continuation_enabled():
         try:
             n_incompatible = cleanup_same_page_incompatible_chains_inplace(
