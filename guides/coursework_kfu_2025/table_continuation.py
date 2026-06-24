@@ -4484,6 +4484,23 @@ def _content_regressed(source_docx_path: Path | None, docx_path: Path) -> bool:
         return False  # never block cleanup on a measurement error
 
 
+def _force_marker_page_break(marker_para) -> None:
+    """Force the marker paragraph onto a new page: pageBreakBefore + keepNext set
+    ACTIVE (val='true'), overriding any earlier val='0' that an upstream pass left
+    (that disabled flag is exactly why these markers still render same-page). No
+    rows/grid touched — the repeated header becomes a valid continuation header."""
+    pPr = marker_para.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        marker_para.insert(0, pPr)
+    for tag in ("w:pageBreakBefore", "w:keepNext"):
+        el = pPr.find(qn(tag))
+        if el is None:
+            el = OxmlElement(tag)
+            pPr.append(el)
+        el.set(qn("w:val"), "true")
+
+
 def _same_page_continuation_cleanup_candidate(
     doc: Document,
     table_num: str,
@@ -4577,10 +4594,14 @@ def cleanup_same_page_continuation_blockers_inplace(
                 compatible = _tables_have_compatible_same_page_layout(
                     probe.tables[pf], probe.tables[ps]
                 )
-                # Prefer the gentle "merge" for compatible grids, but fall back to
-                # "keep_both" (drop marker + duplicate header, keep both tables)
-                # when merge would orphan the start or flip a neighbour same-page.
-                strategies = (["merge"] if compatible else []) + ["keep_both"]
+                # Strategy order (reference fixture): prefer the gentle "merge"
+                # for compatible grids; else "keep_both" (drop marker + duplicate
+                # header, keep both tables); else the "page_break" fallback — force
+                # the EXISTING marker to a new page (pageBreakBefore+keepNext) so
+                # the marker + continuation fragment move together to the next
+                # page, leaving the repeated header valid. The fallback changes no
+                # grid and deletes no rows.
+                strategies = (["merge"] if compatible else []) + ["keep_both", "page_break"]
 
                 applied = False
                 for strategy in strategies:
@@ -4603,13 +4624,15 @@ def cleanup_same_page_continuation_blockers_inplace(
                         _clear_same_page_merge_repeat_metadata(first)
                         _remove_xml_node(marker_para)
                         _remove_xml_node(second._tbl)
-                    else:  # keep_both
+                    elif strategy == "keep_both":
                         removed = _remove_second_fragment_duplicate_leading_rows(first, second)
                         if removed <= 0:
                             continue
                         _remove_xml_node(marker_para)
                         _clear_same_page_merge_repeat_metadata(first)
                         _clear_same_page_merge_repeat_metadata(second)
+                    else:  # page_break: keep marker + both fragments + repeated header
+                        _force_marker_page_break(marker_para)
                     doc.save(str(docx_path))
 
                     # Verification with a single gate render (the acceptance gate

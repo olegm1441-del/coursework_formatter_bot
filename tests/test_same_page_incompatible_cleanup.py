@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
+from docx.oxml import OxmlElement  # noqa: E402
 import guides.coursework_kfu_2025.table_continuation as tc  # noqa: E402
 
 
@@ -217,9 +218,50 @@ def test_continuation_candidate_skips_source_bad() -> tuple[bool, str]:
     return _result(True, "source-bad table skipped by continuation cleanup candidate")
 
 
+def _marker_pbb_keepnext(p_elem):
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is None:
+        return (None, None)
+    def _val(tag):
+        el = pPr.find(qn(tag))
+        if el is None:
+            return None
+        return el.get(qn("w:val")) or "true"  # bare element == active
+    return _val("w:pageBreakBefore"), _val("w:keepNext")
+
+
+def test_force_marker_page_break_sets_active() -> tuple[bool, str]:
+    doc = Document()
+    p = doc.add_paragraph("Продолжение таблицы 1.3.1")
+    tc._force_marker_page_break(p._p)
+    pbb, keepn = _marker_pbb_keepnext(p._p)
+    if pbb not in ("true", "1") or keepn not in ("true", "1"):
+        return _result(False, f"page break/keepNext not active: pbb={pbb} keepNext={keepn}")
+    return _result(True, "page-break fallback sets pageBreakBefore + keepNext active")
+
+
+def test_force_marker_page_break_overrides_disabled() -> tuple[bool, str]:
+    # the real bug: an upstream pass left pageBreakBefore val='0' (disabled)
+    doc = Document()
+    p = doc.add_paragraph("Продолжение таблицы 1.3.1")
+    pPr = p._p.get_or_add_pPr()
+    el = OxmlElement("w:pageBreakBefore"); el.set(qn("w:val"), "0"); pPr.append(el)
+    tc._force_marker_page_break(p._p)
+    pbb, _ = _marker_pbb_keepnext(p._p)
+    # exactly one pageBreakBefore element, now active
+    count = len(pPr.findall(qn("w:pageBreakBefore")))
+    if pbb not in ("true", "1"):
+        return _result(False, f"disabled pageBreakBefore not overridden to active: {pbb}")
+    if count != 1:
+        return _result(False, f"expected exactly one pageBreakBefore element, got {count}")
+    return _result(True, "page-break fallback overrides a disabled (val='0') pageBreakBefore")
+
+
 def main() -> int:
     tests = [
         ("remove dup leading rows preserves data", test_remove_duplicate_leading_rows_preserves_data),
+        ("force marker page break active", test_force_marker_page_break_sets_active),
+        ("force marker page break overrides disabled", test_force_marker_page_break_overrides_disabled),
         ("continuation candidate from table_num", test_continuation_candidate_found_from_table_num),
         ("continuation candidate requires marker", test_continuation_candidate_requires_marker),
         ("continuation candidate skips source-bad", test_continuation_candidate_skips_source_bad),
