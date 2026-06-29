@@ -1034,6 +1034,40 @@ def _squeeze_blockers(
     return out
 
 
+def _semantic_header_on_continuation_blockers(
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    """Canonical KFU continuation rule: a `Продолжение таблицы N` fragment must
+    repeat ONLY the numeric column row (`1 2 3 ... N`), never the semantic header
+    row(s) or the caption/title. ``header_fingerprint`` collects the non-numeric
+    rows that appear BEFORE the first numeric row, so a continuation fragment
+    (``preceding_marker`` set) with a NON-empty ``header_fingerprint`` still
+    carries a semantic header above its numeric row — a fail. Rybakov-style valid
+    continuations start with the numeric row, so their ``header_fingerprint`` is
+    empty and they never fire."""
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        if not identity.preceding_marker or identity.caption_num:
+            continue
+        if not identity.header_fingerprint:
+            continue  # starts with the numeric row (or data) — canonical
+        m = _ANY_MARKER_RE.search(identity.preceding_marker)
+        num = m.group(1) if m else None
+        out.append(
+            TableLayoutBlocker(
+                blocker_type="semantic_header_repeated_on_continuation",
+                severity="fail",
+                table_num=num,
+                page=0,
+                evidence={
+                    "marker": _snippet(identity.preceding_marker),
+                    "repeated_header": _snippet(" | ".join(identity.header_fingerprint)),
+                },
+            )
+        )
+    return out
+
+
 def evaluate_table_layout_acceptance(
     pdf_lines: list[PdfLine],
     table_identities: list[RenderedTableIdentity],
@@ -1067,6 +1101,7 @@ def evaluate_table_layout_acceptance(
         if (b.table_num, b.page) not in sp_keys
     )
     blockers.extend(_cross_page_without_marker_blockers(pdf_lines, table_identities))
+    blockers.extend(_semantic_header_on_continuation_blockers(table_identities))
     blockers.extend(_orphaned_header_blockers(pdf_lines, table_identities))
     blockers.extend(_appendix_label_blockers(pdf_lines))
     blockers.extend(_squeeze_blockers(pdf_lines, table_identities))

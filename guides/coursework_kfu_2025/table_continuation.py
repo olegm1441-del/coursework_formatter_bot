@@ -4256,21 +4256,21 @@ def _same_page_meaningful_row_fps(first, second, header_fp: str) -> list[str]:
 
 
 def _remove_second_fragment_duplicate_leading_rows(first, second) -> int:
-    """Remove the second fragment's LEADING rows that merely duplicate the first
-    fragment's header / numeric row. Stops at the first non-duplicate (data) row
-    so meaningful data is never removed, and never empties the table."""
+    """Remove the second fragment's LEADING duplicate SEMANTIC HEADER row(s) so it
+    starts with the numeric column row (canonical KFU continuation: numeric row,
+    not semantic header). The numeric row is KEPT. Stops at the first numeric or
+    data row so meaningful data is never removed, and never empties the table."""
     if not first.rows or not second.rows:
         return 0
     first_header_fp = _docx_row_fingerprint(first.rows[0])
-    first_has_numeric = _docx_table_has_numeric_row(first)
     removed = 0
     while len(second.rows) > 1:
         row = second.rows[0]
         values = _docx_row_cell_texts(row)
-        is_dup_header = _docx_row_fingerprint(row) == first_header_fp
-        is_dup_numeric = _is_docx_numeric_row(values) and first_has_numeric
-        if not (is_dup_header or is_dup_numeric):
-            break
+        if _is_docx_numeric_row(values):
+            break  # numeric row is the canonical continuation lead — keep it
+        if _docx_row_fingerprint(row) != first_header_fp:
+            break  # reached a data row
         _remove_xml_node(row._tr)
         removed += 1
     return removed
@@ -4837,6 +4837,44 @@ def _cross_page_split_candidate(
     return None
 
 
+def _set_tc_number_text(tc_xml, text: str) -> None:
+    """Replace a table cell's text with ``text``, preserving the first run's
+    properties (font) when present. Used to build a synthesized numeric column
+    row from a cloned template row."""
+    paras = tc_xml.findall(qn("w:p"))
+    first = paras[0] if paras else None
+    if first is None:
+        first = OxmlElement("w:p")
+        tc_xml.append(first)
+    for extra in paras[1:]:
+        tc_xml.remove(extra)
+    runs = first.findall(qn("w:r"))
+    if runs:
+        keep = runs[0]
+        for extra in runs[1:]:
+            first.remove(extra)
+        for t in keep.findall(qn("w:t")):
+            keep.remove(t)
+        t = OxmlElement("w:t")
+        t.text = text
+        keep.append(t)
+    else:
+        r = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.text = text
+        r.append(t)
+        first.append(r)
+
+
+def _synthesize_numeric_row_xml(template_tr):
+    """Clone a real row (keeping cell structure / widths / formatting) and set its
+    cells to the KFU numeric column index ``1 2 ... N``."""
+    new = deepcopy(template_tr)
+    for i, tc in enumerate(new.findall(qn("w:tc"))):
+        _set_tc_number_text(tc, str(i + 1))
+    return new
+
+
 def _split_cross_page_table_with_marker(
     doc: Document,
     table_idx: int,
@@ -4846,44 +4884,46 @@ def _split_cross_page_table_with_marker(
     numeric_row_idx: int | None,
 ) -> bool:
     """Split ``doc.tables[table_idx]`` after row ``split_after`` into two physical
-    fragments, inserting a page-broken ``Продолжение таблицы N`` marker and a
-    continuation table that repeats the header (and the numeric row when given).
-    Grid widths are inherited verbatim (the continuation table is a structural
-    clone). Источник:/Примечание: that followed the original table stay after the
-    continuation (final) fragment because they sit after it in body order."""
+    fragments per the canonical KFU rule. The continuation fragment repeats ONLY
+    the numeric column row (``1 2 ... N``) followed by data — NEVER the semantic
+    header, caption or title. The first fragment keeps caption/header + numeric
+    row + data; when the source has no numeric row one is synthesized into BOTH
+    fragments. Grid widths are inherited verbatim. Источник:/Примечание: that
+    followed the original table stay after the continuation (final) fragment."""
     tbl_xml = doc.tables[table_idx]._tbl
     rows = tbl_xml.findall(qn("w:tr"))
     if split_after < 1 or split_after >= len(rows) - 1:
         return False
 
-    repeat_idxs = [0]
-    if numeric_row_idx is not None and 0 < numeric_row_idx <= split_after:
-        repeat_idxs.append(numeric_row_idx)
-    leading = [deepcopy(rows[i]) for i in repeat_idxs]
     tail_rows = [deepcopy(r) for r in rows[split_after + 1:]]
     if not tail_rows:
         return False
 
+    if numeric_row_idx is not None and 0 < numeric_row_idx <= split_after:
+        numeric_for_continuation = deepcopy(rows[numeric_row_idx])
+        numeric_for_first = None  # already present in the first fragment
+    else:
+        # no numeric row in the source — synthesize from a data-row template
+        # (normal formatting) for BOTH fragments.
+        numeric_for_continuation = _synthesize_numeric_row_xml(rows[split_after])
+        numeric_for_first = _synthesize_numeric_row_xml(rows[split_after])
+
+    # continuation fragment: numeric row first, then data rows (NO semantic header)
     tbl2 = deepcopy(tbl_xml)
     for tr in list(tbl2.findall(qn("w:tr"))):
         tbl2.remove(tr)
-    for tr in leading:
-        tbl2.append(tr)
+    tbl2.append(numeric_for_continuation)
     for tr in tail_rows:
         tbl2.append(tr)
 
-    # mark the repeated header row as a table header (re-renders on the new page).
-    header_row = tbl2.findall(qn("w:tr"))[0]
-    trPr = header_row.find(qn("w:trPr"))
-    if trPr is None:
-        trPr = OxmlElement("w:trPr")
-        header_row.insert(0, trPr)
-    if trPr.find(qn("w:tblHeader")) is None:
-        trPr.append(OxmlElement("w:tblHeader"))
-
-    # trim the first fragment.
+    # trim the first fragment
     for tr in rows[split_after + 1:]:
         tbl_xml.remove(tr)
+
+    # ensure the first fragment carries the numeric row (right after the header)
+    if numeric_for_first is not None:
+        first_rows = tbl_xml.findall(qn("w:tr"))
+        first_rows[0].addnext(numeric_for_first)
 
     marker = _build_continuation_para(f"Продолжение таблицы {table_num}")
     tbl_xml.addnext(marker)
@@ -5074,6 +5114,189 @@ def cleanup_cross_page_without_marker_blockers_inplace(
             break
     if repaired:
         logger.info("cross_page_split total_repaired=%d", repaired)
+    return repaired
+
+
+# ── Continuation semantic-header normalizer (canonical KFU rule) ──────────────
+#
+# A `Продолжение таблицы N` fragment must repeat ONLY the numeric column row
+# (`1 2 ... N`), never the semantic header / caption / title (Rybakov gold).
+# Existing manual chains (student-authored) often duplicate the semantic header
+# above the numeric row — strip that leading duplicate header so the fragment
+# starts with the numeric row. Content-safe (a duplicate header row is excluded
+# from the content gate); rolled back if a re-render adds any new fail blocker.
+
+
+def _iter_continuation_chains(doc: Document):
+    """Yield (first_table_idx, marker_para_xml, second_table_idx, num) for each
+    ``tbl -> 'Продолжение таблицы N' -> tbl`` chain, in body order."""
+    body = list(doc.element.body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+    tbl_index = {t._tbl: i for i, t in enumerate(doc.tables)}
+    for i, ch in enumerate(body):
+        if ch.tag != qn("w:p"):
+            continue
+        para = para_by_xml.get(ch)
+        num = _strict_marker_table_num(para.text if para is not None else "")
+        if not num:
+            continue
+        first_idx = next(
+            (tbl_index[body[k]] for k in range(i - 1, -1, -1)
+             if body[k].tag == qn("w:tbl") and body[k] in tbl_index),
+            None,
+        )
+        second_idx = next(
+            (tbl_index[body[k]] for k in range(i + 1, min(i + 3, len(body)))
+             if body[k].tag == qn("w:tbl") and body[k] in tbl_index),
+            None,
+        )
+        if first_idx is None or second_idx is None:
+            continue
+        yield first_idx, ch, second_idx, num
+
+
+def _continuation_starts_with_semantic_header(first, second) -> bool:
+    if not first.rows or not second.rows:
+        return False
+    v0 = _docx_row_cell_texts(second.rows[0])
+    if _is_docx_numeric_row(v0):
+        return False  # already canonical
+    return _docx_row_fingerprint(second.rows[0]) == _docx_row_fingerprint(first.rows[0])
+
+
+def _strip_continuation_semantic_headers(doc: Document, only_num: str | None = None) -> int:
+    """Remove the leading duplicate semantic header row(s) from continuation
+    fragments so each starts with the numeric row; if no numeric row follows,
+    insert the first fragment's numeric row (or a synthesized one). Never removes
+    a data row; never empties a table; skips merged-cell fragments. When
+    ``only_num`` is given, only that chain is touched."""
+    fixed = 0
+    for first_idx, _marker, second_idx, num in _iter_continuation_chains(doc):
+        if only_num is not None and num != only_num:
+            continue
+        try:
+            first = doc.tables[first_idx]
+            second = doc.tables[second_idx]
+        except IndexError:
+            continue
+        if _table_has_merged_cells_docx(second):
+            continue
+        if not _continuation_starts_with_semantic_header(first, second):
+            continue
+        header_fp = _docx_row_fingerprint(first.rows[0])
+        removed = 0
+        while len(second.rows) > 1:
+            r0 = second.rows[0]
+            if _is_docx_numeric_row(_docx_row_cell_texts(r0)):
+                break
+            if _docx_row_fingerprint(r0) != header_fp:
+                break
+            _remove_xml_node(r0._tr)
+            removed += 1
+        if removed <= 0:
+            continue
+        # ensure a numeric row leads the continuation fragment
+        if not (second.rows and _is_docx_numeric_row(_docx_row_cell_texts(second.rows[0]))):
+            num_tr = None
+            for r in first.rows:
+                if _is_docx_numeric_row(_docx_row_cell_texts(r)):
+                    num_tr = deepcopy(r._tr)
+                    break
+            if num_tr is None and second.rows:
+                num_tr = _synthesize_numeric_row_xml(second.rows[0]._tr)
+            if num_tr is not None and second.rows:
+                second.rows[0]._tr.addprevious(num_tr)
+        fixed += 1
+    return fixed
+
+
+def normalize_continuation_semantic_header_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Enforce the canonical KFU continuation rule on existing manual chains:
+    strip the duplicate semantic header from each `Продолжение таблицы N` fragment
+    so it starts with the numeric column row. Deterministic + content-safe, and
+    verified PER CHAIN: a chain is accepted only if its
+    `semantic_header_repeated_on_continuation` fail clears, content is preserved,
+    and the re-render adds NO new fail blocker (e.g. a pagination flip) — else
+    that chain is rolled back. At most one accepted fix per pass, then re-probe
+    because removing a row shifts pagination for the remaining chains."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    repaired = 0
+    seen: set[str] = set()
+    for _pass in range(12):
+        try:
+            baseline_keys, _c, _l = _cross_page_without_marker_probe(docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info("continuation_header_normalize_skip reason=render_failed error=%s", exc)
+            break
+        try:
+            probe = Document(str(docx_path))
+        except Exception:
+            break
+        targets = sorted({
+            num for f, _m, s, num in _iter_continuation_chains(probe)
+            if num not in seen
+            and _continuation_starts_with_semantic_header(probe.tables[f], probe.tables[s])
+        })
+        if not targets:
+            break
+        made_progress = False
+        for num in targets:
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_cont_header_norm_"))
+            backup_path = backup_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                doc = Document(str(docx_path))
+                if _strip_continuation_semantic_headers(doc, only_num=num) <= 0:
+                    seen.add(num)
+                    continue
+                doc.save(str(docx_path))
+
+                reason = None
+                if _content_regressed(source_docx_path, docx_path):
+                    reason = "content_regression"
+                else:
+                    try:
+                        after_keys, _c2, _l2 = _cross_page_without_marker_probe(
+                            docx_path, source_docx_path
+                        )
+                    except Exception:
+                        reason = "post_render_failed"
+                    else:
+                        if ("semantic_header_repeated_on_continuation", num) in after_keys:
+                            reason = "header_remains"
+                        elif after_keys - baseline_keys:
+                            reason = f"new_fail_blocker={sorted(after_keys - baseline_keys)}"
+
+                if reason is None:
+                    repaired += 1
+                    made_progress = True
+                    seen.add(num)
+                    logger.info("continuation_header_normalize_applied table_num=%s", num)
+                    break  # re-probe — pagination shifted
+                shutil.copy2(backup_path, docx_path)
+                seen.add(num)
+                logger.info(
+                    "continuation_header_normalize_rollback table_num=%s reason=%s", num, reason
+                )
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                seen.add(num)
+                logger.info(
+                    "continuation_header_normalize_rollback table_num=%s reason=exception error=%s",
+                    num, exc,
+                )
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        if not made_progress:
+            break
+    if repaired:
+        logger.info("continuation_header_normalize total_repaired=%d", repaired)
     return repaired
 
 

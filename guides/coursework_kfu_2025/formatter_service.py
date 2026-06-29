@@ -25,6 +25,7 @@ from .table_continuation import (
     cleanup_same_page_incompatible_chains_inplace,
     cleanup_same_page_continuation_blockers_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
+    normalize_continuation_semantic_header_inplace,
     apply_rendered_table_start_orphan_guard,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
@@ -504,9 +505,10 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # `single_table_crosses_pages_without_marker` blocker: a physical table that
     # truly crosses a page boundary with no continuation marker is split at the
     # rendered boundary, a page-broken `Продолжение таблицы N` marker is inserted
-    # and the header (+ numeric row) repeated. Two-page tables only; every split
-    # is re-render verified (clears that fail, adds no new fail, preserves all
-    # content) or rolled back. Distinct from the same-page cleanup above.
+    # and ONLY the numeric column row repeated on the continuation fragment (the
+    # canonical KFU rule — never the semantic header). Two-page tables only; every
+    # split is re-render verified (clears that fail, adds no new fail, preserves
+    # all content) or rolled back. Distinct from the same-page cleanup above.
     try:
         n_cross = cleanup_cross_page_without_marker_blockers_inplace(
             output_path,
@@ -520,6 +522,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: cross-page marker-less table split failed")
+
+    # Canonical continuation rule on EXISTING manual chains: a `Продолжение
+    # таблицы N` fragment must start with the numeric column row, not a repeated
+    # semantic header. Strip the duplicate header from each continuation fragment
+    # (deterministic, content-safe, rolled back on any new fail blocker).
+    try:
+        n_norm = normalize_continuation_semantic_header_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_norm:
+            logger.info(
+                "format_docx: normalized %d continuation fragment header(s) to numeric row",
+                n_norm,
+            )
+    except Exception:
+        logger.exception("format_docx: continuation semantic-header normalization failed")
 
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(

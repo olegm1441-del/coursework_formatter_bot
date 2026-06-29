@@ -56,17 +56,19 @@ def test_remove_duplicate_leading_rows_preserves_data() -> tuple[bool, str]:
                              ["Правление", "операционное", "по плану"],
                              ["Секретарь", "раскрытие", "постоянно"]], [2000, 4000, 3000])
     before_first = _all_fps(first)
+    numeric_fp = tc._docx_row_fingerprint(second.rows[1])
     p_fp = tc._docx_row_fingerprint(second.rows[2])
     s_fp = tc._docx_row_fingerprint(second.rows[3])
     removed = tc._remove_second_fragment_duplicate_leading_rows(first, second)
-    if removed != 2:
-        return _result(False, f"expected 2 leading dup rows removed, got {removed}")
+    # canonical KFU rule: keep the numeric row, drop ONLY the duplicate semantic header
+    if removed != 1:
+        return _result(False, f"expected 1 leading dup header removed (numeric kept), got {removed}")
     if _all_fps(first) != before_first:
         return _result(False, "first fragment rows changed")
     remaining = _all_fps(second)
-    if remaining != [p_fp, s_fp]:
-        return _result(False, f"data rows not preserved exactly/in order: {remaining}")
-    return _result(True, "duplicate header+numeric removed, both data rows preserved in order")
+    if remaining != [numeric_fp, p_fp, s_fp]:
+        return _result(False, f"continuation must keep numeric row + data in order: {remaining}")
+    return _result(True, "duplicate semantic header removed, numeric row + both data rows preserved")
 
 
 def test_remove_never_empties_or_drops_data() -> tuple[bool, str]:

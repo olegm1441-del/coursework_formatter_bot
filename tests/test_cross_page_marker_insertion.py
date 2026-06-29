@@ -7,8 +7,12 @@ Pins the safety core of the cross-page split subsystem
 
 - the split inserts a page-broken ``Продолжение таблицы N`` marker between the
   two physical fragments;
-- the continuation fragment repeats the header (and the numeric column-index
-  row when present);
+- the continuation fragment starts with the NUMERIC column row (`1 2 ... N`)
+  and NEVER the semantic header (canonical KFU rule; Rybakov gold) — a numeric
+  row is synthesized into both fragments when the source lacks one;
+- the manual-chain normalizer strips a duplicate semantic header so the
+  continuation starts with the numeric row, and the acceptance gate fails any
+  ``semantic_header_repeated_on_continuation``;
 - Источник:/Примечание: stays after the FINAL fragment;
 - data rows are never lost / duplicated / reordered;
 - grid widths are inherited verbatim across both fragments;
@@ -99,7 +103,9 @@ def test_split_inserts_pagebroken_marker() -> tuple[bool, str]:
     return _result(True, "split inserts a page-broken keepNext marker before the continuation table")
 
 
-def test_continuation_repeats_header_and_numeric_row() -> tuple[bool, str]:
+def test_continuation_has_numeric_row_not_semantic_header() -> tuple[bool, str]:
+    """Canonical KFU rule: continuation repeats the NUMERIC row, NEVER the
+    semantic header. Source already has a numeric row at index 1."""
     doc = Document()
     _mk_table(doc, [["A", "B", "C"],
                     ["1", "2", "3"],
@@ -110,17 +116,89 @@ def test_continuation_repeats_header_and_numeric_row() -> tuple[bool, str]:
     if not ok:
         return _result(False, "split returned False")
     second = doc.tables[1]
-    head = tc._docx_row_cell_texts(second.rows[0])
-    numeric = tc._docx_row_cell_texts(second.rows[1])
-    if head != ["A", "B", "C"]:
-        return _result(False, f"continuation header not repeated: {head}")
-    if not tc._is_docx_numeric_row(numeric):
-        return _result(False, f"continuation numeric row not repeated: {numeric}")
-    # header row marked as tblHeader so it re-renders on the new page
-    trPr = second.rows[0]._tr.find(qn("w:trPr"))
-    if trPr is None or trPr.find(qn("w:tblHeader")) is None:
-        return _result(False, "repeated header row not marked w:tblHeader")
-    return _result(True, "continuation fragment repeats header + numeric row (tblHeader set)")
+    first_row = tc._docx_row_cell_texts(second.rows[0])
+    if not tc._is_docx_numeric_row(first_row):
+        return _result(False, f"continuation must START with the numeric row, got {first_row}")
+    # the semantic header must NOT appear anywhere in the continuation fragment
+    header_fp = tc._docx_row_fingerprint(doc.tables[0].rows[0])
+    if any(tc._docx_row_fingerprint(r) == header_fp for r in second.rows):
+        return _result(False, "semantic header was wrongly copied into the continuation")
+    # first fragment keeps semantic header + numeric row + ≥1 data row
+    f = doc.tables[0]
+    if tc._docx_row_fingerprint(f.rows[0]) != header_fp:
+        return _result(False, "first fragment lost its semantic header")
+    if not any(tc._is_docx_numeric_row(tc._docx_row_cell_texts(r)) for r in f.rows):
+        return _result(False, "first fragment lost its numeric row")
+    return _result(True, "continuation starts with numeric row, no semantic header; first fragment intact")
+
+
+def test_continuation_synthesizes_numeric_when_source_lacks_one() -> tuple[bool, str]:
+    """Demo-style: source has NO numeric row. The split must synthesize `1..N`
+    into BOTH fragments and the continuation must start with it (no header)."""
+    doc = Document()
+    _mk_table(doc, [["Группа", "Дефект", "Статус"],
+                    ["Кейс 1", "a", "ok"],
+                    ["Кейс 2", "b", "ok"],
+                    ["Кейс 3", "c", "ok"],
+                    ["Кейс 4", "d", "ok"]], [3000, 3000, 3000])
+    ok = tc._split_cross_page_table_with_marker(doc, 0, 2, "1.1.3", numeric_row_idx=None)
+    if not ok:
+        return _result(False, "split returned False")
+    first, second = doc.tables[0], doc.tables[1]
+    if tc._docx_row_cell_texts(first.rows[1]) != ["1", "2", "3"]:
+        return _result(False, f"first fragment numeric row not synthesized after header: {tc._docx_row_cell_texts(first.rows[1])}")
+    if tc._docx_row_cell_texts(second.rows[0]) != ["1", "2", "3"]:
+        return _result(False, f"continuation must start with synthesized numeric row, got {tc._docx_row_cell_texts(second.rows[0])}")
+    header_fp = tc._docx_row_fingerprint(first.rows[0])
+    if any(tc._docx_row_fingerprint(r) == header_fp for r in second.rows):
+        return _result(False, "semantic header wrongly present in continuation")
+    return _result(True, "numeric row synthesized into both fragments; continuation header-free")
+
+
+def test_strip_normalizes_existing_manual_continuation() -> tuple[bool, str]:
+    """Existing manual chain `[header, numeric, data]` continuation → strip the
+    leading duplicate header so it starts with the numeric row."""
+    doc = Document()
+    doc.add_paragraph("Таблица 2.1 — Заголовок")
+    _mk_table(doc, [["A", "B", "C"], ["1", "2", "3"], ["d1", "e1", "f1"]], [2000, 2000, 2000])
+    doc.add_paragraph("Продолжение таблицы 2.1")
+    _mk_table(doc, [["A", "B", "C"], ["1", "2", "3"], ["d2", "e2", "f2"]], [2000, 2000, 2000])
+    fixed = tc._strip_continuation_semantic_headers(doc)
+    if fixed != 1:
+        return _result(False, f"expected 1 chain normalized, got {fixed}")
+    cont = doc.tables[1]
+    if not tc._is_docx_numeric_row(tc._docx_row_cell_texts(cont.rows[0])):
+        return _result(False, f"continuation should start with numeric row, got {tc._docx_row_cell_texts(cont.rows[0])}")
+    # data row preserved
+    if tc._docx_row_cell_texts(cont.rows[-1]) != ["d2", "e2", "f2"]:
+        return _result(False, "continuation data row lost during normalization")
+    return _result(True, "manual continuation header stripped, numeric row + data preserved")
+
+
+def test_gate_flags_semantic_header_on_continuation() -> tuple[bool, str]:
+    """Negative regression: a continuation that still has the semantic header
+    after `Продолжение таблицы N` must be flagged fail; numeric-led is clean."""
+    from guides.coursework_kfu_2025.rendered_table_validation import (
+        build_rendered_table_identities, _semantic_header_on_continuation_blockers)
+    # wrong: continuation starts with semantic header
+    bad = Document()
+    bad.add_paragraph("Таблица 5.1 — T")
+    _mk_table(bad, [["H1", "H2"], ["1", "2"], ["a", "b"]])
+    bad.add_paragraph("Продолжение таблицы 5.1")
+    _mk_table(bad, [["H1", "H2"], ["1", "2"], ["c", "d"]])
+    bl = _semantic_header_on_continuation_blockers(build_rendered_table_identities(bad))
+    if not any(b.blocker_type == "semantic_header_repeated_on_continuation" and b.table_num == "5.1" for b in bl):
+        return _result(False, "gate failed to flag a semantic header on the continuation")
+    # correct: continuation starts with numeric row only
+    good = Document()
+    good.add_paragraph("Таблица 5.2 — T")
+    _mk_table(good, [["H1", "H2"], ["1", "2"], ["a", "b"]])
+    good.add_paragraph("Продолжение таблицы 5.2")
+    _mk_table(good, [["1", "2"], ["c", "d"]])
+    bl2 = _semantic_header_on_continuation_blockers(build_rendered_table_identities(good))
+    if bl2:
+        return _result(False, f"gate false-fired on a valid numeric-led continuation: {[b.table_num for b in bl2]}")
+    return _result(True, "gate fails semantic-header continuation, passes numeric-led continuation")
 
 
 def test_source_note_stays_after_final_fragment() -> tuple[bool, str]:
@@ -309,7 +387,10 @@ def test_lead_matcher_handles_wrapped_rows() -> tuple[bool, str]:
 def main() -> int:
     tests = [
         ("split inserts page-broken marker", test_split_inserts_pagebroken_marker),
-        ("continuation repeats header+numeric", test_continuation_repeats_header_and_numeric_row),
+        ("continuation numeric-row not header", test_continuation_has_numeric_row_not_semantic_header),
+        ("continuation synthesizes numeric row", test_continuation_synthesizes_numeric_when_source_lacks_one),
+        ("strip normalizes manual continuation", test_strip_normalizes_existing_manual_continuation),
+        ("gate flags semantic header on cont.", test_gate_flags_semantic_header_on_continuation),
         ("source/note after final fragment", test_source_note_stays_after_final_fragment),
         ("no data rows lost/duplicated", test_no_data_rows_lost_or_duplicated),
         ("grid widths preserved", test_grid_widths_preserved_across_fragments),
