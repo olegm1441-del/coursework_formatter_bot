@@ -24,6 +24,7 @@ from .table_continuation import (
     normalize_compatible_grid_same_page_repeated_fragments_inplace,
     cleanup_same_page_incompatible_chains_inplace,
     cleanup_same_page_continuation_blockers_inplace,
+    cleanup_cross_page_without_marker_blockers_inplace,
     apply_rendered_table_start_orphan_guard,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
@@ -498,6 +499,27 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: same-page continuation cleanup failed")
+
+    # Deterministic marker-less long-table split, driven by the acceptance-gate
+    # `single_table_crosses_pages_without_marker` blocker: a physical table that
+    # truly crosses a page boundary with no continuation marker is split at the
+    # rendered boundary, a page-broken `Продолжение таблицы N` marker is inserted
+    # and the header (+ numeric row) repeated. Two-page tables only; every split
+    # is re-render verified (clears that fail, adds no new fail, preserves all
+    # content) or rolled back. Distinct from the same-page cleanup above.
+    try:
+        n_cross = cleanup_cross_page_without_marker_blockers_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_cross:
+            logger.info(
+                "format_docx: split %d marker-less cross-page table(s)",
+                n_cross,
+            )
+    except Exception:
+        logger.exception("format_docx: cross-page marker-less table split failed")
 
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(

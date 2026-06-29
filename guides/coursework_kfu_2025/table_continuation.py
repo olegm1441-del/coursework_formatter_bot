@@ -4689,6 +4689,394 @@ def cleanup_same_page_continuation_blockers_inplace(
     return repaired
 
 
+# ── Cross-page (marker-less) long-table split ────────────────────────────────
+#
+# A DIFFERENT defect class from same-page manual markers: ONE physical table
+# whose data rows render across pages with NO ``Продолжение таблицы N`` marker
+# (acceptance blocker ``single_table_crosses_pages_without_marker``, e.g. Demo
+# 1.1.3). The KFU-valid repair (kfu_long_table_split_reference): split the
+# physical table at the rendered page boundary, insert the marker ONLY on the
+# continuation page, repeat the header (and the numeric column-index row when
+# present), and keep Источник:/Примечание: after the FINAL fragment.
+#
+# This is acceptance-gate driven + re-render verified + rolled back on any new
+# defect. It is NOT the old globally-gated rendered-continuation path: scope is
+# limited to two-page tables (single boundary) whose rows map unambiguously to
+# pages, so a single split makes every fragment single-page (a 3+ page table is
+# skipped honestly rather than leaving a caption-less continuation fragment that
+# still crosses pages — which the caption-based gate cannot see).
+
+
+def _match_data_row_pages_by_lead(
+    table,
+    pdf_lines: list[PdfLine],
+    skip_idxs: set[int],
+) -> dict[int, int] | None:
+    """Map each DATA row (table-row index, excluding the header row 0 and any
+    ``skip_idxs`` such as a numeric column-index row) to its rendered page using
+    the leading first-cell text. Tolerant of rows that wrap across several PDF
+    lines (the strict whole-row matcher fails on those). Sequential + monotonic;
+    all-or-nothing — returns None if any data row cannot be located."""
+    lines = [(_norm_match_text(line.text), line.page_num) for line in pdf_lines]
+    if not lines:
+        return None
+    result: dict[int, int] = {}
+    last_idx = -1
+    last_page = -1
+    for ri, row in enumerate(table.rows):
+        if ri == 0 or ri in skip_idxs:
+            continue
+        cells = _docx_row_cell_texts(row)
+        first = _norm_match_text(cells[0]) if cells else ""
+        if len(first) < 3:
+            return None  # leading cell too short to anchor reliably
+        matched_page: int | None = None
+        matched_idx = -1
+        for j in range(last_idx + 1, len(lines)):
+            text, page = lines[j]
+            if last_page >= 0 and page < last_page:
+                continue
+            if text == first or text.startswith(first + " "):
+                matched_page, matched_idx = page, j
+                break
+        if matched_page is None:
+            return None
+        result[ri] = matched_page
+        last_idx = matched_idx
+        last_page = matched_page
+    return result or None
+
+
+def _cross_page_data_row_pages(
+    doc: Document,
+    table,
+    table_idx: int,
+    pdf_lines: list[PdfLine],
+    numeric_row_idx: int | None,
+) -> dict[int, int] | None:
+    """Row→page map for the split: strict whole-row matcher first (rows that
+    render on a single distinctive line), else the leading first-cell matcher
+    (wrapped rows). Returns table-row-index → page, or None when ambiguous."""
+    sig = next(
+        (s for s in _collect_table_signatures(doc) if s.table_idx == table_idx),
+        None,
+    )
+    if sig is not None:
+        strict = _match_row_pages(sig, pdf_lines)
+        if strict is not None and len(set(strict.values())) >= 2:
+            return strict
+    skip = {numeric_row_idx} if numeric_row_idx is not None else set()
+    return _match_data_row_pages_by_lead(table, pdf_lines, skip)
+
+
+def _cross_page_split_candidate(
+    doc: Document,
+    table_num: str,
+    pdf_lines: list[PdfLine],
+    *,
+    source_docx_path: Path | None,
+):
+    """Locate the physical marker-less table for a cross-page blocker and a SAFE
+    split point. Returns ``(table_idx, split_after, numeric_row_idx)`` or None.
+
+    Eligible only if (reference spec + Stage 3): not source-bad; no existing
+    adjacent continuation marker; rows map unambiguously to EXACTLY two pages;
+    ≥1 data row stays in BOTH fragments; safe (non-merged) split boundary; safe
+    table geometry."""
+    # Source-bad duplicated content must never be auto-split/restructured.
+    if _source_has_meaningful_duplicate_for_table(source_docx_path, str(table_num)) is not False:
+        return None
+
+    body_children = list(doc.element.body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+
+    for table_idx, table in enumerate(doc.tables):
+        if not _caption_before_table_matches(doc, table_idx, str(table_num)):
+            continue
+        tbl_xml = table._tbl
+        if _table_has_adjacent_continuation_marker(body_children, para_by_xml, tbl_xml):
+            continue
+        rows_xml = tbl_xml.findall(qn("w:tr"))
+        if len(rows_xml) < 3:
+            continue
+
+        numeric_row_idx = None
+        if len(table.rows) > 1 and _is_docx_numeric_row(_docx_row_cell_texts(table.rows[1])):
+            numeric_row_idx = 1
+
+        row_pages = _cross_page_data_row_pages(doc, table, table_idx, pdf_lines, numeric_row_idx)
+        if row_pages is None:
+            continue
+        distinct_pages = sorted(set(row_pages.values()))
+        if len(distinct_pages) != 2:
+            # only single-boundary (two-page) tables are split here; a 3+ page
+            # table would leave a caption-less continuation fragment still
+            # crossing pages that the gate cannot detect — skip honestly.
+            continue
+
+        first_page = distinct_pages[0]
+        last_on_first = max(ri for ri, pg in row_pages.items() if pg == first_page)
+        safe_after = _find_safe_split_after(rows_xml, last_on_first)
+        if safe_after is None or safe_after < 1:
+            continue
+        min_after = 2 if numeric_row_idx is not None else 1
+        if safe_after < min_after:
+            continue  # would leave no real data row in the first fragment
+        if len(rows_xml) - (safe_after + 1) < 1:
+            continue  # would leave no real data row in the continuation fragment
+
+        if not _split_geometry_is_safe(
+            tbl_xml,
+            table_index=table_idx,
+            split_before_row=safe_after + 1,
+            log_prefix="cross_page_split action=skip",
+        ):
+            continue
+
+        return table_idx, safe_after, numeric_row_idx
+    return None
+
+
+def _split_cross_page_table_with_marker(
+    doc: Document,
+    table_idx: int,
+    split_after: int,
+    table_num: str,
+    *,
+    numeric_row_idx: int | None,
+) -> bool:
+    """Split ``doc.tables[table_idx]`` after row ``split_after`` into two physical
+    fragments, inserting a page-broken ``Продолжение таблицы N`` marker and a
+    continuation table that repeats the header (and the numeric row when given).
+    Grid widths are inherited verbatim (the continuation table is a structural
+    clone). Источник:/Примечание: that followed the original table stay after the
+    continuation (final) fragment because they sit after it in body order."""
+    tbl_xml = doc.tables[table_idx]._tbl
+    rows = tbl_xml.findall(qn("w:tr"))
+    if split_after < 1 or split_after >= len(rows) - 1:
+        return False
+
+    repeat_idxs = [0]
+    if numeric_row_idx is not None and 0 < numeric_row_idx <= split_after:
+        repeat_idxs.append(numeric_row_idx)
+    leading = [deepcopy(rows[i]) for i in repeat_idxs]
+    tail_rows = [deepcopy(r) for r in rows[split_after + 1:]]
+    if not tail_rows:
+        return False
+
+    tbl2 = deepcopy(tbl_xml)
+    for tr in list(tbl2.findall(qn("w:tr"))):
+        tbl2.remove(tr)
+    for tr in leading:
+        tbl2.append(tr)
+    for tr in tail_rows:
+        tbl2.append(tr)
+
+    # mark the repeated header row as a table header (re-renders on the new page).
+    header_row = tbl2.findall(qn("w:tr"))[0]
+    trPr = header_row.find(qn("w:trPr"))
+    if trPr is None:
+        trPr = OxmlElement("w:trPr")
+        header_row.insert(0, trPr)
+    if trPr.find(qn("w:tblHeader")) is None:
+        trPr.append(OxmlElement("w:tblHeader"))
+
+    # trim the first fragment.
+    for tr in rows[split_after + 1:]:
+        tbl_xml.remove(tr)
+
+    marker = _build_continuation_para(f"Продолжение таблицы {table_num}")
+    tbl_xml.addnext(marker)
+    marker.addnext(tbl2)
+    return True
+
+
+def _cross_page_without_marker_probe(docx_path: Path, source_docx_path: Path | None):
+    """Render once; return ``(fail_keys, cross_page_table_nums, pdf_lines)``. The
+    pdf_lines are reused for split-boundary detection so a pass renders once for
+    both the gate verdict and the row→page mapping."""
+    from .rendered_table_validation import (
+        build_rendered_table_identities,
+        evaluate_table_layout_acceptance,
+    )
+
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        identities = build_rendered_table_identities(doc)
+        source_ids = None
+        if source_docx_path is not None:
+            try:
+                source_ids = build_rendered_table_identities(Document(str(source_docx_path)))
+            except Exception:
+                source_ids = None
+        blockers = evaluate_table_layout_acceptance(
+            pdf_lines, identities, doc=doc, source_identities=source_ids
+        )
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+    fail_keys = {(b.blocker_type, b.table_num) for b in blockers if b.severity == "fail"}
+    cross = {
+        b.table_num for b in blockers
+        if b.severity == "fail"
+        and b.blocker_type == "single_table_crosses_pages_without_marker"
+        and b.table_num
+    }
+    return fail_keys, cross, pdf_lines
+
+
+def _push_first_fragment_to_next_page(docx_path: Path, table_num: str) -> bool:
+    """Insert the two-blank table-start-orphan guard before the caption of the
+    table numbered ``table_num`` so its first fragment (caption + header) moves
+    off a page bottom. Needed because after the split the first fragment is a
+    continuation-chain head, which the standalone rendered orphan guard skips."""
+    doc = Document(str(docx_path))
+    for idx, table in enumerate(doc.tables):
+        if not _caption_before_table_matches(doc, idx, str(table_num)):
+            continue
+        caption = _find_caption_paragraph_before_table(doc, table._tbl)
+        if caption is None:
+            return False
+        caption_para_xml, _num = caption
+        if _insert_table_start_orphan_blanks(caption_para_xml, target_count=2):
+            doc.save(str(docx_path))
+            return True
+        return False
+    return False
+
+
+def cleanup_cross_page_without_marker_blockers_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Insert valid continuation markers for marker-less tables that truly cross
+    pages (acceptance blocker ``single_table_crosses_pages_without_marker``).
+
+    Driven by the rendered acceptance gate (reliable table+page) — NOT the old
+    globally-gated rendered-continuation path. For each flagged table the
+    physical DOCX table is split at the rendered page boundary, a page-broken
+    ``Продолжение таблицы N`` marker is inserted, and the header (+ numeric row)
+    is repeated on the continuation fragment. Every split is re-render verified:
+    it must clear that cross-page fail, add NO new fail blocker (same-page
+    marker, orphaned header, neighbour flip, grid mismatch …) and preserve all
+    content, else it is rolled back. At most one accepted split per pass, then
+    re-probe because pagination shifts."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    repaired = 0
+    seen: set[str] = set()
+    for _pass in range(12):
+        try:
+            baseline_keys, cross, pdf_lines = _cross_page_without_marker_probe(
+                docx_path, source_docx_path
+            )
+        except Exception as exc:
+            logger.info(
+                "cross_page_split_probe_skip path=%s reason=render_failed error=%s",
+                docx_path, exc,
+            )
+            break
+        todo = sorted(n for n in cross if n not in seen)
+        if not todo:
+            break
+        made_progress = False
+        for table_num in todo:
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_cross_page_split_"))
+            backup_path = backup_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                doc = Document(str(docx_path))
+                cand = _cross_page_split_candidate(
+                    doc, table_num, pdf_lines, source_docx_path=source_docx_path
+                )
+                if cand is None:
+                    seen.add(table_num)
+                    continue
+                table_idx, split_after, numeric_row_idx = cand
+                if not _split_cross_page_table_with_marker(
+                    doc, table_idx, split_after, table_num, numeric_row_idx=numeric_row_idx
+                ):
+                    seen.add(table_num)
+                    continue
+                doc.save(str(docx_path))
+
+                cross_key = ("single_table_crosses_pages_without_marker", table_num)
+                orphan_key = ("orphaned_header_row", table_num)
+                reason = None
+                if _content_regressed(source_docx_path, docx_path):
+                    reason = "content_regression"
+                else:
+                    try:
+                        after_keys, _ac, _apl = _cross_page_without_marker_probe(
+                            docx_path, source_docx_path
+                        )
+                    except Exception:
+                        reason = "post_render_failed"
+                    else:
+                        # The split turns the first fragment into a continuation
+                        # head, which the downstream rendered table-start orphan
+                        # guard skips. So THIS cleanup owns any orphaned_header_row
+                        # on the table (pre-existing — the guard used to fix it —
+                        # OR newly exposed) and must clear it here, else the final
+                        # output regresses to an orphan. Push the first fragment to
+                        # the next page (two-blank guard) and re-probe.
+                        if orphan_key in after_keys and _push_first_fragment_to_next_page(
+                            docx_path, table_num
+                        ):
+                            if _content_regressed(source_docx_path, docx_path):
+                                reason = "content_regression_after_orphan_fix"
+                            else:
+                                try:
+                                    after_keys, _ac, _apl = _cross_page_without_marker_probe(
+                                        docx_path, source_docx_path
+                                    )
+                                except Exception:
+                                    reason = "post_render_failed"
+                        if reason is None:
+                            if cross_key in after_keys:
+                                reason = "cross_page_remains"
+                            elif orphan_key in after_keys:
+                                reason = "first_fragment_orphan_unfixable"
+                            elif after_keys - baseline_keys:
+                                reason = f"new_fail_blocker={sorted(after_keys - baseline_keys)}"
+
+                if reason is None:
+                    repaired += 1
+                    made_progress = True
+                    seen.add(table_num)
+                    logger.info(
+                        "cross_page_split_applied table_num=%s table_idx=%s split_after=%s numeric_row=%s",
+                        table_num, table_idx, split_after, numeric_row_idx,
+                    )
+                    break  # re-probe — pagination shifted
+                shutil.copy2(backup_path, docx_path)
+                seen.add(table_num)
+                logger.info(
+                    "cross_page_split_rollback table_num=%s reason=%s",
+                    table_num, reason,
+                )
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                seen.add(table_num)
+                logger.info(
+                    "cross_page_split_rollback table_num=%s reason=exception error=%s",
+                    table_num, exc,
+                )
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        if not made_progress:
+            break
+    if repaired:
+        logger.info("cross_page_split total_repaired=%d", repaired)
+    return repaired
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
