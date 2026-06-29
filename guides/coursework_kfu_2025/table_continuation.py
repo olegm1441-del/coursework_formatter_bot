@@ -4747,26 +4747,59 @@ def _match_data_row_pages_by_lead(
     return result or None
 
 
+def _table_pdf_window(pdf_lines: list[PdfLine], table_num: str) -> list[PdfLine]:
+    """Restrict ``pdf_lines`` to the rendered region of table ``table_num``: from
+    its ``Таблица N`` caption to the line before the next table caption /
+    continuation marker / ``Источник:``/``Примечание:``. This keeps row→page
+    matching TABLE-LOCAL so a row's first-cell text that also appears in body
+    prose / citations elsewhere cannot mis-anchor the mapping (Stage 4C). Falls
+    back to the full list when the caption is not found."""
+    cap_re = re.compile(rf"^\s*Таблица\s+{re.escape(table_num)}\b", re.IGNORECASE)
+    any_cap_re = re.compile(r"^\s*Таблица\s+\d", re.IGNORECASE)
+    stop_re = re.compile(r"^\s*(Источник|Примечание)\s*[:.]|^\s*Продолжение\s+табл", re.IGNORECASE)
+    start = None
+    for i, line in enumerate(pdf_lines):
+        if cap_re.match(" ".join((line.text or "").split())):
+            start = i
+            break
+    if start is None:
+        return pdf_lines
+    end = len(pdf_lines)
+    for j in range(start + 1, len(pdf_lines)):
+        t = " ".join((pdf_lines[j].text or "").split())
+        if stop_re.match(t):
+            end = j + 1  # keep the stop line's page so the last data row is covered
+            break
+        if any_cap_re.match(t) and not cap_re.match(t):
+            end = j
+            break
+    return pdf_lines[start:end]
+
+
 def _cross_page_data_row_pages(
     doc: Document,
     table,
     table_idx: int,
     pdf_lines: list[PdfLine],
     numeric_row_idx: int | None,
+    table_num: str | None = None,
 ) -> dict[int, int] | None:
     """Row→page map for the split: strict whole-row matcher first (rows that
     render on a single distinctive line), else the leading first-cell matcher
-    (wrapped rows). Returns table-row-index → page, or None when ambiguous."""
+    (wrapped rows). Matching is restricted to the table's rendered window when
+    ``table_num`` is given (avoids body-text/citation mis-anchoring). Returns
+    table-row-index → page, or None when ambiguous."""
+    window = _table_pdf_window(pdf_lines, table_num) if table_num else pdf_lines
     sig = next(
         (s for s in _collect_table_signatures(doc) if s.table_idx == table_idx),
         None,
     )
     if sig is not None:
-        strict = _match_row_pages(sig, pdf_lines)
+        strict = _match_row_pages(sig, window)
         if strict is not None and len(set(strict.values())) >= 2:
             return strict
     skip = {numeric_row_idx} if numeric_row_idx is not None else set()
-    return _match_data_row_pages_by_lead(table, pdf_lines, skip)
+    return _match_data_row_pages_by_lead(table, window, skip)
 
 
 def _cross_page_split_candidate(
@@ -4804,7 +4837,8 @@ def _cross_page_split_candidate(
         if len(table.rows) > 1 and _is_docx_numeric_row(_docx_row_cell_texts(table.rows[1])):
             numeric_row_idx = 1
 
-        row_pages = _cross_page_data_row_pages(doc, table, table_idx, pdf_lines, numeric_row_idx)
+        row_pages = _cross_page_data_row_pages(
+            doc, table, table_idx, pdf_lines, numeric_row_idx, table_num=str(table_num))
         if row_pages is None:
             continue
         distinct_pages = sorted(set(row_pages.values()))

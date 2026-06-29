@@ -384,8 +384,32 @@ def test_lead_matcher_handles_wrapped_rows() -> tuple[bool, str]:
     return _result(True, "leading-first-cell matcher maps wrapped rows to pages")
 
 
+def test_table_local_window_excludes_body_text() -> tuple[bool, str]:
+    """Stage 4C: the table-local PDF window spans only from the `Таблица N`
+    caption to the source/note, so a row's first-cell text appearing in body
+    prose OUTSIDE that region cannot mis-anchor the row→page mapping."""
+    lines = [
+        PdfLine("в работе рассмотрен Кейс 2 подробно", 1, 10, 20),  # body decoy BEFORE
+        PdfLine("Таблица 1.1 — Длинная", 2, 10, 20),                 # caption
+        PdfLine("Кейс 1 строка один", 2, 30, 40),
+        PdfLine("Кейс 2 строка два", 2, 50, 60),
+        PdfLine("Кейс 3 строка три", 3, 30, 40),
+        PdfLine("Источник: составлено автором", 3, 70, 80),         # stop boundary
+        PdfLine("далее Кейс 2 снова упомянут", 4, 10, 20),          # body decoy AFTER
+    ]
+    win = [l.text for l in tc._table_pdf_window(lines, "1.1")]
+    if any("рассмотрен" in t or "упомянут" in t for t in win):
+        return _result(False, f"window leaked body-text decoys: {win}")
+    if not (any("Таблица 1.1" in t for t in win) and any("Источник" in t for t in win)):
+        return _result(False, f"window missing caption/source boundary: {win}")
+    if not any(t.startswith("Кейс 3") for t in win):
+        return _result(False, "window dropped a real table row")
+    return _result(True, "table-local window keeps caption..source and excludes outside body text")
+
+
 def main() -> int:
     tests = [
+        ("table-local window excludes body text", test_table_local_window_excludes_body_text),
         ("split inserts page-broken marker", test_split_inserts_pagebroken_marker),
         ("continuation numeric-row not header", test_continuation_has_numeric_row_not_semantic_header),
         ("continuation synthesizes numeric row", test_continuation_synthesizes_numeric_when_source_lacks_one),
