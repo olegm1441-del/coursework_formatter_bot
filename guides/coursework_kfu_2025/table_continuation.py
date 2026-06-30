@@ -4776,6 +4776,37 @@ def _table_pdf_window(pdf_lines: list[PdfLine], table_num: str) -> list[PdfLine]
     return pdf_lines[start:end]
 
 
+def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int) -> dict[int, int] | None:
+    """Reliable DATA-row → page map via unique per-row marker instrumentation
+    (``table_markers.map_table_rows_to_pages``) — structural, not text-matching,
+    so it works on tables whose cell text overlaps body prose/citations. The
+    header row (idx 0) marker is unreliable across the 1pt/2pt re-render, so it is
+    ignored; every DATA row (idx>0, non-numeric) must be found exactly once and
+    the pages must be monotonic. Returns {table_row_idx: page} or None."""
+    if docx_path is None:
+        return None
+    try:
+        from .table_markers import map_table_rows_to_pages
+        res = map_table_rows_to_pages(Path(docx_path), table_idx)
+        table = Document(str(docx_path)).tables[table_idx]
+    except Exception:
+        return None
+    dup = set(res.duplicate_rows or {})
+    out: dict[int, int] = {}
+    for ri in range(1, len(table.rows)):
+        if _is_docx_numeric_row(_docx_row_cell_texts(table.rows[ri])):
+            continue
+        if ri not in res.row_pages or ri in dup:
+            return None  # a real data row could not be located reliably
+        out[ri] = res.row_pages[ri]
+    if len(out) < 2:
+        return None
+    ordered = [out[ri] for ri in sorted(out)]
+    if ordered != sorted(ordered):
+        return None  # non-monotonic → unreliable
+    return out
+
+
 def _cross_page_data_row_pages(
     doc: Document,
     table,
@@ -4783,12 +4814,13 @@ def _cross_page_data_row_pages(
     pdf_lines: list[PdfLine],
     numeric_row_idx: int | None,
     table_num: str | None = None,
+    docx_path: Path | None = None,
 ) -> dict[int, int] | None:
     """Row→page map for the split: strict whole-row matcher first (rows that
-    render on a single distinctive line), else the leading first-cell matcher
-    (wrapped rows). Matching is restricted to the table's rendered window when
-    ``table_num`` is given (avoids body-text/citation mis-anchoring). Returns
-    table-row-index → page, or None when ambiguous."""
+    render on a single distinctive line), then the leading first-cell matcher
+    (wrapped rows, table-local window), then — when both are ambiguous — the
+    reliable per-row instrumentation mapper. Returns table-row-index → page, or
+    None when no method maps it unambiguously."""
     window = _table_pdf_window(pdf_lines, table_num) if table_num else pdf_lines
     sig = next(
         (s for s in _collect_table_signatures(doc) if s.table_idx == table_idx),
@@ -4799,7 +4831,11 @@ def _cross_page_data_row_pages(
         if strict is not None and len(set(strict.values())) >= 2:
             return strict
     skip = {numeric_row_idx} if numeric_row_idx is not None else set()
-    return _match_data_row_pages_by_lead(table, window, skip)
+    lead = _match_data_row_pages_by_lead(table, window, skip)
+    if lead is not None and len(set(lead.values())) >= 2:
+        return lead
+    # Both text matchers ambiguous → structural instrumentation fallback.
+    return _instrumented_data_row_pages(docx_path, table_idx)
 
 
 def _cross_page_split_candidate(
@@ -4808,6 +4844,7 @@ def _cross_page_split_candidate(
     pdf_lines: list[PdfLine],
     *,
     source_docx_path: Path | None,
+    docx_path: Path | None = None,
 ):
     """Locate the physical marker-less table for a cross-page blocker and a SAFE
     split point. Returns ``(table_idx, split_after, numeric_row_idx)`` or None.
@@ -4838,7 +4875,8 @@ def _cross_page_split_candidate(
             numeric_row_idx = 1
 
         row_pages = _cross_page_data_row_pages(
-            doc, table, table_idx, pdf_lines, numeric_row_idx, table_num=str(table_num))
+            doc, table, table_idx, pdf_lines, numeric_row_idx,
+            table_num=str(table_num), docx_path=docx_path)
         if row_pages is None:
             continue
         distinct_pages = sorted(set(row_pages.values()))
@@ -4867,7 +4905,7 @@ def _cross_page_split_candidate(
         ):
             continue
 
-        return table_idx, safe_after, numeric_row_idx
+        return table_idx, safe_after, numeric_row_idx, min_after
     return None
 
 
@@ -5023,6 +5061,55 @@ def _push_first_fragment_to_next_page(docx_path: Path, table_num: str) -> bool:
     return False
 
 
+def _cross_page_cleanup_budget_seconds() -> float:
+    """Per-document wall-clock cap for the cross-page cleanup (instrumentation +
+    adaptive split attempts each render). Override with KPFU_CROSS_PAGE_BUDGET_S."""
+    try:
+        return max(30.0, float(os.environ.get("KPFU_CROSS_PAGE_BUDGET_S", "240")))
+    except (TypeError, ValueError):
+        return 240.0
+
+
+def _verify_cross_page_split(
+    docx_path: Path,
+    source_docx_path: Path | None,
+    table_num: str,
+    table_idx: int,
+    baseline_keys: set,
+) -> str | None:
+    """Re-render verify of an applied cross-page split. Returns None to ACCEPT, or
+    a rollback reason. Clears a first-fragment orphan via the two-blank guard
+    (the split makes the first fragment a continuation head the downstream orphan
+    guard skips); requires the target cross-page fail gone, no new fail blocker,
+    content preserved, and the caption-less continuation fragment single-page."""
+    cross_key = ("single_table_crosses_pages_without_marker", table_num)
+    orphan_key = ("orphaned_header_row", table_num)
+    if _content_regressed(source_docx_path, docx_path):
+        return "content_regression"
+    try:
+        after_keys, _ac, _apl = _cross_page_without_marker_probe(docx_path, source_docx_path)
+    except Exception:
+        return "post_render_failed"
+    if orphan_key in after_keys and _push_first_fragment_to_next_page(docx_path, table_num):
+        if _content_regressed(source_docx_path, docx_path):
+            return "content_regression_after_orphan_fix"
+        try:
+            after_keys, _ac, _apl = _cross_page_without_marker_probe(docx_path, source_docx_path)
+        except Exception:
+            return "post_render_failed"
+    if cross_key in after_keys:
+        return "cross_page_remains"
+    if orphan_key in after_keys:
+        return "first_fragment_orphan_unfixable"
+    new_fails = after_keys - baseline_keys
+    if new_fails:
+        return f"new_fail_blocker={sorted(new_fails)}"
+    cont = _instrumented_data_row_pages(docx_path, table_idx + 1)
+    if cont is not None and len(set(cont.values())) > 1:
+        return "continuation_fragment_crosses_pages"
+    return None
+
+
 def cleanup_cross_page_without_marker_blockers_inplace(
     docx_path: Path,
     *,
@@ -5045,7 +5132,15 @@ def cleanup_cross_page_without_marker_blockers_inplace(
     source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
     repaired = 0
     seen: set[str] = set()
+    # Hard wall-clock budget per document: instrumentation + adaptive split
+    # attempts each render, so cap total time to keep format_docx bounded and
+    # never runaway. Honoured between tables/passes (a single in-flight verify
+    # always completes).
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
     for _pass in range(12):
+        if time.monotonic() > deadline:
+            logger.info("cross_page_split_budget_exhausted path=%s repaired=%s", docx_path, repaired)
+            break
         try:
             baseline_keys, cross, pdf_lines = _cross_page_without_marker_probe(
                 docx_path, source_docx_path
@@ -5061,79 +5156,62 @@ def cleanup_cross_page_without_marker_blockers_inplace(
             break
         made_progress = False
         for table_num in todo:
+            if time.monotonic() > deadline:
+                logger.info("cross_page_split_budget_exhausted path=%s repaired=%s", docx_path, repaired)
+                break
             backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_cross_page_split_"))
             backup_path = backup_dir / docx_path.name
             try:
                 shutil.copy2(docx_path, backup_path)
                 doc = Document(str(docx_path))
                 cand = _cross_page_split_candidate(
-                    doc, table_num, pdf_lines, source_docx_path=source_docx_path
+                    doc, table_num, pdf_lines, source_docx_path=source_docx_path,
+                    docx_path=docx_path,
                 )
                 if cand is None:
                     seen.add(table_num)
                     continue
-                table_idx, split_after, numeric_row_idx = cand
-                if not _split_cross_page_table_with_marker(
-                    doc, table_idx, split_after, table_num, numeric_row_idx=numeric_row_idx
-                ):
-                    seen.add(table_num)
-                    continue
-                doc.save(str(docx_path))
-
-                cross_key = ("single_table_crosses_pages_without_marker", table_num)
-                orphan_key = ("orphaned_header_row", table_num)
-                reason = None
-                if _content_regressed(source_docx_path, docx_path):
-                    reason = "content_regression"
-                else:
-                    try:
-                        after_keys, _ac, _apl = _cross_page_without_marker_probe(
-                            docx_path, source_docx_path
-                        )
-                    except Exception:
-                        reason = "post_render_failed"
-                    else:
-                        # The split turns the first fragment into a continuation
-                        # head, which the downstream rendered table-start orphan
-                        # guard skips. So THIS cleanup owns any orphaned_header_row
-                        # on the table (pre-existing — the guard used to fix it —
-                        # OR newly exposed) and must clear it here, else the final
-                        # output regresses to an orphan. Push the first fragment to
-                        # the next page (two-blank guard) and re-probe.
-                        if orphan_key in after_keys and _push_first_fragment_to_next_page(
-                            docx_path, table_num
-                        ):
-                            if _content_regressed(source_docx_path, docx_path):
-                                reason = "content_regression_after_orphan_fix"
-                            else:
-                                try:
-                                    after_keys, _ac, _apl = _cross_page_without_marker_probe(
-                                        docx_path, source_docx_path
-                                    )
-                                except Exception:
-                                    reason = "post_render_failed"
-                        if reason is None:
-                            if cross_key in after_keys:
-                                reason = "cross_page_remains"
-                            elif orphan_key in after_keys:
-                                reason = "first_fragment_orphan_unfixable"
-                            elif after_keys - baseline_keys:
-                                reason = f"new_fail_blocker={sorted(after_keys - baseline_keys)}"
-
-                if reason is None:
-                    repaired += 1
-                    made_progress = True
-                    seen.add(table_num)
-                    logger.info(
-                        "cross_page_split_applied table_num=%s table_idx=%s split_after=%s numeric_row=%s",
-                        table_num, table_idx, split_after, numeric_row_idx,
+                table_idx, split_after, numeric_row_idx, min_after = cand
+                # Adaptive boundary: the rendered page boundary is measured on the
+                # UNSPLIT table; adding the continuation marker + numeric row pushes
+                # the first fragment down, so the natural boundary can overflow.
+                # Try it, then progressively EARLIER boundaries (≥ min_after) until
+                # one verifies — bounded to a few attempts.
+                applied = False
+                last_reason = "no_attempt"
+                for sa in range(split_after, max(min_after, split_after - 3) - 1, -1):
+                    shutil.copy2(backup_path, docx_path)  # clean slate per attempt
+                    doc = Document(str(docx_path))
+                    if len(doc.tables[table_idx]._tbl.findall(qn("w:tr"))) - (sa + 1) < 1:
+                        continue  # no data row left in the continuation fragment
+                    if not _split_cross_page_table_with_marker(
+                        doc, table_idx, sa, table_num, numeric_row_idx=numeric_row_idx
+                    ):
+                        continue
+                    doc.save(str(docx_path))
+                    last_reason = _verify_cross_page_split(
+                        docx_path, source_docx_path, table_num, table_idx, baseline_keys
                     )
+                    if last_reason is None:
+                        repaired += 1
+                        made_progress = True
+                        applied = True
+                        logger.info(
+                            "cross_page_split_applied table_num=%s table_idx=%s split_after=%s numeric_row=%s",
+                            table_num, table_idx, sa, numeric_row_idx,
+                        )
+                        break
+                    logger.info(
+                        "cross_page_split_attempt_rollback table_num=%s split_after=%s reason=%s",
+                        table_num, sa, last_reason,
+                    )
+                seen.add(table_num)
+                if applied:
                     break  # re-probe — pagination shifted
                 shutil.copy2(backup_path, docx_path)
-                seen.add(table_num)
                 logger.info(
                     "cross_page_split_rollback table_num=%s reason=%s",
-                    table_num, reason,
+                    table_num, last_reason,
                 )
             except Exception as exc:
                 shutil.copy2(backup_path, docx_path)

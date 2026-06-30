@@ -301,10 +301,12 @@ def test_candidate_found_on_two_page_table() -> tuple[bool, str]:
         tc._source_has_meaningful_duplicate_for_table = orig
     if cand is None:
         return _result(False, "no candidate found for a clean 2-page marker-less table")
-    table_idx, split_after, numeric_row_idx = cand
+    table_idx, split_after, numeric_row_idx, min_after = cand
     if table_idx != 0 or split_after != 2 or numeric_row_idx is not None:
         return _result(False, f"unexpected candidate: idx={table_idx} after={split_after} num={numeric_row_idx}")
-    return _result(True, "candidate found at the rendered page boundary (split_after=2)")
+    if min_after != 1:
+        return _result(False, f"expected min_after=1 (no numeric row), got {min_after}")
+    return _result(True, "candidate found at the rendered page boundary (split_after=2, min_after=1)")
 
 
 def test_candidate_skips_single_and_triple_page() -> tuple[bool, str]:
