@@ -4776,6 +4776,16 @@ def _table_pdf_window(pdf_lines: list[PdfLine], table_num: str) -> list[PdfLine]
     return pdf_lines[start:end]
 
 
+def _cross_page_instrumentation_enabled() -> bool:
+    """Per-row marker instrumentation reliably maps tables whose text the strict /
+    lead matchers can't anchor, but each call renders the WHOLE document (1–2×)
+    plus a full PDF parse — ~10–30s on a long doc. That cost is unacceptable on
+    the live bot (one format per request), so it is OFF by default and enabled
+    only for eval/smoke via KPFU_CROSS_PAGE_INSTRUMENT=1. With it off the
+    cross-page split still runs the cheap text-matcher path."""
+    return os.environ.get("KPFU_CROSS_PAGE_INSTRUMENT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int) -> dict[int, int] | None:
     """Reliable DATA-row → page map via unique per-row marker instrumentation
     (``table_markers.map_table_rows_to_pages``) — structural, not text-matching,
@@ -4834,7 +4844,10 @@ def _cross_page_data_row_pages(
     lead = _match_data_row_pages_by_lead(table, window, skip)
     if lead is not None and len(set(lead.values())) >= 2:
         return lead
-    # Both text matchers ambiguous → structural instrumentation fallback.
+    # Both text matchers ambiguous → structural instrumentation fallback (the
+    # expensive, eval-only path — see _cross_page_instrumentation_enabled).
+    if not _cross_page_instrumentation_enabled():
+        return None
     return _instrumented_data_row_pages(docx_path, table_idx)
 
 
@@ -5065,9 +5078,9 @@ def _cross_page_cleanup_budget_seconds() -> float:
     """Per-document wall-clock cap for the cross-page cleanup (instrumentation +
     adaptive split attempts each render). Override with KPFU_CROSS_PAGE_BUDGET_S."""
     try:
-        return max(30.0, float(os.environ.get("KPFU_CROSS_PAGE_BUDGET_S", "240")))
+        return max(30.0, float(os.environ.get("KPFU_CROSS_PAGE_BUDGET_S", "90")))
     except (TypeError, ValueError):
-        return 240.0
+        return 90.0
 
 
 def _verify_cross_page_split(
@@ -5192,6 +5205,9 @@ def cleanup_cross_page_without_marker_blockers_inplace(
                 applied = False
                 last_reason = "no_attempt"
                 for sa in range(split_after, max(min_after, split_after - 3) - 1, -1):
+                    if time.monotonic() > deadline:
+                        last_reason = "budget_exhausted"
+                        break
                     shutil.copy2(backup_path, docx_path)  # clean slate per attempt
                     doc = Document(str(docx_path))
                     if len(doc.tables[table_idx]._tbl.findall(qn("w:tr"))) - (sa + 1) < 1:
