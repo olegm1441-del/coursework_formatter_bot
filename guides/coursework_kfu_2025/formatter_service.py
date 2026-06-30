@@ -501,28 +501,6 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: same-page continuation cleanup failed")
 
-    # Deterministic marker-less long-table split, driven by the acceptance-gate
-    # `single_table_crosses_pages_without_marker` blocker: a physical table that
-    # truly crosses a page boundary with no continuation marker is split at the
-    # rendered boundary, a page-broken `Продолжение таблицы N` marker is inserted
-    # and ONLY the numeric column row repeated on the continuation fragment (the
-    # canonical KFU rule — never the semantic header). Two-page tables only; every
-    # split is re-render verified (clears that fail, adds no new fail, preserves
-    # all content) or rolled back. Distinct from the same-page cleanup above.
-    try:
-        n_cross = cleanup_cross_page_without_marker_blockers_inplace(
-            output_path,
-            source_docx_path=input_path,
-            report=report,
-        )
-        if n_cross:
-            logger.info(
-                "format_docx: split %d marker-less cross-page table(s)",
-                n_cross,
-            )
-    except Exception:
-        logger.exception("format_docx: cross-page marker-less table split failed")
-
     # Canonical continuation rule on EXISTING manual chains: a `Продолжение
     # таблицы N` fragment must start with the numeric column row, not a repeated
     # semantic header. Strip the duplicate header from each continuation fragment
@@ -604,6 +582,29 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         report.warn(
             "Автопроверка переносов таблиц по PDF не выполнена. Проверьте таблицы вручную."
         )
+
+    # Deterministic marker-less long-table split (acceptance blocker
+    # `single_table_crosses_pages_without_marker`). Runs LAST among the mutating
+    # table stages so each split's re-render verify reflects the FINAL pagination:
+    # a split that would push a neighbour table across a page boundary (cascade)
+    # fails its own verify here and is rolled back. The table is split at the
+    # rendered boundary (reliable per-row instrumentation when text matching is
+    # ambiguous), a page-broken `Продолжение таблицы N` marker inserted, and ONLY
+    # the numeric column row repeated on the continuation fragment (never the
+    # semantic header). Content-preserving + budget-capped.
+    try:
+        n_cross = cleanup_cross_page_without_marker_blockers_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_cross:
+            logger.info(
+                "format_docx: split %d marker-less cross-page table(s)",
+                n_cross,
+            )
+    except Exception:
+        logger.exception("format_docx: cross-page marker-less table split failed")
 
     try:
         n_same_page_marker_warnings = warn_same_page_continuation_marker_violations(

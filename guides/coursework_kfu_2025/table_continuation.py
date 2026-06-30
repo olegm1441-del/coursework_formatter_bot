@@ -5132,6 +5132,16 @@ def cleanup_cross_page_without_marker_blockers_inplace(
     source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
     repaired = 0
     seen: set[str] = set()
+    entry_keys: set | None = None
+    # Whole-document rollback snapshot: a per-split verify only sees the state at
+    # that split, but accepted splits add a marker + numeric row + page break that
+    # can SHIFT pagination and push OTHER tables across boundaries (a cascade that
+    # surfaces only later). At exit we re-probe and, if ANY new fail blocker
+    # appeared vs entry, roll the WHOLE cleanup back — it must never grow the
+    # corpus fail set.
+    entry_backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_cross_page_entry_"))
+    entry_backup = entry_backup_dir / docx_path.name
+    shutil.copy2(docx_path, entry_backup)
     # Hard wall-clock budget per document: instrumentation + adaptive split
     # attempts each render, so cap total time to keep format_docx bounded and
     # never runaway. Honoured between tables/passes (a single in-flight verify
@@ -5151,6 +5161,8 @@ def cleanup_cross_page_without_marker_blockers_inplace(
                 docx_path, exc,
             )
             break
+        if entry_keys is None:
+            entry_keys = set(baseline_keys)
         todo = sorted(n for n in cross if n not in seen)
         if not todo:
             break
@@ -5224,6 +5236,22 @@ def cleanup_cross_page_without_marker_blockers_inplace(
                 shutil.rmtree(backup_dir, ignore_errors=True)
         if not made_progress:
             break
+    # Whole-document cascade guard: if the accepted splits net-introduced any new
+    # fail blocker vs entry (e.g. shifted a neighbour table across a page), roll
+    # the entire cleanup back so the corpus fail set never grows.
+    if repaired and entry_keys is not None:
+        try:
+            final_keys, _fc, _fl = _cross_page_without_marker_probe(docx_path, source_docx_path)
+        except Exception:
+            final_keys = None
+        if final_keys is not None and (final_keys - entry_keys):
+            shutil.copy2(entry_backup, docx_path)
+            logger.info(
+                "cross_page_split_doc_rollback path=%s reason=cascade_new_fail=%s reverted_splits=%d",
+                docx_path, sorted(final_keys - entry_keys), repaired,
+            )
+            repaired = 0
+    shutil.rmtree(entry_backup_dir, ignore_errors=True)
     if repaired:
         logger.info("cross_page_split total_repaired=%d", repaired)
     return repaired
