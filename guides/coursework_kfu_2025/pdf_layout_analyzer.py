@@ -13,10 +13,28 @@ This is used by table_continuation.py and other Phase 3 rules to find:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# Content-hash cache: the cleanup probes parse the SAME rendered PDF repeatedly
+# (probe -> verify -> re-probe -> final gate). Parsing a 66+ page PDF with
+# pdfplumber is the dominant big-doc cost, so memoize by PDF content hash. Gated
+# on KPFU_RENDER_CACHE (default on) to match the render cache.
+_PDFLINES_CACHE: "OrderedDict[str, list]" = OrderedDict()
+_PDFLINES_CACHE_MAX = 12
+_pdflines_cache_stats = {"hits": 0, "misses": 0}
+
+
+def _pdflines_cache_on() -> bool:
+    raw = os.environ.get("KPFU_RENDER_CACHE")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +269,20 @@ def analyze_pdf_lines(pdf_path: Path) -> list[PdfLine]:
     pdf_path = Path(pdf_path)
     out: list[PdfLine] = []
 
+    cache_key = None
+    if _pdflines_cache_on():
+        try:
+            cache_key = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+        except OSError:
+            cache_key = None
+        if cache_key is not None:
+            hit = _PDFLINES_CACHE.get(cache_key)
+            if hit is not None:
+                _PDFLINES_CACHE.move_to_end(cache_key)
+                _pdflines_cache_stats["hits"] += 1
+                return hit
+            _pdflines_cache_stats["misses"] += 1
+
     with pdfplumber.open(str(pdf_path)) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             words = page.extract_words(
@@ -291,4 +323,9 @@ def analyze_pdf_lines(pdf_path: Path) -> list[PdfLine]:
                 ))
 
     logger.info("pdf_layout_analyzer: extracted %d lines", len(out))
+    if cache_key is not None:
+        _PDFLINES_CACHE[cache_key] = out
+        _PDFLINES_CACHE.move_to_end(cache_key)
+        while len(_PDFLINES_CACHE) > _PDFLINES_CACHE_MAX:
+            _PDFLINES_CACHE.popitem(last=False)
     return out
