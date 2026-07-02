@@ -24,6 +24,7 @@ from .table_continuation import (
     normalize_compatible_grid_same_page_repeated_fragments_inplace,
     cleanup_same_page_incompatible_chains_inplace,
     cleanup_same_page_continuation_blockers_inplace,
+    cleanup_entangled_same_page_group_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     normalize_continuation_semantic_header_inplace,
     normalize_fragment_grid_widths_inplace,
@@ -519,6 +520,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: continuation semantic-header normalization failed")
+
+    # Entangled adjacent same-page/semantic-header chains that the per-table
+    # cleanups roll back individually (fixing one cascades a fail onto its
+    # neighbour): fix the whole group atomically with page-break + header-strip,
+    # accepted only if the rendered fail set strictly shrinks with no new fail key.
+    try:
+        n_group = cleanup_entangled_same_page_group_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_group:
+            logger.info(
+                "format_docx: entangled same-page group cleanup removed %d fail blocker(s)",
+                n_group,
+            )
+    except Exception:
+        logger.exception("format_docx: entangled same-page group cleanup failed")
 
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(

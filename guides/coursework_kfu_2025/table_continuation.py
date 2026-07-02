@@ -5605,6 +5605,94 @@ def normalize_fragment_grid_widths_inplace(
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+def cleanup_entangled_same_page_group_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Repair ENTANGLED same-page continuation chains that the per-table cleanup
+    cannot fix alone.
+
+    When two or more adjacent `same_page_continuation` /
+    `semantic_header_repeated_on_continuation` chains sit close together, fixing
+    one shifts pagination and pushes a fail onto its neighbour, so
+    `cleanup_same_page_continuation_blockers_inplace` and
+    `normalize_continuation_semantic_header_inplace` roll each candidate back
+    individually. Fix the whole group ATOMICALLY instead: force a page break
+    before every remaining such marker AND strip its continuation's semantic
+    header (numeric-led canonical), in a single mutation, then verify whole-doc.
+
+    Accept only if content is preserved and the rendered fail set STRICTLY SHRINKS
+    with NO new fail key (a page break that merely trades `same_page_continuation`
+    for `single_table_crosses_pages_without_marker` — a multi-page first fragment —
+    is a new key and is rejected). Otherwise the whole group is rolled back.
+    Content-safe: page-break + header-strip never delete a data row. Bounded: one
+    mutation + one verify render."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    try:
+        baseline_fail, _c, _l = _cross_page_without_marker_probe(docx_path, source_docx_path)
+    except Exception as exc:
+        logger.info("entangled_same_page_group_skip reason=baseline_render_failed error=%s", exc)
+        return 0
+    group = sorted({
+        num for (btype, num) in baseline_fail
+        if btype in ("same_page_continuation", "semantic_header_repeated_on_continuation")
+        and num
+    })
+    if len(group) < 2:
+        # a single residual marker is already handled (and rolled back) by the
+        # per-table cleanup; grouping adds value only for entangled neighbours.
+        return 0
+    backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_entangled_group_"))
+    backup_path = backup_dir / docx_path.name
+    try:
+        shutil.copy2(docx_path, backup_path)
+        doc = Document(str(docx_path))
+        touched: set[str] = set()
+        for _first_idx, marker_xml, _second_idx, num in list(_iter_continuation_chains(doc)):
+            if num in group:
+                _force_marker_page_break(marker_xml)
+                touched.add(num)
+        for num in group:
+            _strip_continuation_semantic_headers(doc, only_num=num)
+        if not touched:
+            shutil.copy2(backup_path, docx_path)
+            return 0
+        doc.save(str(docx_path))
+
+        reason = None
+        if _content_regressed(source_docx_path, docx_path):
+            reason = "content_regression"
+        else:
+            try:
+                after_fail, _c2, _l2 = _cross_page_without_marker_probe(docx_path, source_docx_path)
+            except Exception:
+                reason = "post_render_failed"
+            else:
+                new = after_fail - baseline_fail
+                if new:
+                    reason = f"new_fail_blocker={sorted(new)}"
+                elif len(after_fail) >= len(baseline_fail):
+                    reason = "no_net_reduction"
+        if reason is None:
+            removed = len(baseline_fail) - len(after_fail)
+            logger.info(
+                "entangled_same_page_group_applied group=%s fails_removed=%d", group, removed
+            )
+            return removed
+        shutil.copy2(backup_path, docx_path)
+        logger.info("entangled_same_page_group_rollback group=%s reason=%s", group, reason)
+        return 0
+    except Exception as exc:
+        shutil.copy2(backup_path, docx_path)
+        logger.info("entangled_same_page_group_rollback reason=exception error=%s", exc)
+        return 0
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
