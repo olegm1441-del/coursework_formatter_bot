@@ -26,6 +26,7 @@ from .table_continuation import (
     cleanup_same_page_continuation_blockers_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     normalize_continuation_semantic_header_inplace,
+    normalize_fragment_grid_widths_inplace,
     apply_rendered_table_start_orphan_guard,
 )
 from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
@@ -605,6 +606,25 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: cross-page marker-less table split failed")
+
+    # Normalize continuation-fragment column widths to the first fragment's grid
+    # (acceptance review `fragment_grid_mismatch`). Runs after the cross-page
+    # split so it sees the FINAL fragment set. Deterministic + content-safe
+    # (only widths change); whole-doc rollback on any content regression or new
+    # fail blocker (e.g. a squeeze).
+    try:
+        n_grid = normalize_fragment_grid_widths_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_grid:
+            logger.info(
+                "format_docx: normalized %d continuation fragment grid(s) to first-fragment widths",
+                n_grid,
+            )
+    except Exception:
+        logger.exception("format_docx: fragment grid width normalization failed")
 
     try:
         n_same_page_marker_warnings = warn_same_page_continuation_marker_violations(

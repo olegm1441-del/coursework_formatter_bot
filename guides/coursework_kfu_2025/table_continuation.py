@@ -5456,6 +5456,155 @@ def normalize_continuation_semantic_header_inplace(
     return repaired
 
 
+def _table_grid_proportions(tbl_xml) -> list[float] | None:
+    grid = tbl_xml.find(qn("w:tblGrid"))
+    if grid is None:
+        return None
+    cols = [int(c.get(qn("w:w"), "0") or 0) for c in grid.findall(qn("w:gridCol"))]
+    total = sum(cols)
+    if not cols or total <= 0:
+        return None
+    return [c / total for c in cols]
+
+
+def _fragment_grid_drifts(first, second) -> bool:
+    """True when two fragments share a column count but their grid column-width
+    proportions drift beyond the detector's twip-rounding tolerance (0.02)."""
+    pa = _table_grid_proportions(first._tbl)
+    pb = _table_grid_proportions(second._tbl)
+    if not pa or not pb or len(pa) != len(pb):
+        return False
+    return max(abs(a - b) for a, b in zip(pa, pb)) > 0.02
+
+
+def _copy_fragment_grid_first_to_second(first, second) -> bool:
+    """Make the continuation fragment ``second`` render with the first fragment's
+    column grid: copy tblGrid column widths, the master tblW, and per-cell tcW.
+    Content-safe — touches only widths, never a row or its text. Skips merged-cell
+    fragments and mismatched column counts. Returns True when widths changed."""
+    fgrid = first._tbl.find(qn("w:tblGrid"))
+    sgrid = second._tbl.find(qn("w:tblGrid"))
+    if fgrid is None or sgrid is None:
+        return False
+    fcols = fgrid.findall(qn("w:gridCol"))
+    scols = sgrid.findall(qn("w:gridCol"))
+    if not fcols or len(fcols) != len(scols):
+        return False
+    if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+        return False
+    changed = False
+    for fc, sc in zip(fcols, scols):
+        w = fc.get(qn("w:w"))
+        if w is not None and sc.get(qn("w:w")) != w:
+            sc.set(qn("w:w"), w)
+            changed = True
+    fpr = first._tbl.find(qn("w:tblPr"))
+    spr = second._tbl.find(qn("w:tblPr"))
+    if fpr is not None and spr is not None:
+        fw = fpr.find(qn("w:tblW"))
+        sw = spr.find(qn("w:tblW"))
+        if fw is not None and sw is not None:
+            for attr in (qn("w:w"), qn("w:type")):
+                v = fw.get(attr)
+                if v is not None and sw.get(attr) != v:
+                    sw.set(attr, v)
+                    changed = True
+    widths = _row_cell_widths(first.rows[0]) if first.rows else []
+    if widths:
+        for row in second.rows:
+            _apply_row_cell_widths(row, widths)
+        changed = True
+    return changed
+
+
+def _iter_grid_fragment_pairs(doc: Document):
+    """Yield (first_idx, second_idx) for adjacent table pairs separated only by
+    blank/marker paragraphs — the exact pairs the fragment_grid_mismatch detector
+    inspects, so normalizing them matches what the gate measures."""
+    from .rendered_table_validation import _is_blank_or_marker_paragraph
+    body = list(doc.element.body)
+    tbl_by_xml = {t._tbl: i for i, t in enumerate(doc.tables)}
+    tbl_positions = [i for i, node in enumerate(body) if node.tag == qn("w:tbl")]
+    for a, b in zip(tbl_positions, tbl_positions[1:]):
+        between = body[a + 1:b]
+        if any(not _is_blank_or_marker_paragraph(node) for node in between):
+            continue
+        fi = tbl_by_xml.get(body[a])
+        si = tbl_by_xml.get(body[b])
+        if fi is None or si is None:
+            continue
+        yield fi, si
+
+
+def normalize_fragment_grid_widths_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Normalize continuation-fragment column widths to the first fragment's grid
+    so ``fragment_grid_mismatch`` (needs_human_review) clears. Deterministic and
+    content-safe: only column widths change; never a row or its text. All drifting
+    same-column-count fragment pairs are normalized in one shot, then verified
+    whole-doc — accepted only if content is preserved and NO new fail blocker
+    (e.g. a squeeze) appears; otherwise the whole doc is rolled back. Bounded: at
+    most two renders (baseline + verify)."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    try:
+        baseline_fail, _cross, _lines = _cross_page_without_marker_probe(
+            docx_path, source_docx_path)
+    except Exception as exc:
+        logger.info("fragment_grid_normalize_skip reason=baseline_render_failed error=%s", exc)
+        return 0
+    try:
+        doc = Document(str(docx_path))
+    except Exception:
+        return 0
+    changed = 0
+    for fi, si in _iter_grid_fragment_pairs(doc):
+        try:
+            first = doc.tables[fi]
+            second = doc.tables[si]
+        except IndexError:
+            continue
+        if not _fragment_grid_drifts(first, second):
+            continue
+        if _copy_fragment_grid_first_to_second(first, second):
+            changed += 1
+    if changed == 0:
+        return 0
+    backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_grid_norm_"))
+    backup_path = backup_dir / docx_path.name
+    try:
+        shutil.copy2(docx_path, backup_path)
+        doc.save(str(docx_path))
+        reason = None
+        if _content_regressed(source_docx_path, docx_path):
+            reason = "content_regression"
+        else:
+            try:
+                after_fail, _c2, _l2 = _cross_page_without_marker_probe(
+                    docx_path, source_docx_path)
+            except Exception:
+                reason = "post_render_failed"
+            else:
+                if after_fail - baseline_fail:
+                    reason = f"new_fail_blocker={sorted(after_fail - baseline_fail)}"
+        if reason is None:
+            logger.info("fragment_grid_normalize_applied pairs=%d", changed)
+            return changed
+        shutil.copy2(backup_path, docx_path)
+        logger.info("fragment_grid_normalize_rollback reason=%s", reason)
+        return 0
+    except Exception as exc:
+        shutil.copy2(backup_path, docx_path)
+        logger.info("fragment_grid_normalize_rollback reason=exception error=%s", exc)
+        return 0
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 def restore_docx_if_same_page_continuation_markers(
     docx_path: Path,
     backup_docx_path: Path,
