@@ -26,6 +26,7 @@ from .table_continuation import (
     cleanup_same_page_continuation_blockers_inplace,
     cleanup_entangled_same_page_group_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
+    cleanup_cross_page_by_index_search_inplace,
     normalize_continuation_semantic_header_inplace,
     normalize_fragment_grid_widths_inplace,
     apply_rendered_table_start_orphan_guard,
@@ -625,6 +626,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: cross-page marker-less table split failed")
+
+    # Fallback cross-page splitter that enumerates the split point by DOCX row
+    # index (no row->page mapping) for tables the mapping-based cleanup skipped.
+    # Renders each candidate and accepts only a clean split (target cross cleared,
+    # no new fail key, content preserved); else rolls back. Budget-capped.
+    try:
+        n_cross_ix = cleanup_cross_page_by_index_search_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_cross_ix:
+            logger.info(
+                "format_docx: index-search split %d marker-less cross-page table(s)",
+                n_cross_ix,
+            )
+    except Exception:
+        logger.exception("format_docx: cross-page index-search split failed")
 
     # Normalize continuation-fragment column widths to the first fragment's grid
     # (acceptance review `fragment_grid_mismatch`). Runs after the cross-page

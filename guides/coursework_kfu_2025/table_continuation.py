@@ -5273,6 +5273,139 @@ def cleanup_cross_page_without_marker_blockers_inplace(
     return repaired
 
 
+def _find_table_index_by_caption(doc: Document, table_num: str) -> int | None:
+    for i in range(len(doc.tables)):
+        if _caption_before_table_matches(doc, i, str(table_num)):
+            return i
+    return None
+
+
+def _cross_page_index_search_budget_seconds() -> float:
+    """Per-document wall-clock cap for the DOCX-index cross-page split search.
+    Override with KPFU_CROSS_INDEX_BUDGET_S."""
+    try:
+        return max(30.0, float(os.environ.get("KPFU_CROSS_INDEX_BUDGET_S", "150")))
+    except (TypeError, ValueError):
+        return 150.0
+
+
+def cleanup_cross_page_by_index_search_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Fallback marker-less cross-page splitter that does NOT depend on row→page
+    mapping.
+
+    The primary cleanup (`cleanup_cross_page_without_marker_blockers_inplace`)
+    needs to map DOCX rows to rendered pages (strict/lead/instrumentation) and
+    SKIPS a table when that mapping is ambiguous — leaving winnable tables
+    unsplit. This fallback instead enumerates the split point by DOCX ROW INDEX:
+    for each table still failing `single_table_crosses_pages_without_marker`, it
+    builds the canonical 2-fragment layout (first = header + numeric + rows[:k];
+    continuation = page-broken `Продолжение таблицы N` + numeric + rows[k:]) for
+    candidate k (largest first fragment first), RENDERS, and accepts the first
+    candidate that clears that table's cross fail with NO new fail key and
+    preserved content. Otherwise every candidate is rolled back. PDF is used only
+    to VERIFY, never to choose k. Bounded: per-table candidate cap + per-doc
+    wall-clock budget; re-probes after each applied split (pagination shifts)."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    deadline = time.monotonic() + _cross_page_index_search_budget_seconds()
+    repaired = 0
+    seen: set[str] = set()
+    for _pass in range(8):
+        if time.monotonic() > deadline:
+            break
+        try:
+            baseline_fail, cross_nums, _lines = _cross_page_without_marker_probe(
+                docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info("cross_index_search_probe_skip reason=render_failed error=%s", exc)
+            break
+        todo = sorted(n for n in cross_nums if n not in seen)
+        if not todo:
+            break
+        made_progress = False
+        for num in todo:
+            if time.monotonic() > deadline:
+                break
+            seen.add(num)
+            probe = Document(str(docx_path))
+            tidx = _find_table_index_by_caption(probe, str(num))
+            if tidx is None:
+                continue
+            rows_xml = probe.tables[tidx]._tbl.findall(qn("w:tr"))
+            n = len(rows_xml)
+            if n < 3:
+                continue
+            numeric_idx = 1 if (
+                len(probe.tables[tidx].rows) > 1
+                and _is_docx_numeric_row(_docx_row_cell_texts(probe.tables[tidx].rows[1]))
+            ) else None
+            min_after = 2 if numeric_idx is not None else 1
+            # candidate split points: largest first fragment first (canonical),
+            # capped so a stubborn table cannot exhaust the budget.
+            candidates = [k for k in range(n - 2, min_after - 1, -1)][:8]
+            applied = False
+            for k in candidates:
+                if time.monotonic() > deadline:
+                    break
+                backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_cross_index_"))
+                backup_path = backup_dir / docx_path.name
+                try:
+                    shutil.copy2(docx_path, backup_path)
+                    doc = Document(str(docx_path))
+                    if not _split_cross_page_table_with_marker(
+                        doc, tidx, k, str(num), numeric_row_idx=numeric_idx
+                    ):
+                        shutil.copy2(backup_path, docx_path)
+                        continue
+                    doc.save(str(docx_path))
+                    reason = None
+                    if _content_regressed(source_docx_path, docx_path):
+                        reason = "content_regression"
+                    else:
+                        try:
+                            after_fail, _c, _l = _cross_page_without_marker_probe(
+                                docx_path, source_docx_path)
+                        except Exception:
+                            reason = "post_render_failed"
+                        else:
+                            if ("single_table_crosses_pages_without_marker", num) in after_fail:
+                                reason = "cross_remains"
+                            elif after_fail - baseline_fail:
+                                reason = f"new_fail={sorted(after_fail - baseline_fail)}"
+                    if reason is None:
+                        repaired += 1
+                        made_progress = True
+                        applied = True
+                        logger.info(
+                            "cross_index_split_applied table_num=%s k=%s of_rows=%s", num, k, n
+                        )
+                        break
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info(
+                        "cross_index_split_reject table_num=%s k=%s reason=%s", num, k, reason
+                    )
+                except Exception as exc:
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info(
+                        "cross_index_split_reject table_num=%s k=%s reason=exception error=%s",
+                        num, k, exc,
+                    )
+                finally:
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+            if applied:
+                break  # re-probe from the top: pagination shifted
+        if not made_progress:
+            break
+    if repaired:
+        logger.info("cross_index_search total_repaired=%d", repaired)
+    return repaired
+
+
 # ── Continuation semantic-header normalizer (canonical KFU rule) ──────────────
 #
 # A `Продолжение таблицы N` fragment must repeat ONLY the numeric column row
