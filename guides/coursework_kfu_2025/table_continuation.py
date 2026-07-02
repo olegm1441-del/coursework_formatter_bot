@@ -5406,6 +5406,135 @@ def cleanup_cross_page_by_index_search_inplace(
     return repaired
 
 
+def _move_table_block_to_next_page(doc: Document, table_num: str) -> bool:
+    """Set ``pageBreakBefore`` on the caption paragraph of table ``table_num`` so
+    the whole block (caption + title + table) starts on the next page — real Word
+    mechanics, no blank paragraphs. Returns True when applied (skips if the caption
+    already carries a page break, so a table is never moved twice)."""
+    tidx = _find_table_index_by_caption(doc, str(table_num))
+    if tidx is None:
+        return False
+    cap = _find_caption_paragraph_before_table(doc, doc.tables[tidx]._tbl)
+    if cap is None:
+        return False
+    cap_para = cap[0]
+    pPr = cap_para.find(qn("w:pPr"))
+    if pPr is not None:
+        pbb = pPr.find(qn("w:pageBreakBefore"))
+        if pbb is not None:
+            val = pbb.get(qn("w:val"))
+            # skip only when the break is already ENABLED; a disabled break
+            # (val='0', left by an upstream pass) is exactly what we re-enable.
+            if val is None or val.strip().lower() in ("true", "1", "on"):
+                return False
+    _force_marker_page_break(cap_para)
+    return True
+
+
+def cleanup_cross_page_by_block_move_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Whole-block move (with cascade) for cross-page tables that are small/medium
+    and cross only because they START near a page bottom — moving the whole block
+    to the next page makes it fit, whereas a split would orphan the header.
+
+    For each table still failing `single_table_crosses_pages_without_marker`, set a
+    page break before its caption. If the move shifts a NEIGHBOUR table into a new
+    cross / same-page fail, add that neighbour to the SAME batch and move it too
+    (bounded cascade depth). The batch is accepted only if the rendered fail set
+    STRICTLY SHRINKS with NO new fail key and content is preserved; otherwise the
+    whole batch is rolled back. Runs after the split-based cleanups, so it only
+    handles residual tables those could not split cleanly. Budget-capped."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    deadline = time.monotonic() + _cross_page_index_search_budget_seconds()
+    repaired = 0
+    seen: set[str] = set()
+    for _pass in range(8):
+        if time.monotonic() > deadline:
+            break
+        try:
+            baseline_fail, cross_nums, _l = _cross_page_without_marker_probe(
+                docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info("cross_block_move_probe_skip reason=render_failed error=%s", exc)
+            break
+        todo = sorted(n for n in cross_nums if n not in seen)
+        if not todo:
+            break
+        made_progress = False
+        for num in todo:
+            if time.monotonic() > deadline:
+                break
+            seen.add(num)
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_block_move_"))
+            backup_path = backup_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                batch: list[str] = []
+                cur = num
+                ok_batch = False
+                final_fail: set | None = None
+                for _depth in range(5):  # cascade depth cap
+                    if time.monotonic() > deadline:
+                        break
+                    doc = Document(str(docx_path))
+                    if not _move_table_block_to_next_page(doc, cur):
+                        break
+                    doc.save(str(docx_path))
+                    batch.append(cur)
+                    if _content_regressed(source_docx_path, docx_path):
+                        break
+                    try:
+                        after_fail, _c2, _l2 = _cross_page_without_marker_probe(
+                            docx_path, source_docx_path)
+                    except Exception:
+                        break
+                    new = after_fail - baseline_fail
+                    if not new and len(after_fail) < len(baseline_fail):
+                        ok_batch = True
+                        final_fail = after_fail
+                        break
+                    nxt = None
+                    for (bt, tn) in sorted(new):
+                        if bt in (
+                            "single_table_crosses_pages_without_marker",
+                            "same_page_continuation",
+                        ) and tn not in batch:
+                            nxt = tn
+                            break
+                    if nxt is None:
+                        break  # dead end — a non-movable new fail
+                    cur = nxt
+                if ok_batch and final_fail is not None:
+                    repaired += len(baseline_fail) - len(final_fail)
+                    made_progress = True
+                    for b in batch:
+                        seen.discard(b)
+                    logger.info("cross_block_move_batch_applied batch=%s", batch)
+                    break  # re-probe from the top: pagination shifted
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "cross_block_move_batch_rollback start=%s batch=%s", num, batch
+                )
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                logger.info(
+                    "cross_block_move_batch_rollback start=%s reason=exception error=%s",
+                    num, exc,
+                )
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        if not made_progress:
+            break
+    if repaired:
+        logger.info("cross_block_move total_repaired=%d", repaired)
+    return repaired
+
+
 # ── Continuation semantic-header normalizer (canonical KFU rule) ──────────────
 #
 # A `Продолжение таблицы N` fragment must repeat ONLY the numeric column row

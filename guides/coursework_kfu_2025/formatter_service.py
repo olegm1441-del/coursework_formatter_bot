@@ -27,6 +27,7 @@ from .table_continuation import (
     cleanup_entangled_same_page_group_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     cleanup_cross_page_by_index_search_inplace,
+    cleanup_cross_page_by_block_move_inplace,
     normalize_continuation_semantic_header_inplace,
     normalize_fragment_grid_widths_inplace,
     apply_rendered_table_start_orphan_guard,
@@ -644,6 +645,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: cross-page index-search split failed")
+
+    # Whole-block move (with cascade) for residual cross-page tables that cross
+    # only because they start near a page bottom — moving the block to the next
+    # page fits it where a split would orphan the header. Cascade-repairs a
+    # neighbour shifted by the move; batch rolled back unless net-clean.
+    try:
+        n_move = cleanup_cross_page_by_block_move_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_move:
+            logger.info(
+                "format_docx: block-move cleared %d cross-page fail(s)",
+                n_move,
+            )
+    except Exception:
+        logger.exception("format_docx: cross-page block-move failed")
 
     # Normalize continuation-fragment column widths to the first fragment's grid
     # (acceptance review `fragment_grid_mismatch`). Runs after the cross-page
