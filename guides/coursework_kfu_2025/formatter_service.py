@@ -25,9 +25,11 @@ from .table_continuation import (
     cleanup_same_page_incompatible_chains_inplace,
     cleanup_same_page_continuation_blockers_inplace,
     cleanup_entangled_same_page_group_inplace,
+    cleanup_same_page_by_merge_resplit_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     cleanup_cross_page_by_index_search_inplace,
     cleanup_cross_page_by_block_move_inplace,
+    cleanup_cross_page_by_move_and_split_inplace,
     normalize_continuation_semantic_header_inplace,
     normalize_fragment_grid_widths_inplace,
     apply_rendered_table_start_orphan_guard,
@@ -541,6 +543,24 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: entangled same-page group cleanup failed")
 
+    # Residual same-page / repeated-semantic-header chains whose first fragment
+    # itself spans a page: collapse the chain into one logical table and either
+    # keep it whole (if it now fits) or re-split it into a canonical multi-fragment
+    # chain. Render-verified, content-safe, rolled back unless net-clean.
+    try:
+        n_mr = cleanup_same_page_by_merge_resplit_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_mr:
+            logger.info(
+                "format_docx: merge+resplit rebuilt %d same-page/semhdr chain(s)",
+                n_mr,
+            )
+    except Exception:
+        logger.exception("format_docx: same-page merge+resplit failed")
+
     try:
         n_final_orphan_moves = apply_rendered_table_start_orphan_guard(
             output_path,
@@ -663,6 +683,23 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: cross-page block-move failed")
+
+    # Combined move+split for residual cross-page tables where a split alone
+    # cascades to a neighbour and a move alone leaves the table too tall: move the
+    # block to a fresh page AND split it there. Render-verified, budget-capped.
+    try:
+        n_ms = cleanup_cross_page_by_move_and_split_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_ms:
+            logger.info(
+                "format_docx: move+split cleared %d cross-page fail(s)",
+                n_ms,
+            )
+    except Exception:
+        logger.exception("format_docx: cross-page move+split failed")
 
     # Normalize continuation-fragment column widths to the first fragment's grid
     # (acceptance review `fragment_grid_mismatch`). Runs after the cross-page

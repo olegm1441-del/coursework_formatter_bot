@@ -5535,6 +5535,279 @@ def cleanup_cross_page_by_block_move_inplace(
     return repaired
 
 
+def cleanup_cross_page_by_move_and_split_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Combined move+split for cross-page tables that neither a split alone nor a
+    move alone can fix: a split alone cascades a fail onto a neighbour, while a
+    move alone leaves the table too tall — but moving the block to a fresh page
+    AND splitting it there is clean.
+
+    For each table still failing `single_table_crosses_pages_without_marker`, on a
+    backup copy enable a page break before the caption (whole-block move) and then
+    build the canonical 2-fragment layout for candidate split points k (largest
+    first fragment first). Accept the first k that clears that table's cross fail
+    with NO new fail key and preserved content; else roll back. PDF used only to
+    verify. Runs after the split-only and move-only cleanups, so it only handles
+    residuals they could not fix. Budget-capped."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    deadline = time.monotonic() + _cross_page_index_search_budget_seconds()
+    repaired = 0
+    seen: set[str] = set()
+    for _pass in range(6):
+        if time.monotonic() > deadline:
+            break
+        try:
+            baseline_fail, cross_nums, _l = _cross_page_without_marker_probe(
+                docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info("cross_move_split_probe_skip reason=render_failed error=%s", exc)
+            break
+        todo = sorted(n for n in cross_nums if n not in seen)
+        if not todo:
+            break
+        made_progress = False
+        for num in todo:
+            if time.monotonic() > deadline:
+                break
+            seen.add(num)
+            probe = Document(str(docx_path))
+            tidx0 = _find_table_index_by_caption(probe, str(num))
+            if tidx0 is None:
+                continue
+            n = len(probe.tables[tidx0]._tbl.findall(qn("w:tr")))
+            if n < 3:
+                continue
+            numeric_idx = 1 if (
+                len(probe.tables[tidx0].rows) > 1
+                and _is_docx_numeric_row(_docx_row_cell_texts(probe.tables[tidx0].rows[1]))
+            ) else None
+            min_after = 2 if numeric_idx is not None else 1
+            candidates = [k for k in range(n - 2, min_after - 1, -1)][:8]
+            applied = False
+            for k in candidates:
+                if time.monotonic() > deadline:
+                    break
+                backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_move_split_"))
+                backup_path = backup_dir / docx_path.name
+                try:
+                    shutil.copy2(docx_path, backup_path)
+                    doc = Document(str(docx_path))
+                    _move_table_block_to_next_page(doc, str(num))
+                    tidx = _find_table_index_by_caption(doc, str(num))
+                    if tidx is None or not _split_cross_page_table_with_marker(
+                        doc, tidx, k, str(num), numeric_row_idx=numeric_idx
+                    ):
+                        shutil.copy2(backup_path, docx_path)
+                        continue
+                    doc.save(str(docx_path))
+                    reason = None
+                    if _content_regressed(source_docx_path, docx_path):
+                        reason = "content_regression"
+                    else:
+                        try:
+                            after_fail, _c, _l2 = _cross_page_without_marker_probe(
+                                docx_path, source_docx_path)
+                        except Exception:
+                            reason = "post_render_failed"
+                        else:
+                            if ("single_table_crosses_pages_without_marker", num) in after_fail:
+                                reason = "cross_remains"
+                            elif after_fail - baseline_fail:
+                                reason = f"new_fail={sorted(after_fail - baseline_fail)}"
+                    if reason is None:
+                        repaired += 1
+                        made_progress = True
+                        applied = True
+                        logger.info(
+                            "cross_move_split_applied table_num=%s k=%s of_rows=%s", num, k, n
+                        )
+                        break
+                    shutil.copy2(backup_path, docx_path)
+                except Exception as exc:
+                    shutil.copy2(backup_path, docx_path)
+                    logger.info(
+                        "cross_move_split_reject table_num=%s k=%s reason=exception error=%s",
+                        num, k, exc,
+                    )
+                finally:
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+            if applied:
+                break  # re-probe: pagination shifted
+        if not made_progress:
+            break
+    if repaired:
+        logger.info("cross_move_split total_repaired=%d", repaired)
+    return repaired
+
+
+def _merge_continuation_chain_for_num(doc: Document, num: str) -> int:
+    """Collapse every ``Продолжение таблицы num`` chain into the first physical
+    table: append the continuation's data rows (its duplicate header / numeric row
+    is skipped by _append_second_fragment_data_rows), then delete the marker and
+    the continuation table. Never drops a data row. Returns the fragments merged."""
+    merged = 0
+    changed = True
+    while changed:
+        changed = False
+        for fi, marker, si, chain_num in _iter_continuation_chains(doc):
+            if chain_num != str(num):
+                continue
+            try:
+                first = doc.tables[fi]
+                second = doc.tables[si]
+            except IndexError:
+                continue
+            _append_second_fragment_data_rows(first, second, normalize_to_first_grid=True)
+            _remove_xml_node(marker)
+            _remove_xml_node(second._tbl)
+            merged += 1
+            changed = True
+            break
+    return merged
+
+
+def cleanup_same_page_by_merge_resplit_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Rebuild same-page / repeated-semantic-header manual chains canonically.
+
+    The per-table same-page cleanup and the semantic-header normalizer roll these
+    back because the first fragment itself spans a page (page-breaking the marker
+    exposes a cross on the same table). Instead, collapse the whole chain into ONE
+    logical physical table (header + numeric + all data rows, no duplicate marker/
+    header), then EITHER keep it whole if it now fits on a page, OR re-split it into
+    a canonical multi-fragment chain (numeric-led continuations, each on a new page)
+    via split / move+split. Render-verified: accepted only if the target
+    same_page/semhdr fail clears, the fail set strictly shrinks with NO new fail
+    key, and content is preserved; otherwise the whole table is rolled back.
+    Content-safe (merge appends rows, never deletes). Budget-capped."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    deadline = time.monotonic() + _cross_page_index_search_budget_seconds()
+    repaired = 0
+    seen: set[str] = set()
+
+    def _verify(baseline_fail: set, num: str) -> str | None:
+        if _content_regressed(source_docx_path, docx_path):
+            return "content_regression"
+        try:
+            after_fail, _c, _l = _cross_page_without_marker_probe(docx_path, source_docx_path)
+        except Exception:
+            return "post_render_failed"
+        if ("same_page_continuation", num) in after_fail:
+            return "same_page_remains"
+        if ("semantic_header_repeated_on_continuation", num) in after_fail:
+            return "semhdr_remains"
+        if after_fail - baseline_fail:
+            return f"new_fail={sorted(after_fail - baseline_fail)}"
+        if len(after_fail) >= len(baseline_fail):
+            return "no_net_reduction"
+        return None
+
+    for _pass in range(6):
+        if time.monotonic() > deadline:
+            break
+        try:
+            baseline_fail, _c, _l = _cross_page_without_marker_probe(docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info("merge_resplit_probe_skip reason=render_failed error=%s", exc)
+            break
+        targets = sorted({
+            num for (bt, num) in baseline_fail
+            if bt in ("same_page_continuation", "semantic_header_repeated_on_continuation")
+            and num and num not in seen
+        })
+        if not targets:
+            break
+        made_progress = False
+        for num in targets:
+            if time.monotonic() > deadline:
+                break
+            seen.add(num)
+            backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_merge_resplit_"))
+            backup_path = backup_dir / docx_path.name
+            merged_dir = Path(tempfile.mkdtemp(prefix="kpfu_merge_state_"))
+            merged_path = merged_dir / docx_path.name
+            try:
+                shutil.copy2(docx_path, backup_path)
+                # 1. merge the chain into one physical table
+                doc = Document(str(docx_path))
+                if _merge_continuation_chain_for_num(doc, str(num)) <= 0:
+                    continue
+                doc.save(str(docx_path))
+                shutil.copy2(docx_path, merged_path)  # remember the merged state
+
+                # 2a. merge-only: whole table now fits?
+                if _verify(baseline_fail, str(num)) is None:
+                    repaired += 1
+                    made_progress = True
+                    logger.info("merge_resplit_applied table_num=%s mode=merge_only", num)
+                    break
+
+                # 2b. merged table crosses -> re-split (split / move+split)
+                probe = Document(str(merged_path))
+                tidx0 = _find_table_index_by_caption(probe, str(num))
+                if tidx0 is None:
+                    shutil.copy2(backup_path, docx_path)
+                    continue
+                n = len(probe.tables[tidx0]._tbl.findall(qn("w:tr")))
+                numeric_idx = 1 if (
+                    len(probe.tables[tidx0].rows) > 1
+                    and _is_docx_numeric_row(_docx_row_cell_texts(probe.tables[tidx0].rows[1]))
+                ) else None
+                min_after = 2 if numeric_idx is not None else 1
+                candidates = [k for k in range(n - 2, min_after - 1, -1)][:8]
+                accepted = False
+                for do_move in (False, True):
+                    for k in candidates:
+                        if time.monotonic() > deadline:
+                            break
+                        shutil.copy2(merged_path, docx_path)
+                        doc = Document(str(docx_path))
+                        if do_move:
+                            _move_table_block_to_next_page(doc, str(num))
+                        tidx = _find_table_index_by_caption(doc, str(num))
+                        if tidx is None or not _split_cross_page_table_with_marker(
+                            doc, tidx, k, str(num), numeric_row_idx=numeric_idx
+                        ):
+                            continue
+                        doc.save(str(docx_path))
+                        if _verify(baseline_fail, str(num)) is None:
+                            accepted = True
+                            repaired += 1
+                            made_progress = True
+                            logger.info(
+                                "merge_resplit_applied table_num=%s mode=resplit move=%s k=%s",
+                                num, do_move, k,
+                            )
+                            break
+                    if accepted:
+                        break
+                if accepted:
+                    break
+                shutil.copy2(backup_path, docx_path)
+                logger.info("merge_resplit_rollback table_num=%s reason=no_clean_layout", num)
+            except Exception as exc:
+                shutil.copy2(backup_path, docx_path)
+                logger.info("merge_resplit_rollback table_num=%s reason=exception error=%s", num, exc)
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+                shutil.rmtree(merged_dir, ignore_errors=True)
+        if not made_progress:
+            break
+    if repaired:
+        logger.info("merge_resplit total_repaired=%d", repaired)
+    return repaired
+
+
 # ── Continuation semantic-header normalizer (canonical KFU rule) ──────────────
 #
 # A `Продолжение таблицы N` fragment must repeat ONLY the numeric column row
