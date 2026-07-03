@@ -323,6 +323,30 @@ def test_table_crosses_pages_with_marker_is_ok() -> tuple[bool, str]:
     return _result(True, "marked cross-page continuation is accepted")
 
 
+def test_far_page_reusing_row_text_is_not_cross() -> tuple[bool, str]:
+    """Regression (otchet table 3): a table that is COMPLETE on one page must not
+    be flagged as cross-page just because a DISTANT later page (a summary/appendix
+    table or prose) reuses the same row text. Since the last captioned table's page
+    span runs to end-of-doc, only two CONSECUTIVE data pages count as a real cross."""
+    pdf_lines = [
+        _line("Таблица 1.1.3", 5, 400),
+        _line(_H_113, 5, 430),
+        _line(_R_113A, 5, 470),
+        _line(_R_113B, 5, 510),           # whole table complete on page 5
+        # page 9 (non-adjacent) reuses row A's text — a different later table/prose
+        _line(_R_113A, 9, 260),
+    ]
+    identity = _identity(
+        table_index=2, body_order_index=2, caption_num="1.1.3",
+        header=(_H_113,),
+        rows=(_H_113, _R_113A, _R_113B),
+    )
+    blockers = evaluate_table_layout_acceptance(pdf_lines, [identity])
+    if [b for b in _fails(blockers) if b.blocker_type == "single_table_crosses_pages_without_marker"]:
+        return _result(False, "table complete on one page flagged as cross via distant row-text reuse")
+    return _result(True, "distant non-adjacent row-text reuse is not a cross")
+
+
 # --------------------------------------------------------------------------- #
 # 6. clean document => no fail blockers (Rybakov guard)
 # --------------------------------------------------------------------------- #
@@ -426,6 +450,36 @@ def test_same_page_repeated_header_is_fail() -> tuple[bool, str]:
     return _result(True, "same-page repeated header is a fail blocker")
 
 
+def test_neighbour_table_similar_header_is_not_repeat() -> tuple[bool, str]:
+    """Regression (otchet tables 2 & 3): two DIFFERENT tables with similar headers
+    on the SAME page (each under its own 'Таблица N' caption) must not be flagged
+    as one table's header repeated — the neighbour's header sits under a different
+    caption, so it belongs to a different table."""
+    pdf_lines = [
+        _line("Таблица 2.3.1", 44, 60),
+        _line(_H_REP, 44, 90),                          # table 2.3.1 header (only occurrence)
+        _line(_R_REPA, 44, 140),
+        _line(_R_REPB, 44, 170),
+        _line("Таблица 2.3.2", 44, 300),                # a DIFFERENT table
+        _line(_H_REP + " сроки", 44, 330),              # similar header (contains all 2.3.1 tokens)
+        _line("иной ряд данных значение метрика", 44, 360),
+    ]
+    id1 = _identity(
+        table_index=18, body_order_index=18, caption_num="2.3.1",
+        header=(_H_REP,), rows=(_H_REP, _R_REPA, _R_REPB),
+    )
+    id2 = _identity(
+        table_index=19, body_order_index=19, caption_num="2.3.2",
+        header=(_H_REP + " сроки",), rows=(_H_REP + " сроки", "иной ряд данных значение метрика"),
+    )
+    blockers = evaluate_table_layout_acceptance(pdf_lines, [id1, id2])
+    rep = [b for b in _fails(blockers)
+           if b.blocker_type == "same_page_repeated_header" and b.table_num == "2.3.1"]
+    if rep:
+        return _result(False, "neighbour table's similar header counted as 2.3.1 header repeat")
+    return _result(True, "a neighbour table's similar header is not a repeat")
+
+
 def test_header_repeated_on_next_page_is_ok() -> tuple[bool, str]:
     pdf_lines = [
         _line("Таблица 2.3.1", 43, 60),
@@ -524,7 +578,9 @@ def main() -> int:
         ("fragment width drift is review", test_adjacent_fragment_width_drift_is_review),
         ("cross-page without marker is fail", test_table_crosses_pages_without_marker_is_fail),
         ("cross-page with marker is ok", test_table_crosses_pages_with_marker_is_ok),
+        ("far page reusing row text is not cross", test_far_page_reusing_row_text_is_not_cross),
         ("same-page repeated header is fail", test_same_page_repeated_header_is_fail),
+        ("neighbour similar header is not repeat", test_neighbour_table_similar_header_is_not_repeat),
         ("header repeated on next page ok", test_header_repeated_on_next_page_is_ok),
         ("source-bad duplication downgrades", test_source_bad_duplication_downgrades_fail),
         ("grid mismatch attributed", test_fragment_grid_mismatch_is_attributed),

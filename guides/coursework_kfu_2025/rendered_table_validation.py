@@ -747,10 +747,23 @@ def _orphaned_header_blockers(
         span = _table_page_span(pdf_lines, identity)
         if not span or not _meaningful_rows(identity):
             continue
-        data_pages = {
+        matched = sorted(
             p for p in span
             if _first_meaningful_row_on_page(identity, _page_text(pdf_lines, p), min_overlap=0.7)
-        }
+        )
+        # Only the CONTIGUOUS run of data pages from the first belongs to this
+        # physical table; a distant page that merely reuses the row text (a summary
+        # / appendix table repeating the same figures) is a DIFFERENT table and
+        # must not create a phantom "data page after" that fakes an orphan. (The
+        # span runs to end-of-doc for the last captioned table.)
+        data_pages: set[int] = set()
+        prev: int | None = None
+        for p in matched:
+            if prev is None or p == prev + 1:
+                data_pages.add(p)
+                prev = p
+            else:
+                break
         for page in span:
             page_text = _page_text(pdf_lines, page)
             header_present = any(
@@ -908,11 +921,31 @@ def _same_page_repeated_header_blockers(
             continue
         flagged: set[int] = set()
         for page in _table_page_span(pdf_lines, identity):
+            page_lines = _page_lines(pdf_lines, page)
             # lines on this page that essentially reproduce the whole header row
             hits = [
-                line for line in _page_lines(pdf_lines, page)
+                line for line in page_lines
                 if _contains_fingerprint(_line_text(line), header, min_overlap=0.85)
             ]
+            # A DIFFERENT table with a SIMILAR header (e.g. otchet's financial
+            # tables all start "Показатель … 2022 г. 2023 г. 2024 г. …") renders its
+            # own header under its own "Таблица M" caption on the same page. Only
+            # count header matches within THIS table's block — above the next
+            # other-table caption — so a neighbour's header is not counted as a
+            # repeat of this one.
+            page_caps = [
+                (m.group(1), line.top)
+                for line in page_lines
+                for m in (_CAPTION_RE.match(_line_text(line)),)
+                if m
+            ]
+            this_caps = [top for cnum, top in page_caps if cnum == num]
+            if this_caps:
+                this_top = min(this_caps)
+                other_tops = [top for cnum, top in page_caps if cnum != num and top > this_top]
+                if other_tops:
+                    boundary = min(other_tops)
+                    hits = [line for line in hits if line.top < boundary]
             # collapse wrapped header lines: count occurrences separated by a gap
             occurrences = 0
             last_top = None
@@ -971,7 +1004,19 @@ def _cross_page_without_marker_blockers(
         )
         if len(data_pages) < 2:
             continue
-        first, last = data_pages[0], data_pages[-1]
+        # A single physical table renders as ONE contiguous block, so a genuine
+        # cross flows onto the IMMEDIATELY following page. A non-adjacent match is a
+        # DIFFERENT later table (or prose) that merely reuses this table's row text
+        # — e.g. a summary/appendix table repeating the same figures — not a
+        # continuation of THIS table. (`_table_page_span` runs to the next caption,
+        # so for the LAST captioned table it reaches end-of-doc.) Require two
+        # consecutive data pages and bound first/last to that contiguous cross.
+        data_set = set(data_pages)
+        cross_starts = [p for p in data_pages if (p + 1) in data_set]
+        if not cross_starts:
+            continue
+        first = cross_starts[0]
+        last = max(p + 1 for p in cross_starts)
         marker_pages = {line.page_num for line in _strict_marker_lines(pdf_lines, num)}
         has_marker = any(first < mp <= last for mp in marker_pages)
         if not has_marker:
@@ -981,7 +1026,7 @@ def _cross_page_without_marker_blockers(
                     severity="fail",
                     table_num=num,
                     page=first,
-                    evidence={"data_pages": data_pages},
+                    evidence={"data_pages": [p for p in data_pages if first <= p <= last]},
                 )
             )
     return out

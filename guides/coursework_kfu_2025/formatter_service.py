@@ -720,6 +720,26 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: fragment grid width normalization failed")
 
+    # Late same-page collapse: a same_page_continuation whose whole table fits on
+    # one page once the cross-page solvers have settled pagination (e.g. example1
+    # 1.2.2 — entangled with a neighbour that the earlier merge+resplit pass had to
+    # fix first). Re-run merge+resplit here so such a chain collapses into a single
+    # table. Render-verified + rolled back unless net-clean; a no-op for docs with
+    # no residual same-page/semhdr chain.
+    try:
+        n_mr_late = cleanup_same_page_by_merge_resplit_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_mr_late:
+            logger.info(
+                "format_docx: late merge+resplit rebuilt %d same-page/semhdr chain(s)",
+                n_mr_late,
+            )
+    except Exception:
+        logger.exception("format_docx: late same-page merge+resplit failed")
+
     try:
         n_same_page_marker_warnings = warn_same_page_continuation_marker_violations(
             output_path,
