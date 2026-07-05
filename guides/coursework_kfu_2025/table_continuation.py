@@ -2378,10 +2378,12 @@ def _split_table_at(doc: Document, tbl_xml, split_after: int, continuation_text:
 
 _NUMERIC_CELL_RE = re.compile(r"^[\d\s\+\-−–,.%]+$")
 _PT_PER_CHAR_NUMERIC = 6.0   # approx pt/char for 12pt TNR digits
+_PT_PER_CHAR_TEXT = 6.6      # approx pt/char for 14pt TNR proportional text
 _CELL_H_PADDING = 8.0        # left+right cell padding (pt) added to content width
+_MAX_WORD_MIN_PT = 95.0      # cap so one long word can't demand the whole table
 
 
-def _compute_col_minimums(tbl_xml, n_cols: int) -> list[float]:
+def _compute_col_minimums(tbl_xml, n_cols: int, *, word_aware: bool = False) -> list[float]:
     """
     Compute per-column minimum widths (pt) in a single pass over all rows.
 
@@ -2389,9 +2391,12 @@ def _compute_col_minimums(tbl_xml, n_cols: int) -> list[float]:
     set to the width needed to render the longest value on one line:
         min_w = len(text) × _PT_PER_CHAR_NUMERIC + _CELL_H_PADDING
 
-    For all other cells (header or text), the minimum falls back to _MIN_COL_PT.
-    This protects numeric columns (e.g. "9 503 005") from being scaled so narrow
-    that values wrap to multiple lines.
+    For all other cells (header or text), the minimum falls back to _MIN_COL_PT —
+    UNLESS ``word_aware`` is set, in which case the minimum is also raised to fit
+    the longest single WORD on one line (capped at _MAX_WORD_MIN_PT). This is what
+    prevents a too-narrow column from wrapping a header letter-by-letter (the
+    illegible-squeeze defect); it is opt-in so the default width normalization is
+    unchanged.
 
     Only single-column cells (gridSpan = 1) are considered.
     """
@@ -2418,13 +2423,21 @@ def _compute_col_minimums(tbl_xml, n_cols: int) -> list[float]:
                         content_w = len(cell_text) * _PT_PER_CHAR_NUMERIC + _CELL_H_PADDING
                         if content_w > minimums[col_idx]:
                             minimums[col_idx] = content_w
+                    elif word_aware and cell_text:
+                        longest_word = max((len(w) for w in cell_text.split()), default=0)
+                        word_w = min(
+                            longest_word * _PT_PER_CHAR_TEXT + _CELL_H_PADDING,
+                            _MAX_WORD_MIN_PT,
+                        )
+                        if word_w > minimums[col_idx]:
+                            minimums[col_idx] = word_w
 
             col_idx += span
 
     return minimums
 
 
-def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
+def _optimize_table_col_widths(tbl_xml, body_width_pt: float, *, word_aware: bool = False) -> bool:
     """
     Ensure no column is narrower than its content minimum and total width ≤ body_width_pt.
 
@@ -2456,8 +2469,9 @@ def _optimize_table_col_widths(tbl_xml, body_width_pt: float) -> bool:
     if total < 1:
         return False
 
-    # Content-aware per-column minimums (protects numeric columns from over-shrinking)
-    col_mins = _compute_col_minimums(tbl_xml, n)
+    # Content-aware per-column minimums (protects numeric columns from over-shrinking;
+    # word_aware also protects text columns from letter-by-letter squeeze)
+    col_mins = _compute_col_minimums(tbl_xml, n, word_aware=word_aware)
 
     changed = False
 
@@ -6069,6 +6083,435 @@ def _iter_grid_fragment_pairs(doc: Document):
         if fi is None or si is None:
             continue
         yield fi, si
+
+
+def _second_repeats_first_header(first, second) -> bool:
+    """True when the SECOND fragment's leading row duplicates the FIRST fragment's
+    semantic header (a repeated header, not a numeric row)."""
+    if not first.rows or not second.rows:
+        return False
+    v0 = _docx_row_cell_texts(second.rows[0])
+    if _is_docx_numeric_row(v0):
+        return False
+    return _docx_row_fingerprint(second.rows[0]) == _docx_row_fingerprint(first.rows[0])
+
+
+def _remove_strict_markers_between_tables(doc: Document, first_tbl, second_tbl) -> None:
+    """Remove any `Продолжение таблицы N` marker paragraph between two tables."""
+    body = list(doc.element.body)
+    para_by_xml = {p._element: p for p in doc.paragraphs}
+    try:
+        a = body.index(first_tbl); b = body.index(second_tbl)
+    except ValueError:
+        return
+    for node in body[a + 1:b]:
+        if node.tag == qn("w:p"):
+            para = para_by_xml.get(node)
+            if para is not None and _strict_marker_table_num(para.text or ""):
+                _remove_xml_node(node)
+
+
+def _layout_fail_keys(docx_path: Path, source_docx_path: Path | None) -> set:
+    """Render once; return the set of (blocker_type, table_num) fail keys."""
+    from .rendered_table_validation import (
+        build_rendered_table_identities,
+        evaluate_table_layout_acceptance,
+    )
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        ids = build_rendered_table_identities(doc)
+        src_ids = None
+        if source_docx_path is not None:
+            try:
+                src_ids = build_rendered_table_identities(Document(str(source_docx_path)))
+            except Exception:
+                src_ids = None
+        bl = evaluate_table_layout_acceptance(pdf_lines, ids, doc=doc, source_identities=src_ids)
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+    return {(b.blocker_type, b.table_num) for b in bl if b.severity == "fail"}
+
+
+def _pagebreak_before_table_caption(doc: Document, table_num: str) -> bool:
+    """Set pageBreakBefore on the caption of table ``table_num`` so its whole
+    start group (caption + title + header + numeric + first data row) moves to the
+    next page — the canonical repair for a table-start orphan."""
+    for idx in range(len(doc.tables)):
+        if not _caption_before_table_matches(doc, idx, str(table_num)):
+            continue
+        cap = _find_caption_paragraph_before_table(doc, doc.tables[idx]._tbl)
+        if cap is None:
+            return False
+        _force_marker_page_break(cap[0])
+        return True
+    return False
+
+
+def repair_same_page_duplicate_headers_batch_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Deterministic batch repair of same-page repeated-header fragments, with
+    cascade-aware orphan repair.
+
+    Unlike a per-candidate render-gated collapse (which is load-flaky because each
+    accept/reject depends on a jittering render), this applies ALL qualifying
+    collapses as one DOCX mutation, then repairs any table-start orphan the shorter
+    document exposes by moving that table's start group to the next page — instead
+    of rolling the collapse back. A single final render validation gates the whole
+    batch: rolled back only if content/structure is damaged or a hard fail survives.
+
+    Collapse: for adjacent table fragments where the SECOND repeats the FIRST's
+    semantic header (same column count, no merged cells), append the second's data
+    rows to the first normalized to the first's grid, drop the duplicate header /
+    numeric and any `Продолжение таблицы N` marker, remove the second table — so the
+    logical table renders as ONE clean table (clears same_page_repeated_fragment +
+    fragment_grid_mismatch). Content-safe: never deletes a data row."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+
+    # Cheap no-render pre-scan: only pay for the baseline render (and the batch)
+    # when the document actually contains at least one qualifying repeated-header
+    # fragment pair. The vast majority of documents have none, so this avoids an
+    # extra render per document across the corpus.
+    try:
+        pre_doc = Document(str(docx_path))
+        has_candidate = False
+        for fi, si in _iter_grid_fragment_pairs(pre_doc):
+            try:
+                first = pre_doc.tables[fi]; second = pre_doc.tables[si]
+            except IndexError:
+                continue
+            if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+                continue
+            if len(first.columns) != len(second.columns):
+                continue
+            if _second_repeats_first_header(first, second):
+                has_candidate = True
+                break
+        if not has_candidate:
+            return 0
+    except Exception as exc:
+        logger.info("dup_header_batch_skip reason=prescan_failed error=%s", exc)
+        return 0
+
+    try:
+        base_fail = _layout_fail_keys(docx_path, source_docx_path)
+    except Exception as exc:
+        logger.info("dup_header_batch_skip reason=baseline_render_failed error=%s", exc)
+        return 0
+
+    backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_dup_header_batch_"))
+    backup_path = backup_dir / docx_path.name
+    try:
+        shutil.copy2(docx_path, backup_path)
+        doc = Document(str(docx_path))
+        collapsed: list[str] = []
+        changed = True
+        guard = 0
+        while changed and guard < 64:
+            guard += 1
+            changed = False
+            for fi, si in _iter_grid_fragment_pairs(doc):
+                try:
+                    first = doc.tables[fi]; second = doc.tables[si]
+                except IndexError:
+                    continue
+                if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+                    continue
+                if len(first.columns) != len(second.columns):
+                    continue
+                if not _second_repeats_first_header(first, second):
+                    continue
+                cap = _find_caption_paragraph_before_table(doc, first._tbl)
+                num = cap[1] if cap else "?"
+                appended = _append_second_fragment_data_rows(first, second, normalize_to_first_grid=True)
+                if appended <= 0:
+                    continue
+                _remove_strict_markers_between_tables(doc, first._tbl, second._tbl)
+                _remove_xml_node(second._tbl)
+                collapsed.append(num)
+                changed = True
+                break
+        if not collapsed:
+            return 0
+        doc.save(str(docx_path))
+
+        if _content_regressed(source_docx_path, docx_path):
+            shutil.copy2(backup_path, docx_path)
+            logger.info("dup_header_batch_rollback reason=content_regression collapsed=%s", collapsed)
+            return 0
+
+        # cascade: page-break before any table-start orphan the collapse exposed
+        try:
+            after_fail = _layout_fail_keys(docx_path, source_docx_path)
+        except Exception:
+            shutil.copy2(backup_path, docx_path)
+            return 0
+        new_orphans = sorted({
+            num for (bt, num) in (after_fail - base_fail)
+            if bt in ("orphaned_header_row", "table_start_orphan") and num
+        })
+        if new_orphans:
+            doc = Document(str(docx_path))
+            moved = []
+            for num in new_orphans:
+                if _pagebreak_before_table_caption(doc, num):
+                    moved.append(num)
+            doc.save(str(docx_path))
+            logger.info("dup_header_batch_cascade_pagebreak tables=%s", moved)
+            try:
+                final_fail = _layout_fail_keys(docx_path, source_docx_path)
+            except Exception:
+                shutil.copy2(backup_path, docx_path)
+                return 0
+        else:
+            final_fail = after_fail
+
+        new = final_fail - base_fail
+        if new:
+            shutil.copy2(backup_path, docx_path)
+            logger.info("dup_header_batch_rollback reason=unrepaired_new_fail=%s collapsed=%s",
+                        sorted(new), collapsed)
+            return 0
+        if _content_regressed(source_docx_path, docx_path):
+            shutil.copy2(backup_path, docx_path)
+            logger.info("dup_header_batch_rollback reason=content_regression_after_cascade")
+            return 0
+        logger.info("dup_header_batch_applied collapsed=%s", collapsed)
+        return len(collapsed)
+    except Exception as exc:
+        shutil.copy2(backup_path, docx_path)
+        logger.info("dup_header_batch_rollback reason=exception error=%s", exc)
+        return 0
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _layout_fail_review_keys(docx_path: Path, source_docx_path: Path | None):
+    """Render once; return (fail_keys, review_keys) as (blocker_type, table_num) sets."""
+    from .rendered_table_validation import (
+        build_rendered_table_identities,
+        evaluate_table_layout_acceptance,
+    )
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        ids = build_rendered_table_identities(doc)
+        src_ids = None
+        if source_docx_path is not None:
+            try:
+                src_ids = build_rendered_table_identities(Document(str(source_docx_path)))
+            except Exception:
+                src_ids = None
+        bl = evaluate_table_layout_acceptance(pdf_lines, ids, doc=doc, source_identities=src_ids)
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+    fails = {(b.blocker_type, b.table_num) for b in bl if b.severity == "fail"}
+    reviews = {(b.blocker_type, b.table_num) for b in bl if b.severity == "needs_human_review"}
+    return fails, reviews
+
+
+def repair_squeezed_tables_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Portrait-only width redistribution for tables flagged
+    `cell_text_overflow_or_illegible_squeeze`.
+
+    Re-run the content-aware column-width optimizer in WORD-AWARE mode on each
+    squeezed table so every column is at least wide enough for its longest word
+    (taking width from wider donor columns, keeping the total within the printable
+    page width) — this removes letter-by-letter / vertical wrapping without
+    landscape. Verified: the squeeze review clears, no new fail/review appears, and
+    content is preserved; otherwise rolled back."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    try:
+        base_fail, base_review = _layout_fail_review_keys(docx_path, source_docx_path)
+    except Exception as exc:
+        logger.info("squeeze_repair_skip reason=baseline_render_failed error=%s", exc)
+        return 0
+    squeeze_nums = sorted({
+        num for (bt, num) in base_review
+        if bt == "cell_text_overflow_or_illegible_squeeze" and num
+    })
+    if not squeeze_nums:
+        return 0
+    backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_squeeze_"))
+    backup_path = backup_dir / docx_path.name
+    try:
+        shutil.copy2(docx_path, backup_path)
+        doc = Document(str(docx_path))
+        body_w = _body_width_pt(doc)
+        fixed = 0
+        for num in squeeze_nums:
+            for i in range(len(doc.tables)):
+                if not _caption_before_table_matches(doc, i, str(num)):
+                    continue
+                tbl_xml = doc.tables[i]._tbl
+                if _table_has_merged_cells_docx(doc.tables[i]):
+                    break
+                if _optimize_table_col_widths(tbl_xml, body_w, word_aware=True):
+                    fixed += 1
+                break
+        if fixed == 0:
+            return 0
+        doc.save(str(docx_path))
+
+        reason = None
+        if _content_regressed(source_docx_path, docx_path):
+            reason = "content_regression"
+        else:
+            try:
+                after_fail, after_review = _layout_fail_review_keys(docx_path, source_docx_path)
+            except Exception:
+                reason = "post_render_failed"
+            else:
+                if after_fail - base_fail:
+                    reason = f"new_fail={sorted(after_fail - base_fail)}"
+                elif after_review - base_review:
+                    reason = f"new_review={sorted(after_review - base_review)}"
+        if reason is None:
+            logger.info("squeeze_repair_applied tables=%s", squeeze_nums)
+            return fixed
+        shutil.copy2(backup_path, docx_path)
+        logger.info("squeeze_repair_rollback tables=%s reason=%s", squeeze_nums, reason)
+        return 0
+    except Exception as exc:
+        shutil.copy2(backup_path, docx_path)
+        logger.info("squeeze_repair_rollback reason=exception error=%s", exc)
+        return 0
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _merge_numeric_continuation_for_num(doc: Document, num: str) -> int:
+    """Merge a marker-less numeric-led continuation fragment into the caption
+    fragment for ``num``.
+
+    The continuation fragment starts with the numeric label row ("1 2 … N"), has
+    the same column count as the caption fragment, and carries NO strict
+    ``Продолжение таблицы`` marker (marker chains are handled by
+    _merge_continuation_chain_for_num). Content-safe: appends the continuation's
+    data rows (its duplicate numeric row is dropped by
+    _append_second_fragment_data_rows), never deletes a data row. Returns the
+    number of fragments merged."""
+    merged = 0
+    changed = True
+    while changed:
+        changed = False
+        tables = doc.tables
+        for i in range(len(tables) - 1):
+            first = tables[i]
+            cap = _find_caption_paragraph_before_table(doc, first._tbl)
+            if not cap or str(cap[1]) != str(num):
+                continue
+            second = tables[i + 1]
+            if _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second):
+                continue
+            if len(first.columns) != len(second.columns):
+                continue
+            if not second.rows:
+                continue
+            if not _is_docx_numeric_row(_docx_row_cell_texts(second.rows[0])):
+                continue
+            # second must be a continuation of `num`, not a different captioned table
+            scap = _find_caption_paragraph_before_table(doc, second._tbl)
+            if scap and scap[1] and str(scap[1]) != str(num):
+                continue
+            if _append_second_fragment_data_rows(first, second, normalize_to_first_grid=True) <= 0:
+                continue
+            _remove_strict_markers_between_tables(doc, first._tbl, second._tbl)
+            _remove_xml_node(second._tbl)
+            merged += 1
+            changed = True
+            break
+    return merged
+
+
+def merge_same_page_numeric_continuations_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Fix marker-less same-page numeric continuation defects.
+
+    A source table pre-split into numeric-led fragments whose fragments happen to
+    fit on ONE page renders with its numeric label row ("1 2 … N") repeated
+    mid-table (no ``Продолжение таблицы`` marker) — a visible defect the strict
+    marker detectors miss. Merge each such table's fragments into ONE clean table.
+
+    Render-gated + content-safe: acts only on tables the acceptance gate flags
+    with ``same_page_numeric_continuation``; accepts only if that flag clears with
+    NO new fail/review and content is preserved, else rolls the whole doc back
+    (this leaves genuine cross-page continuations, e.g. appendix chains, and the
+    Rybakov gold untouched, since they are never flagged). Bounded: two renders."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+    try:
+        base_fail, base_review = _layout_fail_review_keys(docx_path, source_docx_path)
+    except Exception as exc:
+        logger.info("numeric_cont_merge_skip reason=baseline_render_failed error=%s", exc)
+        return 0
+    target_nums = sorted({
+        num for (bt, num) in base_fail
+        if bt == "same_page_numeric_continuation" and num
+    })
+    if not target_nums:
+        return 0
+    backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_numeric_cont_"))
+    backup_path = backup_dir / docx_path.name
+    try:
+        shutil.copy2(docx_path, backup_path)
+        doc = Document(str(docx_path))
+        merged_total = 0
+        for num in target_nums:
+            merged_total += _merge_numeric_continuation_for_num(doc, num)
+        if merged_total == 0:
+            return 0
+        doc.save(str(docx_path))
+
+        reason = None
+        if _content_regressed(source_docx_path, docx_path):
+            reason = "content_regression"
+        else:
+            try:
+                after_fail, after_review = _layout_fail_review_keys(docx_path, source_docx_path)
+            except Exception:
+                reason = "post_render_failed"
+            else:
+                if after_fail - base_fail:
+                    reason = f"new_fail={sorted(after_fail - base_fail)}"
+                elif after_review - base_review:
+                    reason = f"new_review={sorted(after_review - base_review)}"
+                elif any(bt == "same_page_numeric_continuation" and num in target_nums
+                         for (bt, num) in after_fail):
+                    reason = "defect_remains"
+        if reason is None:
+            logger.info("numeric_cont_merge_applied tables=%s merged=%d", target_nums, merged_total)
+            return merged_total
+        shutil.copy2(backup_path, docx_path)
+        logger.info("numeric_cont_merge_rollback tables=%s reason=%s", target_nums, reason)
+        return 0
+    except Exception as exc:
+        shutil.copy2(backup_path, docx_path)
+        logger.info("numeric_cont_merge_rollback reason=exception error=%s", exc)
+        return 0
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def normalize_fragment_grid_widths_inplace(

@@ -735,6 +735,47 @@ def _same_page_continuation_blockers(
     return out
 
 
+def _same_page_numeric_continuation_blockers(
+    pdf_lines: list[PdfLine],
+    table_identities: list[RenderedTableIdentity],
+) -> list[TableLayoutBlocker]:
+    """Marker-less same-page numeric continuation defect.
+
+    A table pre-split in the source into numeric-led fragments whose fragments
+    happen to fit on ONE page renders with its numeric label row ("1 2 … N")
+    repeated mid-table, with no ``Продолжение таблицы`` marker between the
+    fragments. ``_same_page_continuation_blockers`` misses it because it keys off
+    strict markers, so this visible defect was previously undetected. Detect it
+    structurally: the table's numeric_row_fingerprint appearing 2+ times on a
+    single page WITHIN the table's own caption-to-next-caption span (the span
+    excludes other tables' captions, so both occurrences belong to this table).
+    """
+    out: list[TableLayoutBlocker] = []
+    for identity in table_identities:
+        num = identity.caption_num
+        if not num or not identity.numeric_row_fingerprint:
+            continue
+        for page in _table_page_span(pdf_lines, identity):
+            count = _numeric_row_count(
+                _page_lines(pdf_lines, page), identity.numeric_row_fingerprint
+            )
+            if count >= 2:
+                out.append(
+                    TableLayoutBlocker(
+                        blocker_type="same_page_numeric_continuation",
+                        severity="fail",
+                        table_num=num,
+                        page=page,
+                        evidence={
+                            "reason": "marker_less_numeric_repeat_same_page",
+                            "numeric_row_count": count,
+                        },
+                    )
+                )
+                break
+    return out
+
+
 def _orphaned_header_blockers(
     pdf_lines: list[PdfLine],
     table_identities: list[RenderedTableIdentity],
@@ -1145,6 +1186,12 @@ def evaluate_table_layout_acceptance(
         b for b in _same_page_repeated_header_blockers(pdf_lines, table_identities)
         if (b.table_num, b.page) not in sp_keys
     )
+    # Marker-less same-page numeric continuation (numeric label row repeated
+    # mid-table on one page, no strict marker) — the same defect class, deduped
+    # against the marker-based same-page flags above.
+    numeric_sp = _same_page_numeric_continuation_blockers(pdf_lines, table_identities)
+    blockers.extend(b for b in numeric_sp if (b.table_num, b.page) not in sp_keys)
+    sp_keys |= {(b.table_num, b.page) for b in numeric_sp}
     blockers.extend(_cross_page_without_marker_blockers(pdf_lines, table_identities))
     blockers.extend(_semantic_header_on_continuation_blockers(table_identities))
     blockers.extend(_orphaned_header_blockers(pdf_lines, table_identities))

@@ -26,6 +26,9 @@ from .table_continuation import (
     cleanup_same_page_continuation_blockers_inplace,
     cleanup_entangled_same_page_group_inplace,
     cleanup_same_page_by_merge_resplit_inplace,
+    repair_same_page_duplicate_headers_batch_inplace,
+    repair_squeezed_tables_inplace,
+    merge_same_page_numeric_continuations_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     cleanup_cross_page_by_index_search_inplace,
     cleanup_cross_page_by_block_move_inplace,
@@ -601,7 +604,11 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
                     source_table_identities=source_table_identities,
                 )
         if rendered_violations:
-            _append_rendered_continuation_warnings(report, rendered_violations)
+            # NOTE: warnings are NOT appended to the report here — the late batch
+            # collapse / squeeze repair further below can still fix these fragments,
+            # so continuation warnings are (re)emitted from the FINAL layout after
+            # those stages (see the final rendered-continuation warning pass), which
+            # avoids stale "повторный фрагмент" warnings for tables that end clean.
             hard_count = sum(
                 1
                 for violation in rendered_violations
@@ -739,6 +746,75 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: late same-page merge+resplit failed")
+
+    # Deterministic batch collapse of same-page repeated-header fragments (student
+    # manual tables with a duplicate semantic header mid-page, incompatible grids)
+    # with cascade-aware orphan repair. Runs LAST so the document has settled;
+    # applies all collapses as one mutation and page-breaks any table the shorter
+    # document orphans, instead of a load-flaky per-candidate render rollback.
+    try:
+        n_dup_batch = repair_same_page_duplicate_headers_batch_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_dup_batch:
+            logger.info(
+                "format_docx: batch-collapsed %d same-page duplicate-header fragment(s)",
+                n_dup_batch,
+            )
+    except Exception:
+        logger.exception("format_docx: same-page duplicate-header batch repair failed")
+
+    # Portrait-only width redistribution for tables whose columns are squeezed so
+    # narrow that text wraps letter-by-letter (cell_text_overflow_or_illegible_squeeze):
+    # widen each column to fit its longest word using donor width, verified+rolled back.
+    try:
+        n_squeeze = repair_squeezed_tables_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_squeeze:
+            logger.info(
+                "format_docx: width-redistributed %d squeezed table(s)",
+                n_squeeze,
+            )
+    except Exception:
+        logger.exception("format_docx: squeezed-table width repair failed")
+
+    # Merge marker-less same-page numeric continuations: a source table pre-split
+    # into numeric-led fragments that fit on one page renders with its numeric
+    # label row repeated mid-table. Collapse those into one clean table (genuine
+    # cross-page / appendix continuations are never flagged, so stay untouched).
+    try:
+        n_numeric_cont = merge_same_page_numeric_continuations_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_numeric_cont:
+            logger.info(
+                "format_docx: merged %d marker-less same-page numeric continuation(s)",
+                n_numeric_cont,
+            )
+    except Exception:
+        logger.exception("format_docx: same-page numeric continuation merge failed")
+
+    # Final rendered-continuation warning pass. Runs AFTER the late batch collapse
+    # and squeeze repair so continuation warnings ("повторный фрагмент" /
+    # same_page_repeated_fragment, missing markers) reflect the FINAL layout rather
+    # than a pre-collapse state. This is the single authoritative emission of these
+    # warnings — the earlier validation pass intentionally does not append them.
+    try:
+        final_violations = _rendered_continuation_violations_for_docx(
+            output_path,
+            source_table_identities=source_table_identities,
+        )
+        if final_violations:
+            _append_rendered_continuation_warnings(report, final_violations)
+    except Exception:
+        logger.exception("format_docx: final rendered-continuation warning pass failed")
 
     try:
         n_same_page_marker_warnings = warn_same_page_continuation_marker_violations(
