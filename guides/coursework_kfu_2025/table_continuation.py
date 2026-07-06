@@ -6514,6 +6514,159 @@ def merge_same_page_numeric_continuations_inplace(
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+def _render_fail_and_avoidable(docx_path: Path, source_docx_path: Path | None):
+    """Render once; return (fail_keys, avoidable_continuation_nums)."""
+    from .rendered_table_validation import (
+        build_rendered_table_identities,
+        evaluate_table_layout_acceptance,
+        avoidable_continuation_split_blockers,
+    )
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_docx_to_pdf(Path(docx_path))
+        pdf_lines = analyze_pdf_lines(pdf_path)
+        doc = Document(str(docx_path))
+        ids = build_rendered_table_identities(doc)
+        src_ids = None
+        if source_docx_path is not None:
+            try:
+                src_ids = build_rendered_table_identities(Document(str(source_docx_path)))
+            except Exception:
+                src_ids = None
+        bl = evaluate_table_layout_acceptance(pdf_lines, ids, doc=doc, source_identities=src_ids)
+        fail = {(b.blocker_type, b.table_num) for b in bl if b.severity == "fail"}
+        avoid = {b.table_num for b in avoidable_continuation_split_blockers(pdf_path) if b.table_num}
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+    return fail, avoid
+
+
+_AVOIDABLE_CASCADE_FAILS = (
+    "single_table_crosses_pages_without_marker",
+    "orphaned_header_row",
+    "table_start_orphan",
+)
+
+
+def merge_avoidable_continuations_inplace(
+    docx_path: Path,
+    *,
+    source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Remove AVOIDABLE table continuation splits (KFU: a table that fits on one
+    page must stay one clean table).
+
+    For each continuation the rendered-geometry detector flags as avoidable (the
+    continuation fragment fits in the previous page's blank tail), merge the whole
+    ``Продолжение таблицы N`` chain back into the first fragment (drop the marker
+    and the duplicate numeric row, keep one header + one numeric row + all data
+    rows, source/note after the merged table). If merging shifts a LATER table so
+    it now crosses a page boundary or orphans, repair that later table with a
+    page break before its caption group (never roll the merge back for a
+    downstream cascade). Render+content gated: a merge is kept only if the target
+    is no longer avoidable, NO new fail survives, and content is preserved;
+    otherwise the whole group is rolled back and each table retried on its own.
+
+    Genuine long continuations and appendix continuations are never flagged, so
+    they are never touched. Bounded renders; deterministic (fixed merge order)."""
+    docx_path = Path(docx_path)
+    source_docx_path = Path(source_docx_path) if source_docx_path is not None else None
+
+    def _cascade_repair(base_fail: set) -> bool:
+        for _ in range(8):
+            f = _layout_fail_keys(docx_path, source_docx_path)
+            cascade = sorted({
+                num for (bt, num) in (f - base_fail)
+                if bt in _AVOIDABLE_CASCADE_FAILS and num
+            })
+            if not cascade:
+                return True
+            doc = Document(str(docx_path))
+            moved = [num for num in cascade if _pagebreak_before_table_caption(doc, num)]
+            doc.save(str(docx_path))
+            if not moved:
+                return False
+        f = _layout_fail_keys(docx_path, source_docx_path)
+        return not {num for (bt, num) in (f - base_fail) if bt in _AVOIDABLE_CASCADE_FAILS and num}
+
+    def _try_group(nums: list[str], base_fail: set) -> int:
+        backup_dir = Path(tempfile.mkdtemp(prefix="kpfu_avoid_cont_"))
+        backup_path = backup_dir / docx_path.name
+        try:
+            shutil.copy2(docx_path, backup_path)
+            doc = Document(str(docx_path))
+            got = sum(1 for num in nums if _merge_continuation_chain_for_num(doc, num) > 0)
+            if got == 0:
+                return 0
+            doc.save(str(docx_path))
+            cascade_ok = _cascade_repair(base_fail)
+            final_fail, final_avoid = _render_fail_and_avoidable(docx_path, source_docx_path)
+            if (cascade_ok and not (final_fail - base_fail)
+                    and not _content_regressed(source_docx_path, docx_path)
+                    and not (set(nums) & final_avoid)):
+                logger.info("avoidable_cont_merged tables=%s", nums)
+                return got
+            shutil.copy2(backup_path, docx_path)
+            logger.info(
+                "avoidable_cont_rollback tables=%s cascade_ok=%s new_fail=%s",
+                nums, cascade_ok, sorted(final_fail - base_fail),
+            )
+            return 0
+        except Exception as exc:
+            shutil.copy2(backup_path, docx_path)
+            logger.info("avoidable_cont_rollback tables=%s reason=exception error=%s", nums, exc)
+            return 0
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+    def _num_key(n: str):
+        try:
+            return tuple(int(x) for x in n.split("."))
+        except ValueError:
+            return (10**9,)
+
+    # Fixpoint: merging an avoidable continuation shortens the document and can make
+    # a LATER continuation newly avoidable, so re-detect after every change until no
+    # avoidable split remains. Merges only ever REMOVE continuations, so the count
+    # strictly decreases and the loop terminates (bounded for safety). ``necessary``
+    # remembers candidates a merge could not verify, so they are not retried forever.
+    accepted = 0
+    necessary: set[str] = set()
+    for _round in range(8):
+        try:
+            base_fail, avoid = _render_fail_and_avoidable(docx_path, source_docx_path)
+        except Exception as exc:
+            logger.info("avoidable_cont_skip reason=render_failed error=%s", exc)
+            break
+        avoid = sorted((n for n in avoid if n and n not in necessary), key=_num_key)
+        if not avoid:
+            break
+        # Try the whole group at once (cheap, common case). If it does not verify,
+        # fall back to one-at-a-time so a single non-viable candidate cannot block
+        # the rest.
+        got = _try_group(avoid, base_fail)
+        if got:
+            accepted += got
+            continue
+        progress = False
+        for num in avoid:
+            try:
+                base_fail_one, _ = _render_fail_and_avoidable(docx_path, source_docx_path)
+            except Exception:
+                break
+            one = _try_group([num], base_fail_one)
+            if one:
+                accepted += one
+                progress = True
+            else:
+                necessary.add(num)
+        if not progress:
+            break
+    return accepted
+
+
 def normalize_fragment_grid_widths_inplace(
     docx_path: Path,
     *,

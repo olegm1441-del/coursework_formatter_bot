@@ -1154,6 +1154,115 @@ def _semantic_header_on_continuation_blockers(
     return out
 
 
+_AVOIDABLE_SAFETY_PT = 24.0  # ~one data row of required slack to call a split avoidable
+
+
+def avoidable_continuation_split_blockers(
+    pdf_path,
+    *,
+    safety_pt: float = _AVOIDABLE_SAFETY_PT,
+    exclude_nums: set[str] | None = None,
+) -> list[TableLayoutBlocker]:
+    """Detect AVOIDABLE table continuation splits from rendered PDF geometry.
+
+    A ``Продолжение таблицы N`` continuation is avoidable when the immediately
+    preceding fragment sits on the previous page with enough printable blank tail
+    to hold the continuation's data rows (and its source/note if final) — i.e. the
+    whole table would fit as ONE clean table on the previous page. Per the KFU rule
+    that a table which fits on one page must not be split.
+
+    Geometry (per continuation marker, using real pdfplumber table bboxes):
+      - top margin  ≈ marker top on the continuation page (marker sits at the top
+        printable margin); KFU top and bottom margins are equal (2 cm), so
+        printable_bottom(prev) = page_height(prev) − top_margin;
+      - first-fragment bottom = bottom of the LAST table on the previous page;
+      - blank_tail = printable_bottom(prev) − first_fragment_bottom;
+      - required = continuation-table height − its numeric label row (dropped on
+        merge) + any source/note line below it (moves onto the previous page);
+      - avoidable ⟺ blank_tail ≥ required + safety_pt.
+
+    Never flags appendix continuations (``Продолжение приложения`` is not matched)
+    nor genuinely long continuations (required > blank tail). Returns fail-level
+    ``avoidable_continuation_split`` blockers. Pure over the PDF (no mutation)."""
+    import pdfplumber
+
+    exclude = {str(n) for n in (exclude_nums or set())}
+    marker_re = re.compile(r"^\s*продолжение\s+таблицы\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
+    srcnote_re = re.compile(r"^\s*(источник|примечание)\s*[:.]", re.IGNORECASE)
+    numrow_re = re.compile(r"^\s*1(?:\s+\d+)+\s*$")
+    pagenum_re = re.compile(r"^\s*\d{1,4}\s*$")
+
+    def _line_words_text(ws):
+        return " ".join(w["text"] for w in sorted(ws, key=lambda w: w["x0"])).strip()
+
+    out: list[TableLayoutBlocker] = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        pages = pdf.pages
+        for cont_i, page in enumerate(pages):
+            if cont_i == 0:
+                continue
+            words = page.extract_words(x_tolerance=3, y_tolerance=3)
+            if not words:
+                continue
+            lines: dict[float, list] = {}
+            for w in sorted(words, key=lambda w: (round(w["top"], 1), w["x0"])):
+                lines.setdefault(round(w["top"], 0), []).append(w)
+            marker_top = None
+            marker_num = None
+            for top, ws in lines.items():
+                m = marker_re.match(_line_words_text(ws))
+                if m:
+                    marker_top = min(w["top"] for w in ws)
+                    marker_num = m.group(1)
+                    break
+            if marker_num is None or marker_num in exclude:
+                continue
+
+            prev_page = pages[cont_i - 1]
+            ph_prev = float(prev_page.height)
+            printable_bottom_prev = ph_prev - marker_top
+            prev_tables = prev_page.find_tables()
+            if not prev_tables:
+                continue
+            first_frag_bottom = max(t.bbox[3] for t in prev_tables)
+
+            cont_tables = [t for t in page.find_tables() if t.bbox[1] >= marker_top - 4]
+            if not cont_tables:
+                continue
+            ct = min(cont_tables, key=lambda t: t.bbox[1])
+            cont_top, cont_bottom = ct.bbox[1], ct.bbox[3]
+            numeric_h = 24.0
+            try:
+                if ct.rows:
+                    r0 = ct.rows[0]
+                    numeric_h = r0.bbox[3] - r0.bbox[1]
+            except Exception:
+                numeric_h = 24.0
+            src_h = 0.0
+            for top, ws in lines.items():
+                if srcnote_re.match(_line_words_text(ws)) and min(w["top"] for w in ws) >= cont_bottom - 2:
+                    src_h += (max(w["bottom"] for w in ws) - min(w["top"] for w in ws)) + 4
+
+            required = (cont_bottom - cont_top) - numeric_h + src_h
+            blank_tail = printable_bottom_prev - first_frag_bottom
+            if blank_tail >= required + safety_pt:
+                out.append(
+                    TableLayoutBlocker(
+                        blocker_type="avoidable_continuation_split",
+                        severity="fail",
+                        table_num=marker_num,
+                        page=cont_i + 1,
+                        evidence={
+                            "prev_page": cont_i,
+                            "previous_blank_space_pt": round(blank_tail, 1),
+                            "continuation_required_space_pt": round(required, 1),
+                            "slack_pt": round(blank_tail - required, 1),
+                        },
+                    )
+                )
+    return out
+
+
 def evaluate_table_layout_acceptance(
     pdf_lines: list[PdfLine],
     table_identities: list[RenderedTableIdentity],

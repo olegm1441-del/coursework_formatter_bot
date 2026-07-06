@@ -29,6 +29,7 @@ from .table_continuation import (
     repair_same_page_duplicate_headers_batch_inplace,
     repair_squeezed_tables_inplace,
     merge_same_page_numeric_continuations_inplace,
+    merge_avoidable_continuations_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     cleanup_cross_page_by_index_search_inplace,
     cleanup_cross_page_by_block_move_inplace,
@@ -44,6 +45,7 @@ from .pdf_layout_analyzer import analyze_pdf_lines
 from .rendered_table_validation import (
     RenderedContinuationViolation,
     TableLayoutBlocker,
+    avoidable_continuation_split_blockers,
     build_rendered_table_identities,
     evaluate_table_layout_acceptance,
     validate_rendered_continuations,
@@ -188,6 +190,7 @@ _LAYOUT_BLOCKER_MESSAGES = {
     "same_page_repeated_header": "таблица {num}: шапка таблицы повторяется на одной странице (стр. {page}).",
     "appendix_label_not_on_new_page": "приложение начинается не с новой страницы (стр. {page}).",
     "cell_text_overflow_or_illegible_squeeze": "таблица {num}: столбцы выглядят сжатыми, текст переносится по буквам (стр. {page}).",
+    "avoidable_continuation_split": "таблица {num}: продолжение можно убрать — таблица помещается на предыдущей странице (стр. {page}).",
 }
 
 
@@ -217,6 +220,12 @@ def _emit_table_layout_acceptance_warnings(
         blockers = evaluate_table_layout_acceptance(
             pdf_lines, identities, doc=doc, source_identities=source_identities
         )
+        # Avoidable continuation splits need PDF table geometry (bboxes), which the
+        # pure pdf_lines gate cannot see — evaluate them here off the same render.
+        try:
+            blockers = list(blockers) + avoidable_continuation_split_blockers(pdf_path)
+        except Exception:
+            logger.exception("format_docx: avoidable continuation gate failed to evaluate")
         if source_text is not None:
             structure_issues = evaluate_document_structure(
                 pdf_lines,
@@ -800,6 +809,25 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: same-page numeric continuation merge failed")
+
+    # Remove avoidable continuation splits: a table whose continuation fragment
+    # fits into the blank tail of the previous page must stay one clean table.
+    # Merges such continuations and page-breaks any later table the shorter
+    # document pushes across a page boundary (genuine long / appendix
+    # continuations are never flagged).
+    try:
+        n_avoidable = merge_avoidable_continuations_inplace(
+            output_path,
+            source_docx_path=input_path,
+            report=report,
+        )
+        if n_avoidable:
+            logger.info(
+                "format_docx: removed %d avoidable table continuation split(s)",
+                n_avoidable,
+            )
+    except Exception:
+        logger.exception("format_docx: avoidable continuation merge failed")
 
     # Final rendered-continuation warning pass. Runs AFTER the late batch collapse
     # and squeeze repair so continuation warnings ("повторный фрагмент" /
