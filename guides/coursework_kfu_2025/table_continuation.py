@@ -4811,7 +4811,7 @@ def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int) -> dict
         return None
     try:
         from .table_markers import map_table_rows_to_pages
-        res = map_table_rows_to_pages(Path(docx_path), table_idx)
+        res = map_table_rows_to_pages(Path(docx_path), table_idx, allow_repeated_header=True)
         table = Document(str(docx_path)).tables[table_idx]
     except Exception:
         return None
@@ -4947,28 +4947,31 @@ def _set_tc_number_text(tc_xml, text: str) -> None:
         tc_xml.append(first)
     for extra in paras[1:]:
         tc_xml.remove(extra)
-    runs = first.findall(qn("w:r"))
-    if runs:
-        keep = runs[0]
-        for extra in runs[1:]:
-            first.remove(extra)
-        for t in keep.findall(qn("w:t")):
-            keep.remove(t)
-        t = OxmlElement("w:t")
-        t.text = text
-        keep.append(t)
-    else:
-        r = OxmlElement("w:r")
-        t = OxmlElement("w:t")
-        t.text = text
-        r.append(t)
-        first.append(r)
+    original_run = first.find(qn("w:r"))
+    properties = original_run.find(qn("w:rPr")) if original_run is not None else None
+    properties = deepcopy(properties) if properties is not None else None
+    # A cloned data row may contain line breaks, hyperlinks or fields. Keeping
+    # any of those would duplicate source content or inflate the numeric row.
+    for child in list(first):
+        if child.tag != qn("w:pPr"):
+            first.remove(child)
+    run = OxmlElement("w:r")
+    if properties is not None:
+        run.append(properties)
+    text_node = OxmlElement("w:t")
+    text_node.text = text
+    run.append(text_node)
+    first.append(run)
 
 
 def _synthesize_numeric_row_xml(template_tr):
     """Clone a real row (keeping cell structure / widths / formatting) and set its
     cells to the KFU numeric column index ``1 2 ... N``."""
     new = deepcopy(template_tr)
+    properties = new.find(qn("w:trPr"))
+    if properties is not None:
+        for height in list(properties.findall(qn("w:trHeight"))):
+            properties.remove(height)
     for i, tc in enumerate(new.findall(qn("w:tc"))):
         _set_tc_number_text(tc, str(i + 1))
     return new
@@ -4998,7 +5001,7 @@ def _split_cross_page_table_with_marker(
     if not tail_rows:
         return False
 
-    if numeric_row_idx is not None and 0 < numeric_row_idx <= split_after:
+    if numeric_row_idx is not None and 0 <= numeric_row_idx <= split_after:
         numeric_for_continuation = deepcopy(rows[numeric_row_idx])
         numeric_for_first = None  # already present in the first fragment
     else:
@@ -5024,10 +5027,150 @@ def _split_cross_page_table_with_marker(
         first_rows = tbl_xml.findall(qn("w:tr"))
         first_rows[0].addnext(numeric_for_first)
 
-    marker = _build_continuation_para(f"Продолжение таблицы {table_num}")
+    marker = (_build_appendix_continuation_paragraph(
+        f"ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ {table_num.split(':', 1)[1]}")
+        if table_num.startswith("appendix:") else
+        _build_continuation_para(f"Продолжение таблицы {table_num}"))
     tbl_xml.addnext(marker)
     marker.addnext(tbl2)
     return True
+
+
+def _table_payload_rows(doc: Document) -> list[tuple[str, ...]]:
+    """Ordered data/header snapshot; only generated column-number rows excluded."""
+    return [tuple(_row_cell_texts(row)) for table in doc.tables
+            for row in table._tbl.findall(qn("w:tr"))
+            if not _is_docx_numeric_row(_row_cell_texts(row))]
+
+
+def repair_remaining_table_spills_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+) -> int:
+    """Finish real page spills, including repeated source rows and 3+ pages.
+
+    Never deduplicate student data. Every trial uses rendered row positions,
+    checks the ordered payload, re-renders all fragments, and rolls back on
+    unresolved spills or new layout failures. No row-count split search.
+    """
+    from .rendered_table_validation import (
+        build_rendered_table_identities, _cross_page_without_marker_blockers,
+        _physical_table_pdf_window, TableLayoutBlocker,
+    )
+    path = Path(docx_path)
+    repaired = 0
+    seen = set()
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
+    for _ in range(12):
+        if time.monotonic() > deadline:
+            break
+        baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+        doc = Document(str(path))
+        crosses = _cross_page_without_marker_blockers(lines, build_rendered_table_identities(doc))
+        todo = [b for b in crosses if b.table_num not in seen]
+        if not todo:
+            break
+        num = todo[0].table_num
+        seen.add(num)
+        backup = path.read_bytes()
+        payload = _table_payload_rows(doc)
+        changed = 0
+        last_split_idx = None
+        accepted = False
+        try:
+            for _part in range(16):
+                if time.monotonic() > deadline:
+                    break
+                doc = Document(str(path))
+                ids = build_rendered_table_identities(doc)
+                pending = [b for b in _cross_page_without_marker_blockers(lines, ids)
+                           if b.table_num == num]
+                # The gate deliberately ignores repeated semantic headers. A
+                # source row equal to a header must nevertheless not spill alone
+                # past our split. Verify the entire generated head's row map.
+                if last_split_idx is not None:
+                    head = doc.tables[last_split_idx]
+                    head_id = ids[last_split_idx]
+                    window = _physical_table_pdf_window(lines, head_id)
+                    numeric_rows = {i for i, row in enumerate(head.rows)
+                                    if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+                    head_pages = _match_data_row_pages_by_lead(head, window, numeric_rows)
+                    if head_pages is None:
+                        head_pages = _instrumented_data_row_pages(path, last_split_idx)
+                    if head_pages is None:
+                        break
+                    if len(set(head_pages.values())) > 1:
+                        pending = [TableLayoutBlocker(
+                            "single_table_crosses_pages_without_marker", "fail", num, None,
+                            {"table_index": last_split_idx})]
+                if not pending:
+                    final_fail, _, _ = _cross_page_without_marker_probe(path, source_docx_path)
+                    accepted = (not (final_fail - baseline)
+                                and _table_payload_rows(doc) == payload)
+                    break
+                idx = pending[0].evidence["table_index"]
+                table = doc.tables[idx]
+                rows = table._tbl.findall(qn("w:tr"))
+                # Adding a numeric row can push the last head row onto the next
+                # page. Rebalance our last split rather than creating a one-row
+                # middle fragment followed by an unnecessary hard page break.
+                if idx == last_split_idx and idx + 1 < len(doc.tables):
+                    numeric = next((i for i in (0, 1) if i < len(rows)
+                                    and _is_docx_numeric_row(_row_cell_texts(rows[i]))), None)
+                    minimum = 2 if numeric == 1 else 1
+                    boundary = _find_safe_split_after(rows, len(rows) - 2)
+                    if boundary is None or boundary < minimum:
+                        break
+                    tail = doc.tables[idx + 1]._tbl
+                    anchor = tail.findall(qn("w:tr"))[0]
+                    for row in rows[boundary + 1:]:
+                        anchor.addnext(row)
+                        anchor = row
+                    if _table_payload_rows(doc) != payload:
+                        break
+                    doc.save(str(path))
+                    _, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+                    continue
+                # Instrument only an already-proven spill, not every table.
+                # Its tiny markers never enter the delivered document.
+                numeric_rows = {i for i, row in enumerate(table.rows)
+                                if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+                window = _physical_table_pdf_window(lines, ids[idx])
+                pages = _match_data_row_pages_by_lead(table, window, numeric_rows)
+                if pages is None:
+                    pages = _instrumented_data_row_pages(path, idx)
+                if not pages or len(set(pages.values())) < 2:
+                    break
+                first_page = min(pages.values())
+                after = _find_safe_split_after(rows, max(r for r, pg in pages.items()
+                                                        if pg == first_page))
+                numeric = next((i for i in (0, 1) if i < len(rows)
+                                and _is_docx_numeric_row(_row_cell_texts(rows[i]))), None)
+                minimum = 2 if numeric == 1 else 1
+                if (after is None or after < minimum or after >= len(rows) - 1
+                        or not _split_geometry_is_safe(
+                            table._tbl, table_index=idx, split_before_row=after + 1,
+                            log_prefix="remaining_spill")):
+                    break
+                if not _split_cross_page_table_with_marker(
+                        doc, idx, after, num, numeric_row_idx=numeric):
+                    break
+                if _table_payload_rows(doc) != payload:
+                    break
+                doc.save(str(path))
+                changed += 1
+                last_split_idx = idx
+                _, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+            if accepted:
+                repaired += changed
+                logger.info("remaining_spill_repaired table_num=%s splits=%s", num, changed)
+            else:
+                path.write_bytes(backup)
+                logger.info("remaining_spill_rollback table_num=%s", num)
+        except Exception:
+            path.write_bytes(backup)
+            logger.exception("remaining_spill_rollback table_num=%s", num)
+    return repaired
 
 
 def _cross_page_without_marker_probe(docx_path: Path, source_docx_path: Path | None):

@@ -21,6 +21,7 @@ _CAPTION_RE = re.compile(
     r"^\s*Таблица\s+([0-9]+(?:\.[0-9]+)*)\b",
     re.IGNORECASE,
 )
+_APPENDIX_ANCHOR_RE = re.compile(r"^(?:ПРОДОЛЖЕНИЕ\s+)?ПРИЛОЖЕНИ[ЕЯ]\s+([А-ЯЁA-Z0-9]+)\s*$", re.I)
 _NUMERIC_ROW_RE = re.compile(r"^(?:\d+\s+){1,}\d+$")
 
 
@@ -35,6 +36,7 @@ class RenderedTableIdentity:
     numeric_row_fingerprint: str | None
     row_fingerprints: tuple[str, ...]
     preceding_inter_table_texts: tuple[str, ...] = ()
+    appendix_anchor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,8 @@ def build_rendered_table_identities(doc: Document) -> list[RenderedTableIdentity
                 numeric_row_fingerprint=numeric_row,
                 row_fingerprints=tuple(all_rows),
                 preceding_inter_table_texts=tuple(preceding_inter_table_texts),
+                appendix_anchor=next((text for text in reversed(preceding_inter_table_texts)
+                                      if _APPENDIX_ANCHOR_RE.match(text)), None),
             )
         )
     return out
@@ -1024,52 +1028,80 @@ def _source_bad_caption_nums(
     return bad
 
 
+def _physical_table_pdf_window(pdf_lines, identity, marker_occurrence=0):
+    """Bound evidence by line position, not page number.
+
+    The next caption can share a page with the current table's last rows.
+    Continuation fragments have no caption, so anchor those at their own marker.
+    """
+    ordered = sorted(pdf_lines, key=lambda line: (line.page_num, line.top))
+    if identity.appendix_anchor:
+        anchors = [line for line in ordered
+                   if _norm_text(line.text) == _norm_text(identity.appendix_anchor)]
+    elif identity.caption_num:
+        anchors = _caption_lines(ordered, identity.caption_num)
+    elif identity.preceding_marker:
+        anchors = [line for line in ordered
+                   if _norm_text(line.text) == _norm_text(identity.preceding_marker)]
+    else:
+        return []
+    if len(anchors) <= marker_occurrence:
+        return []
+    anchor = anchors[marker_occurrence]
+    start = ordered.index(anchor)
+    end = len(ordered)
+    for i in range(start + 1, len(ordered)):
+        text = _line_text(ordered[i])
+        if (_APPENDIX_ANCHOR_RE.match(text) or _CAPTION_RE.match(text)
+                or re.match(r"^(?:Источник|Примечание)\s*[:.]", text, re.I)
+                or ((identity.preceding_marker or identity.following_marker)
+                    and _STRICT_MARKER_RE.match(text))):
+            end = i
+            break
+    return ordered[start:end]
+
+
 def _cross_page_without_marker_blockers(
     pdf_lines: list[PdfLine],
     table_identities: list[RenderedTableIdentity],
 ) -> list[TableLayoutBlocker]:
-    """A single logical table whose data rows render across >1 page with no
-    valid ``Продолжение таблицы N`` continuation marker. KFU requires the marker
-    on every continuation page; a marked split (Rybakov) is accepted."""
+    """Require a continuation marker on EVERY consecutive data page.
+
+    Inspect caption-less continuation fragments too: one valid marker must not
+    conceal an unmarked spill from that fragment onto a third page.
+    """
     out: list[TableLayoutBlocker] = []
+    occurrences: dict[str, int] = {}
     for identity in table_identities:
         num = identity.caption_num
+        occurrence = 0
+        if identity.appendix_anchor:
+            num = "appendix:" + _APPENDIX_ANCHOR_RE.match(identity.appendix_anchor).group(1).upper()
+            key = identity.appendix_anchor.upper()
+            occurrence = occurrences.get(key, 0)
+            occurrences[key] = occurrence + 1
+        elif not num and identity.preceding_marker:
+            marker = _STRICT_MARKER_RE.match(identity.preceding_marker)
+            if marker:
+                num = marker.group(1)
+                occurrence = occurrences.get(num, 0)
+                occurrences[num] = occurrence + 1
         if not num:
             continue
-        span = _table_page_span(pdf_lines, identity)
-        if len(span) < 2:
-            continue
-        data_pages = sorted(
-            p for p in span
-            if _first_meaningful_row_on_page(identity, _page_text(pdf_lines, p), min_overlap=0.7)
-        )
-        if len(data_pages) < 2:
-            continue
-        # A single physical table renders as ONE contiguous block, so a genuine
-        # cross flows onto the IMMEDIATELY following page. A non-adjacent match is a
-        # DIFFERENT later table (or prose) that merely reuses this table's row text
-        # — e.g. a summary/appendix table repeating the same figures — not a
-        # continuation of THIS table. (`_table_page_span` runs to the next caption,
-        # so for the LAST captioned table it reaches end-of-doc.) Require two
-        # consecutive data pages and bound first/last to that contiguous cross.
+        window = _physical_table_pdf_window(pdf_lines, identity, occurrence)
+        data_pages = sorted(p for p in {line.page_num for line in window}
+                            if _first_meaningful_row_on_page(
+                                identity, _page_text(window, p), min_overlap=0.7))
         data_set = set(data_pages)
-        cross_starts = [p for p in data_pages if (p + 1) in data_set]
-        if not cross_starts:
-            continue
-        first = cross_starts[0]
-        last = max(p + 1 for p in cross_starts)
-        marker_pages = {line.page_num for line in _strict_marker_lines(pdf_lines, num)}
-        has_marker = any(first < mp <= last for mp in marker_pages)
-        if not has_marker:
-            out.append(
-                TableLayoutBlocker(
-                    blocker_type="single_table_crosses_pages_without_marker",
-                    severity="fail",
-                    table_num=num,
-                    page=first,
-                    evidence={"data_pages": [p for p in data_pages if first <= p <= last]},
-                )
-            )
+        marker_pages = {line.page_num for line in _strict_marker_lines(window, num)}
+        missing = [p for p in data_pages if p - 1 in data_set and p not in marker_pages]
+        if missing:
+            out.append(TableLayoutBlocker(
+                blocker_type="single_table_crosses_pages_without_marker",
+                severity="fail", table_num=num, page=missing[0] - 1,
+                evidence={"data_pages": data_pages, "missing_marker_pages": missing,
+                          "table_index": identity.table_index},
+            ))
     return out
 
 

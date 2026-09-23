@@ -30,6 +30,7 @@ from .table_continuation import (
     repair_squeezed_tables_inplace,
     merge_same_page_numeric_continuations_inplace,
     merge_avoidable_continuations_inplace,
+    repair_remaining_table_spills_inplace,
     cleanup_cross_page_without_marker_blockers_inplace,
     cleanup_cross_page_by_index_search_inplace,
     cleanup_cross_page_by_block_move_inplace,
@@ -256,6 +257,11 @@ def _emit_table_layout_acceptance_warnings(
         template = _LAYOUT_BLOCKER_MESSAGES.get(blocker.blocker_type)
         if template is not None:
             detail = template.format(num=blocker.table_num or "?", page=blocker.page or "?")
+            if (blocker.table_num or "").startswith("appendix:"):
+                appendix = blocker.table_num.split(":", 1)[1]
+                detail = (f"приложение {appendix}: таблица переходит на следующую "
+                          f"страницу без корректного заголовка продолжения "
+                          f"(стр. {blocker.page or '?'}).")
             prefix = "Проверьте" if blocker.severity == "fail" else "Возможно, проверьте"
             report.warn(f"{prefix} вёрстку таблиц — {detail}")
         logger.warning(
@@ -828,6 +834,15 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
             )
     except Exception:
         logger.exception("format_docx: avoidable continuation merge failed")
+
+    # Final page-local spill pass also handles caption-less tails and preserves
+    # repeated source rows verbatim; earlier deduplication guards skip these.
+    try:
+        repair_remaining_table_spills_inplace(
+            output_path, source_docx_path=input_path, report=report,
+        )
+    except Exception:
+        logger.exception("format_docx: remaining table spill repair failed")
 
     # Final rendered-continuation warning pass. Runs AFTER the late batch collapse
     # and squeeze repair so continuation warnings ("повторный фрагмент" /
