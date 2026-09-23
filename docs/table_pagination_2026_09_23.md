@@ -35,7 +35,7 @@ configuration changes. Main is not modified or deployed.
 
 ## Verification
 
-- Existing formatter scripts: 16 test files passed; `test_phase3.py`: 460 passed,
+- Formatter scripts: 15 test files passed; `test_phase3.py`: 460 passed,
   0 failed.
 - `python tests/test_table_page_boundaries.py`: 11 regression cases, including
   next-caption boundaries, caption-less tails, all-page marker coverage, source
@@ -47,7 +47,9 @@ configuration changes. Main is not modified or deployed.
   rows identical to the semantic header are included in this fixture.
 - Additional five-page rendered fixture: all 20 data rows retained in order;
   four correctly labelled continuation pages, source after the final fragment.
-- Real corpus verification is recorded in the accompanying validation results.
+- Real corpus verification is recorded below. All 13 student/report DOCX
+  fixtures completed; PDF references and the methodology appendix are reference
+  materials, not student inputs.
 
 ## Limits
 
@@ -90,4 +92,5 @@ pagination and does not alter the existing quote/source normalization stages.
 
 `coursework_unformatted2_kpfu_2025.docx` also completed with zero formatting
 warnings. The delivery case is Bondarev: all 82 data rows retained, no added or
-duplicated data rows. The source's repeated rows are retained intentionally.
+duplicated data rows. The final table 1.2.1 spans pages 16–17 and the appendix
+table spans pages 63–64 with the required continuation labels. The source's repeated rows are retained intentionally.
