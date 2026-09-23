@@ -52,8 +52,10 @@ def test_second_appendix_label_gets_page_break_in_doc() -> tuple[bool, str]:
     by_text = {p.text: p for p in doc.paragraphs}
     if not by_text["ПРИЛОЖЕНИЕ Б"].paragraph_format.page_break_before:
         return _result(False, "ПРИЛОЖЕНИЕ Б must start on a new page")
-    if not by_text["ПРИЛОЖЕНИЕ А"].paragraph_format.page_break_before:
-        return _result(False, "ПРИЛОЖЕНИЕ А must start on a new page")
+    if by_text["ПРИЛОЖЕНИЕ А"].paragraph_format.page_break_before:
+        return _result(False, "first appendix must share the section heading's page")
+    if not by_text["ПРИЛОЖЕНИЯ"].paragraph_format.page_break_before:
+        return _result(False, "section heading must start the new appendix page")
     # a normal data row in between must NOT get a page break
     if by_text["строка данных один два три"].paragraph_format.page_break_before:
         return _result(False, "ordinary appendix body row must not get a page break")

@@ -64,7 +64,7 @@ The late repair uses the existing 90-second cleanup budget; clean documents reus
 the existing render cache and do not instrument every table. Original duplicate
 student content remains in place and can still produce a source-content warning.
 
-## Corpus audit
+## Initial corpus audit (before Word feedback)
 
 All supplied coursework/report DOCX examples were run through the formatter;
 the methodology appendix file is a reference, not a student test case.
@@ -92,5 +92,72 @@ pagination and does not alter the existing quote/source normalization stages.
 
 `coursework_unformatted2_kpfu_2025.docx` also completed with zero formatting
 warnings. The delivery case is Bondarev: all 82 data rows retained, no added or
-duplicated data rows. The final table 1.2.1 spans pages 16–17 and the appendix
-table spans pages 63–64 with the required continuation labels. The source's repeated rows are retained intentionally.
+duplicated data rows. The initial delivery split table 1.2.1 across pages 16–17; the Word feedback
+below showed that this was an unnecessary split. The source's repeated rows
+are retained intentionally.
+
+
+## Follow-up after Word screenshots
+
+The earlier clean acceptance result was insufficient: it checked continuation
+labels but did not prove that the split was necessary. Word moved the first
+fragment of Bondarev 1.2.1 to a fresh page while retaining the hard break before
+the continuation, leaving most of the first page empty.
+
+- Short ordinary tables and compatible numeric-led fragment chains are now
+  tried whole on a fresh page. Estimates only shortlist; a real render must
+  place all rows and the caption together, preserve ordered data, and introduce
+  no new layout failures. Downstream tables and their existing continuation
+  boundaries are rechecked after reflow. Rejected trials restore exact bytes.
+- First appendix label follows the `ПРИЛОЖЕНИЯ` heading on the same page,
+  including after TOC rebuilding; later appendices retain their new-page break.
+  TOC text `ПРИЛОЖЕНИЯ 54` no longer counts as an appendix anchor for body tables.
+- Rendered validation detects isolated appendix headings and continuation
+  labels in the middle of a page. Compatible short appendix fragments merge;
+  longer fragments retain a verified new-page continuation. Rybakov's appendix
+  previously had two continuation labels on one page despite zero gate errors.
+- Oversized table grids are reduced proportionally to the section's printable
+  width before height calculation. Cell widths, spans, table width and layout
+  are updated consistently. Valid landscape grids remain unchanged. Six tables
+  in `coursework_bad_kpfu_2025` previously clipped their right-hand content;
+  the corrected output keeps all six within the page.
+- Short uncaptioned body tables receive a separate measured keep-together pass.
+  The report fixture's tables at DOCX indices 4 and 8 previously crossed pages;
+  both now fit whole. No table numbers or captions are invented.
+- TOC page numbers are refreshed after all layout repairs without rebuilding
+  body page breaks. The trial must render with stable numbers before acceptance.
+
+### Follow-up evidence
+
+All 13 student/report fixtures completed the full formatter again. The five
+width-affected cases were rerun after the width fix. Table-page contact sheets
+were visually inspected across the corpus; Bondarev's entire 65-page output was
+inspected, with full-size checks of table 1.2.1 and the appendix boundary.
+The final report fixture was rerun after the uncaptioned-table fix, and the
+`example_notbad` short-table cascade was rerendered after its boundary fix.
+These are LibreOffice checks, not a native Microsoft Word verification.
+
+- Bondarev: table 1.2.1 is whole on page 17 (header + 12 original rows); no
+  continuation label. All 82 distinct source data rows retained, zero lost,
+  added or duplicated rows; 17 captions retained. Final rendered blockers: none.
+- Bondarev: heading and appendix A are on page 63; continuation on page 64;
+  appendix B on page 65. TOC entry updated to page 63. Table 2.3.3 already
+  consists of incompatible-grid fragments in the source and is retained as
+  requested. Original duplicate content remains and can produce a content warning.
+- Rybakov (third year): table 2.1.2 whole on page 27, appendix continuation
+  correctly separated; 70 source data rows preserved.
+- Additional preservation audits passed for the other fixtures except the
+  previously recorded quote/source-note discrepancy in `before_курсова 17…`.
+  Zero pagination-gate failures does not mean that unrelated source/content
+  defects have disappeared. Deliberately narrow source columns in the malformed
+  examples can still wrap words and numbers; this change does not redesign
+  every source grid.
+- `test_whole_table_pagination.py`: real-render tests for intact and presplit
+  short tables, long-table rollback even with a misleading height estimate,
+  source numeric rows, appendix merge versus page break, first-appendix/TOC
+  interaction, uncaptioned short/long tables, byte-identical retry, oversized
+  grids with merged cells and valid landscape sections. All pass.
+- Existing phase-3 suite: 460 passed, 0 failed. Existing boundary, rendered
+  continuation, acceptance and source-preservation tests also passed.
+
+The code is in the feature branch; production and main have not been changed.

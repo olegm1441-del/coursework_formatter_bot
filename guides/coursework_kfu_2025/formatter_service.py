@@ -31,6 +31,10 @@ from .table_continuation import (
     merge_same_page_numeric_continuations_inplace,
     merge_avoidable_continuations_inplace,
     repair_remaining_table_spills_inplace,
+    keep_short_tables_whole_inplace,
+    keep_short_uncaptioned_tables_whole_inplace,
+    repair_same_page_appendix_continuations_inplace,
+    fit_oversized_table_grids,
     cleanup_cross_page_without_marker_blockers_inplace,
     cleanup_cross_page_by_index_search_inplace,
     cleanup_cross_page_by_block_move_inplace,
@@ -39,7 +43,10 @@ from .table_continuation import (
     normalize_fragment_grid_widths_inplace,
     apply_rendered_table_start_orphan_guard,
 )
-from .contents_builder import rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace
+from .contents_builder import (
+    rebuild_static_contents_page, strip_obsolete_toc_blocks_inplace,
+    refresh_static_contents_page_numbers,
+)
 from .docx_utils import FormattingReport
 from .layout_render import render_docx_to_pdf
 from .pdf_layout_analyzer import analyze_pdf_lines
@@ -190,6 +197,8 @@ _LAYOUT_BLOCKER_MESSAGES = {
     "fragment_grid_mismatch": "таблица {num}: фрагменты одной таблицы имеют разную сетку столбцов.",
     "same_page_repeated_header": "таблица {num}: шапка таблицы повторяется на одной странице (стр. {page}).",
     "appendix_label_not_on_new_page": "приложение начинается не с новой страницы (стр. {page}).",
+    "appendix_heading_isolated": "заголовок приложений остался на отдельной странице (стр. {page}).",
+    "appendix_continuation_not_on_new_page": "продолжение приложения оказалось внутри страницы (стр. {page}).",
     "cell_text_overflow_or_illegible_squeeze": "таблица {num}: столбцы выглядят сжатыми, текст переносится по буквам (стр. {page}).",
     "avoidable_continuation_split": "таблица {num}: продолжение можно убрать — таблица помещается на предыдущей странице (стр. {page}).",
 }
@@ -316,6 +325,9 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     # Phase 2: pagination rules (keep_with_next flags)
     try:
         doc = Document(str(output_path))
+        n_widths = fit_oversized_table_grids(doc)
+        if n_widths:
+            logger.info("format_docx: fitted %d oversized table grid(s)", n_widths)
         apply_pagination_rules(doc)
         doc.save(str(output_path))
         logger.info("format_docx: phase2 pagination rules applied")
@@ -835,6 +847,22 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
     except Exception:
         logger.exception("format_docx: avoidable continuation merge failed")
 
+    try:
+        keep_short_uncaptioned_tables_whole_inplace(
+            output_path, source_docx_path=input_path,
+        )
+    except Exception:
+        logger.exception("format_docx: uncaptioned short-table repair failed")
+
+    # Try a fresh page before committing to a rendered hard split. This also
+    # collapses short numeric-led chains left by earlier repair stages.
+    try:
+        keep_short_tables_whole_inplace(
+            output_path, source_docx_path=input_path, report=report,
+        )
+    except Exception:
+        logger.exception("format_docx: whole short-table repair failed")
+
     # Final page-local spill pass also handles caption-less tails and preserves
     # repeated source rows verbatim; earlier deduplication guards skip these.
     try:
@@ -843,6 +871,15 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         )
     except Exception:
         logger.exception("format_docx: remaining table spill repair failed")
+
+    try:
+        repair_same_page_appendix_continuations_inplace(
+            output_path, source_docx_path=input_path,
+        )
+    except Exception:
+        logger.exception("format_docx: appendix continuation cleanup failed")
+
+    refresh_static_contents_page_numbers(output_path)
 
     # Final rendered-continuation warning pass. Runs AFTER the late batch collapse
     # and squeeze repair so continuation warnings ("повторный фрагмент" /

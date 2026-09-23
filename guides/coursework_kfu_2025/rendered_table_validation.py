@@ -21,7 +21,8 @@ _CAPTION_RE = re.compile(
     r"^\s*Таблица\s+([0-9]+(?:\.[0-9]+)*)\b",
     re.IGNORECASE,
 )
-_APPENDIX_ANCHOR_RE = re.compile(r"^(?:ПРОДОЛЖЕНИЕ\s+)?ПРИЛОЖЕНИ[ЕЯ]\s+([А-ЯЁA-Z0-9]+)\s*$", re.I)
+_APPENDIX_ANCHOR_RE = re.compile(
+    r"^(?:ПРОДОЛЖЕНИЕ\s+ПРИЛОЖЕНИЯ|ПРИЛОЖЕНИЕ)\s+([А-ЯЁA-Z]|[0-9]{1,3})\s*$", re.I)
 _NUMERIC_ROW_RE = re.compile(r"^(?:\d+\s+){1,}\d+$")
 
 
@@ -671,7 +672,7 @@ def validate_rendered_continuations(
 #   severity == "needs_human_review" -> not clean; uncertain, must be reviewed.
 # --------------------------------------------------------------------------- #
 
-_APPENDIX_LABEL_RE = re.compile(r"^\s*приложение\s+[а-яёa-z]\b", re.IGNORECASE)
+_APPENDIX_LABEL_RE = re.compile(r"^\s*приложение\s+(?:[а-яёa-z]|[0-9]{1,3})\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -835,9 +836,24 @@ def _orphaned_header_blockers(
 
 def _appendix_label_blockers(pdf_lines: list[PdfLine]) -> list[TableLayoutBlocker]:
     out: list[TableLayoutBlocker] = []
-    for line in pdf_lines:
-        if not _APPENDIX_LABEL_RE.match(_line_text(line)):
+    occurrences: dict[str, int] = {}
+    for index, heading in enumerate(pdf_lines):
+        if _norm_text(heading.text) not in {"приложения", "приложение"}:
             continue
+        following = next((line for line in pdf_lines[index + 1:]
+                          if _tokens(line.text) and not re.fullmatch(r"\s*\d+\s*", line.text)), None)
+        if (following is not None and _APPENDIX_LABEL_RE.match(_line_text(following))
+                and following.page_num != heading.page_num):
+            out.append(TableLayoutBlocker(
+                "appendix_heading_isolated", "fail", None, heading.page_num,
+                {"label_page": following.page_num, "label": following.text}))
+    for line in pdf_lines:
+        text = _line_text(line)
+        continuation = text.upper().startswith("ПРОДОЛЖЕНИЕ ") and _APPENDIX_ANCHOR_RE.match(text)
+        if not continuation and not _APPENDIX_LABEL_RE.match(text):
+            continue
+        occurrence = occurrences.get(text.upper(), 0)
+        occurrences[text.upper()] = occurrence + 1
         page = line.page_num
         substantial_above = [
             other
@@ -850,12 +866,14 @@ def _appendix_label_blockers(pdf_lines: list[PdfLine]) -> list[TableLayoutBlocke
         if substantial_above:
             out.append(
                 TableLayoutBlocker(
-                    blocker_type="appendix_label_not_on_new_page",
+                    blocker_type=("appendix_continuation_not_on_new_page" if continuation
+                                  else "appendix_label_not_on_new_page"),
                     severity="fail",
-                    table_num=None,
+                    table_num=("appendix:" + continuation.group(1).upper() if continuation else None),
                     page=page,
                     evidence={
                         "label": _line_text(line),
+                        "marker_occurrence": occurrence,
                         "content_above": _snippet(substantial_above[-1].text),
                     },
                 )
