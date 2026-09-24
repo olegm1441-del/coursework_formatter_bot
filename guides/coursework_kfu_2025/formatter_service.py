@@ -32,6 +32,8 @@ from .table_continuation import (
     merge_avoidable_continuations_inplace,
     repair_remaining_table_spills_inplace,
     keep_short_tables_whole_inplace,
+    refill_table_page_gaps_inplace,
+    repair_table_adjacency_inplace,
     keep_short_uncaptioned_tables_whole_inplace,
     repair_same_page_appendix_continuations_inplace,
     fit_oversized_table_grids,
@@ -878,6 +880,13 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         )
     except Exception:
         logger.exception("format_docx: appendix continuation cleanup failed")
+
+    try:
+        repair_table_adjacency_inplace(output_path, source_docx_path=input_path)
+        refill_table_page_gaps_inplace(output_path, source_docx_path=input_path)
+        repair_table_adjacency_inplace(output_path, source_docx_path=input_path)
+    except Exception:
+        logger.exception("format_docx: table page-gap refill failed")
 
     refresh_static_contents_page_numbers(output_path)
 

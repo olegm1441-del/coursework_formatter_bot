@@ -161,3 +161,89 @@ These are LibreOffice checks, not a native Microsoft Word verification.
   continuation, acceptance and source-preservation tests also passed.
 
 The code is in the feature branch; production and main have not been changed.
+
+## 2026-09-24: balance whole-table moves against page utilization
+
+The user's next Word review accepted 1.2.1 and appendix A, but identified a
+large gap before Bondarev 1.3.2. Moving every short table whole was too broad.
+
+- A late measured trial releases the whole-table keep chain when the preceding
+  page has at least 180 pt of unused body space. It accepts a refill only when
+  at least two data rows and at least half the table's data rows fit there,
+  including the required column-number header. Otherwise the whole-table
+  layout remains. Merged tables, appendix tables and existing continuation
+  chains are excluded from this ordinary-table refill trial.
+- The existing rendered splitter creates continuation labels and rebalances
+  for the inserted number row. Exact ordered table payload and the rendered
+  gate must remain valid, or the trial restores the original bytes.
+- Reflow exposed two additional adjacency defects in the real examples:
+  an empty paragraph before a forced table caption could occupy an otherwise
+  blank page, and a source/note could detach from a table or split internally.
+  The late adjacency pass removes only truly empty caption spacers, binds the
+  last row to its source/note chain, keeps each note paragraph whole, then
+  renders and repairs resulting spills. Fields, bookmarks, drawings, section
+  breaks and authored page breaks are never removed by this cleanup.
+- Adjacency runs before and after gap refilling, followed by the existing final
+  static-TOC refresh. No public interface, dependency, environment variable,
+  billing, auth, Telegram routing, infrastructure or deployment changes.
+
+### Focused acceptance evidence
+
+- Bondarev 1.3.2: three data rows on page 25, two on page 26 with the continuation
+  label and source. A suffix-only intermediate trial used 4 + 1. The final full
+  pipeline restored previously clipped 1.1.3 rows and kept source/note chains
+  together, changing upstream pagination. The final 3 + 2 fills page 25 down
+  to its printable bottom. Table 1.2.1 remains whole; appendix A is unchanged.
+- Manual-split example (`example_notbad_coursework_kpfu_2025`): table 1.1.1 uses
+  three rows on page 5 and the final row/source on page 6. The spurious blank
+  page before 1.1.2 is gone. Table 2.3.1 splits 3 + 1 on pages 27-28, with the
+  complete source and note after the final row.
+- Rybakov: table 2.1.2 uses available page-26 space and continues on page 27.
+  Appendix 1 has numeric headers and explicit continuation labels on pages
+  55-57; its last row and complete source are together on page 57.
+- Oversized-grid example: all six table grids remain inside the printable
+  width. Authored narrow columns can still wrap words/numbers; this is not a
+  claim that every malformed source grid has been editorially redesigned.
+- Source data-row counts retained: Bondarev 82, manual-split example 65,
+  oversized-grid example 31, Rybakov 70. No lost, added or duplicated data rows
+  in these four delivery cases. Original Bondarev 2.3.3 geometry remains as
+  explicitly accepted by the user.
+
+`tests/test_table_page_gap_refill.py` adds real-render regressions for useful
+refill, insufficient space / minority fit, failed-split rollback, appendix
+exclusion, ordered content, notes attached to the last row, whole note
+paragraphs, empty caption spacers and byte-identical retries. All pass.
+
+### Final rendering findings
+
+- Visual review found two clipped 1.1.3 rows in Bondarev's previous delivery:
+  they existed in DOCX but LibreOffice did not draw them. The whole-table pass
+  now shortlists missing rendered tails (when the leading row is visible),
+  checks diagnostic markers, and accepts a fresh-page placement only with a
+  complete row map. All three original data rows now render on page 11.
+- A repaired spill can push a later table across a page boundary. The bounded
+  repair now tries the downstream short table whole, then repairs remaining
+  downstream spills within the SAME deadline and a bounded recursion depth.
+  The entire trial rolls back if any new failure remains. This fixes
+  `example_coursework_bad2_kpfu_2025` table 2.3.1 and its downstream 2.3.3.
+- Diagnostic markers now prefer a cell at least 30 pt wide, using grid width
+  when cell width is automatic. A narrow year/index column previously wrapped
+  the marker itself and made all rows appear unmappable. This changes only
+  temporary diagnostic copies; a real-render regression covers the case.
+- The four delivered DOCX were rebuilt from their original sources with the
+  full formatter, then rendered and inspected. Their rendered gate reports
+  zero blockers and their ordered source data rows are retained. Original
+  malformed Bondarev 2.3.3 and narrow authored column proportions remain known
+  source limitations. These are LibreOffice checks, not native Word tests.
+
+Final delivery audit: Bondarev 64 pages / 82 data rows; Rybakov 59 / 70;
+manual-split example 40 / 65; oversized-grid example 65 / 31. All four have
+zero lost/added/duplicated table data rows, zero rendered blockers and zero
+empty pages. The additional final full run of `example_coursework_bad2` retains
+65 data rows and all 21 source/note paragraphs with zero rendered blockers.
+The 13-input corpus retains the earlier documented non-pagination content
+exception in `before_курсова 17…`; it must not be described as entirely clean.
+
+Final checks: phase-3 460 passed / 0 failed; whole-table pagination, rendered
+spill/appendix, cross-page marker insertion, acceptance, preservation and the
+new eight-group page-gap/note/visibility/narrow-marker regressions passed.

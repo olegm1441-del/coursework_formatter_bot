@@ -80,7 +80,16 @@ def _pick_marker_paragraph(row) -> object:
     best_paragraph = None
     best_len = None
 
-    for cell in row.cells:
+    # A year/index cell may be shorter than the diagnostic token even at 1 pt.
+    # Prefer a cell with room for the token; otherwise the token wraps and the
+    # complete row vanishes from the map. This only affects diagnostic copies.
+    roomy_cells = []
+    columns = row.table.columns
+    for index, cell in enumerate(row.cells):
+        width = cell.width or (columns[index].width if index < len(columns) else None)
+        if width and width >= Pt(30):
+            roomy_cells.append(cell)
+    for cell in roomy_cells or row.cells:
         for paragraph in cell.paragraphs:
             text_len = len((paragraph.text or "").strip())
             if text_len == 0:
