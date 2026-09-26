@@ -33,6 +33,8 @@ from .table_continuation import (
     repair_remaining_table_spills_inplace,
     keep_short_tables_whole_inplace,
     refill_table_page_gaps_inplace,
+    refill_early_continuations_inplace,
+    remove_single_page_column_numbers_inplace,
     repair_table_adjacency_inplace,
     keep_short_uncaptioned_tables_whole_inplace,
     repair_same_page_appendix_continuations_inplace,
@@ -887,6 +889,12 @@ def format_docx(input_path: str, output_path: str) -> tuple[str, list[str]]:
         repair_table_adjacency_inplace(output_path, source_docx_path=input_path)
     except Exception:
         logger.exception("format_docx: table page-gap refill failed")
+
+    try:
+        refill_early_continuations_inplace(output_path, source_docx_path=input_path)
+        remove_single_page_column_numbers_inplace(output_path, source_docx_path=input_path)
+    except Exception:
+        logger.exception("format_docx: final table number/refill cleanup failed")
 
     refresh_static_contents_page_numbers(output_path)
 

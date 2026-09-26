@@ -60,11 +60,20 @@ def normalize_cell(text: str) -> str:
     return _NUM_RE.sub(_canon_number, t)
 
 
+def _unique_row_cells(row):
+    """Count each physical cell once, without deduplicating equal text."""
+    seen = set()
+    for cell in row.cells:
+        if cell._tc not in seen:
+            seen.add(cell._tc)
+            yield cell
+
+
 def table_cell_multiset(doc: Document) -> Counter:
     c: Counter = Counter()
     for table in doc.tables:
         for row in table.rows:
-            for cell in row.cells:
+            for cell in _unique_row_cells(row):
                 norm = normalize_cell(cell.text)
                 if norm:
                     c[norm] += 1
@@ -85,7 +94,7 @@ def meaningful_row_set(doc: Document) -> set[str]:
     out: set[str] = set()
     for table in doc.tables:
         for row in table.rows:
-            values = [cell.text for cell in row.cells]
+            values = [cell.text for cell in _unique_row_cells(row)]
             if _is_numeric_index_row(values):
                 continue
             fp = " | ".join(normalize_cell(v) for v in values if normalize_cell(v))
@@ -103,7 +112,7 @@ def table_header_fingerprints(doc: Document) -> set[str]:
     for table in doc.tables:
         if table.rows:
             fp = " | ".join(
-                normalize_cell(c.text) for c in table.rows[0].cells if normalize_cell(c.text)
+                normalize_cell(c.text) for c in _unique_row_cells(table.rows[0]) if normalize_cell(c.text)
             )
             if fp:
                 out.add(fp)
@@ -118,7 +127,7 @@ def data_row_multiset(doc: Document, header_fps: set[str] | None = None) -> Coun
     c: Counter = Counter()
     for table in doc.tables:
         for row in table.rows:
-            values = [cell.text for cell in row.cells]
+            values = [cell.text for cell in _unique_row_cells(row)]
             if _is_numeric_index_row(values):
                 continue
             fp = " | ".join(normalize_cell(v) for v in values if normalize_cell(v))

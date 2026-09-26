@@ -1068,8 +1068,14 @@ def _physical_table_pdf_window(pdf_lines, identity, marker_occurrence=0):
     anchor = anchors[marker_occurrence]
     start = ordered.index(anchor)
     end = len(ordered)
+    own_caption_seen = False
     for i in range(start + 1, len(ordered)):
         text = _line_text(ordered[i])
+        if (identity.appendix_anchor and identity.caption_num and not own_caption_seen
+                and _caption_num(text) == identity.caption_num):
+            own_caption_seen = True
+            start = i
+            continue
         if (_APPENDIX_ANCHOR_RE.match(text) or _CAPTION_RE.match(text)
                 or re.match(r"^(?:Источник|Примечание)\s*[:.]", text, re.I)
                 or ((identity.preceding_marker or identity.following_marker)
@@ -1358,6 +1364,21 @@ def evaluate_table_layout_acceptance(
     blockers.extend(_squeeze_blockers(pdf_lines, table_identities))
     if doc is not None:
         blockers.extend(_fragment_grid_mismatch_blockers(doc, table_identities, pdf_lines))
+        ids = {it.table_index: it for it in table_identities}
+        for ti, table in enumerate(doc.tables):
+            columns = len(table.columns)
+            for ri, row in enumerate(table._tbl.tr_lst):
+                omitted = sum(int(el.get(qn('w:val'), '0')) for el in row.xpath(
+                    './w:trPr/w:gridBefore|./w:trPr/w:gridAfter'))
+                extent = omitted + sum(cell.grid_span for cell in row.tc_lst)
+                if extent > columns:
+                    num, page = _attribute_table(ti, ids, pdf_lines)
+                    blockers.append(TableLayoutBlocker(
+                        'row_grid_extent_mismatch', 'fail', num, page,
+                        {'table_index': ti, 'row_index': ri,
+                         'grid_columns': columns, 'row_extent': extent}))
+                    break
+
 
     source_bad = _source_bad_caption_nums(table_identities, source_identities)
     if source_bad:
