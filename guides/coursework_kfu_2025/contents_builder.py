@@ -971,6 +971,56 @@ def strip_obsolete_toc_blocks_inplace(docx_path: str | Path) -> dict:
     return {"sdt_removed": sdt_removed, "plain_toc_removed": plain_removed}
 
 
+def refresh_static_contents_page_numbers(docx_path: str | Path) -> bool:
+    """Refresh only TOC numbers after table pagination; never reset body breaks.
+
+    Rebuilding the entire TOC would reapply page_breaks and undo the measured
+    table/continuation placement. Verify the numbers after rendering the trial;
+    on failure keep the original file intact.
+    """
+    source_path = Path(docx_path)
+    workdir = Path(tempfile.mkdtemp(prefix="kpfu_contents_refresh_"))
+    pdf_path = None
+    try:
+        work_path = workdir / source_path.name
+        shutil.copy2(source_path, work_path)
+        for attempt in range(2):
+            document = Document(str(work_path))
+            body_start = _find_body_start_index_for_contents(document)
+            if body_start is None:
+                return False
+            contents_start = _find_existing_contents_start(document, body_start)
+            if contents_start is None:
+                return False
+            entries = _collect_body_entries(document, body_start)
+            paragraphs = [p for p in document.paragraphs[contents_start + 1:body_start]
+                          if clean_spaces(p.text)]
+            if len(paragraphs) != len(entries):
+                return False
+            pdf_path = render_docx_to_pdf(work_path)
+            pages = _resolve_display_pages(entries, analyze_pdf_lines(pdf_path))
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+            pdf_path = None
+            if all(p.text.rsplit('\t', 1)[-1].strip() == str(pages[e.bookmark_name])
+                   for p, e in zip(paragraphs, entries)):
+                if attempt == 0:
+                    return False
+                shutil.copy2(work_path, source_path)
+                logger.info("contents_page_numbers_refreshed path=%s", source_path)
+                return True
+            _replace_contents_entry_pages(document, entries, pages)
+            document.save(str(work_path))
+        logger.warning("contents_page_numbers_refresh_skipped reason=unstable_pagination")
+        return False
+    except Exception as exc:
+        logger.warning("contents_page_numbers_refresh_skipped reason=%s", exc)
+        return False
+    finally:
+        if pdf_path is not None:
+            shutil.rmtree(pdf_path.parent, ignore_errors=True)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def rebuild_static_contents_page(docx_path: str | Path) -> bool:
     """
     Rebuild static KFU contents page. The source DOCX is replaced only after all

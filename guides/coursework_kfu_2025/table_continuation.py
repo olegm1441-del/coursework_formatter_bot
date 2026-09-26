@@ -150,6 +150,68 @@ def _body_width_pt(doc: Document) -> float:
     return _emu_pt(s.page_width - s.left_margin - s.right_margin)
 
 
+def fit_oversized_table_grids(document: Document) -> int:
+    """Fit overflowing top-level grids to their section, preserving proportions.
+
+    Run before pagination: narrower columns change row heights. Tables already
+    inside the printable width retain their original geometry. Address XML cells
+    once, respecting gridSpan/gridBefore rather than python-docx's alias cells.
+    """
+    from docx.section import Section
+    body = document.element.body
+    section = Section(body.sectPr, document.part)
+    tables = {table._tbl: table for table in document.tables}
+    changed = 0
+    for node in reversed(list(body)):
+        if node.tag == qn('w:p'):
+            pr = node.find(qn('w:pPr'))
+            sect = pr.find(qn('w:sectPr')) if pr is not None else None
+            if sect is not None:
+                section = Section(sect, document.part)
+        table = tables.get(node)
+        if table is None or node.tblGrid is None:
+            continue
+        grid = node.tblGrid.findall(qn('w:gridCol'))
+        widths = [int(col.get(qn('w:w'), '0')) for col in grid]
+        if not widths or min(widths) <= 0:
+            continue
+        indent = node.tblPr.find(qn('w:tblInd'))
+        indent_twips = int(indent.get(qn('w:w'), '0')) if indent is not None else 0
+        available = int((section.page_width - section.left_margin - section.right_margin) / 635)
+        available -= max(0, indent_twips)
+        total = sum(widths)
+        if available <= 0 or total <= available + 40:  # tolerate 2pt rounding
+            continue
+        scaled = [max(1, round(width * available / total)) for width in widths]
+        scaled[-1] += available - sum(scaled)
+        for col, width in zip(grid, scaled):
+            col.set(qn('w:w'), str(width))
+        table.autofit = False
+        tbl_w = node.tblPr.find(qn('w:tblW'))
+        if tbl_w is None:
+            tbl_w = OxmlElement('w:tblW')
+            node.tblPr.append(tbl_w)
+        tbl_w.set(qn('w:type'), 'dxa')
+        tbl_w.set(qn('w:w'), str(available))
+        for row in node.findall(qn('w:tr')):
+            pr = row.find(qn('w:trPr'))
+            before = pr.find(qn('w:gridBefore')) if pr is not None else None
+            column = int(before.get(qn('w:val'), '0')) if before is not None else 0
+            for cell in row.findall(qn('w:tc')):
+                pr = cell.get_or_add_tcPr()
+                span = pr.find(qn('w:gridSpan'))
+                count = int(span.get(qn('w:val'), '1')) if span is not None else 1
+                cell_w = pr.find(qn('w:tcW'))
+                if cell_w is None:
+                    cell_w = OxmlElement('w:tcW')
+                    pr.append(cell_w)
+                cell_w.set(qn('w:type'), 'dxa')
+                cell_w.set(qn('w:w'), str(sum(scaled[column:column + count])))
+                column += count
+        changed += 1
+    return changed
+
+
 # ── Height estimators ─────────────────────────────────────────────────────────
 
 # KFU body: Times New Roman 14 pt, 1.5 line spacing → ~21 pt/line
@@ -2555,6 +2617,86 @@ def _optimize_table_col_widths(tbl_xml, body_width_pt: float, *, word_aware: boo
     return True
 
 
+def _compact_unused_grid_boundaries(tbl_xml) -> bool:
+    """Remove only grid boundaries that no physical row uses."""
+    grid = tbl_xml.tblGrid
+    if grid is None or not tbl_xml.tr_lst:
+        return False
+    widths = [int(col.get(qn('w:w'), '0')) for col in grid]
+    if not widths or min(widths) <= 0:
+        return False
+    boundaries = {0, len(widths)}
+    row_spans = []
+    for row in tbl_xml.tr_lst:
+        if row.xpath('./w:trPr/w:gridBefore|./w:trPr/w:gridAfter'):
+            return False
+        cursor = 0
+        spans = []
+        for cell in row.tc_lst:
+            end = cursor + cell.grid_span
+            spans.append((cell, cursor, end))
+            boundaries.update((cursor, end))
+            cursor = end
+        if cursor != len(widths):
+            return False
+        row_spans.extend(spans)
+    points = sorted(boundaries)
+    if len(points) == len(widths) + 1:
+        return False
+    for col in list(grid):
+        grid.remove(col)
+    for left, right in zip(points, points[1:]):
+        col = OxmlElement('w:gridCol')
+        col.set(qn('w:w'), str(sum(widths[left:right])))
+        grid.append(col)
+    for cell, left, right in row_spans:
+        cell.grid_span = points.index(right) - points.index(left)
+    return True
+
+
+def _align_redundant_fragment_grid(first, second) -> bool:
+    """Reconcile tiny staggered grid subdivisions, preserving physical cells."""
+    count = _table_col_count(first)
+    extra = _table_col_count(second) - count
+    if (extra <= 0 or not first.tr_lst or not second.tr_lst
+            or not _rows_match(first.tr_lst[0], second.tr_lst[0])
+            or not all(_row_is_simple_full_width(r, count) for r in first.tr_lst)
+            or not all(len(r.tc_lst) == count for r in second.tr_lst)):
+        return False
+    widths = [int(c.get(qn('w:w'), '0')) for c in second.tblGrid]
+    if min(widths, default=0) <= 0 or any(w >= _MIN_COL_PT * 20 for w in sorted(widths)[:extra]):
+        return False
+    for row in second.tr_lst:
+        if (row.xpath('./w:trPr/w:gridBefore|./w:trPr/w:gridAfter|./w:tc/w:tcPr/w:vMerge')
+                or sum(c.grid_span for c in row.tc_lst) != len(widths)):
+            return False
+    second.replace(second.tblGrid, deepcopy(first.tblGrid))
+    master = [c.get(qn('w:w')) for c in first.tblGrid]
+    for row in second.tr_lst:
+        for cell, width in zip(row.tc_lst, master):
+            cell.grid_span = 1
+            tcw = cell.get_or_add_tcPr().get_or_add_tcW()
+            tcw.set(qn('w:type'), 'dxa')
+            tcw.set(qn('w:w'), width)
+    return True
+
+
+def _reconcile_fragment_grids(first, second) -> bool:
+    if _table_col_count(first) == _table_col_count(second):
+        return True
+    a, b = deepcopy(first), deepcopy(second)
+    _compact_unused_grid_boundaries(a)
+    _compact_unused_grid_boundaries(b)
+    _align_redundant_fragment_grid(a, b)
+    if _table_col_count(a) != _table_col_count(b):
+        return False
+    # The clone trial proved compatibility; mutate only after that proof.
+    _compact_unused_grid_boundaries(first)
+    _compact_unused_grid_boundaries(second)
+    _align_redundant_fragment_grid(first, second)
+    return True
+
+
 def apply_table_merging(doc: Document) -> int:
     """
     Phase 3 pre-pass — STUB (table splitting/merging disabled).
@@ -2619,6 +2761,9 @@ def apply_table_merging(doc: Document) -> int:
             i += 1
             continue
 
+        if not _reconcile_fragment_grids(tbl1, tbl2):
+            i += 1
+            continue
         # Rebuild invalid split: merge tbl2 into tbl1, skipping duplicate header if present.
         start_idx = 1 if headers_match else 0
         for tr in rows2[start_idx:]:
@@ -4800,7 +4945,7 @@ def _cross_page_instrumentation_enabled() -> bool:
     return os.environ.get("KPFU_CROSS_PAGE_INSTRUMENT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int) -> dict[int, int] | None:
+def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int, minimum_rows: int = 2) -> dict[int, int] | None:
     """Reliable DATA-row → page map via unique per-row marker instrumentation
     (``table_markers.map_table_rows_to_pages``) — structural, not text-matching,
     so it works on tables whose cell text overlaps body prose/citations. The
@@ -4811,7 +4956,7 @@ def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int) -> dict
         return None
     try:
         from .table_markers import map_table_rows_to_pages
-        res = map_table_rows_to_pages(Path(docx_path), table_idx)
+        res = map_table_rows_to_pages(Path(docx_path), table_idx, allow_repeated_header=True)
         table = Document(str(docx_path)).tables[table_idx]
     except Exception:
         return None
@@ -4823,7 +4968,7 @@ def _instrumented_data_row_pages(docx_path: Path | None, table_idx: int) -> dict
         if ri not in res.row_pages or ri in dup:
             return None  # a real data row could not be located reliably
         out[ri] = res.row_pages[ri]
-    if len(out) < 2:
+    if len(out) < minimum_rows:
         return None
     ordered = [out[ri] for ri in sorted(out)]
     if ordered != sorted(ordered):
@@ -4947,28 +5092,31 @@ def _set_tc_number_text(tc_xml, text: str) -> None:
         tc_xml.append(first)
     for extra in paras[1:]:
         tc_xml.remove(extra)
-    runs = first.findall(qn("w:r"))
-    if runs:
-        keep = runs[0]
-        for extra in runs[1:]:
-            first.remove(extra)
-        for t in keep.findall(qn("w:t")):
-            keep.remove(t)
-        t = OxmlElement("w:t")
-        t.text = text
-        keep.append(t)
-    else:
-        r = OxmlElement("w:r")
-        t = OxmlElement("w:t")
-        t.text = text
-        r.append(t)
-        first.append(r)
+    original_run = first.find(qn("w:r"))
+    properties = original_run.find(qn("w:rPr")) if original_run is not None else None
+    properties = deepcopy(properties) if properties is not None else None
+    # A cloned data row may contain line breaks, hyperlinks or fields. Keeping
+    # any of those would duplicate source content or inflate the numeric row.
+    for child in list(first):
+        if child.tag != qn("w:pPr"):
+            first.remove(child)
+    run = OxmlElement("w:r")
+    if properties is not None:
+        run.append(properties)
+    text_node = OxmlElement("w:t")
+    text_node.text = text
+    run.append(text_node)
+    first.append(run)
 
 
 def _synthesize_numeric_row_xml(template_tr):
     """Clone a real row (keeping cell structure / widths / formatting) and set its
     cells to the KFU numeric column index ``1 2 ... N``."""
     new = deepcopy(template_tr)
+    properties = new.find(qn("w:trPr"))
+    if properties is not None:
+        for height in list(properties.findall(qn("w:trHeight"))):
+            properties.remove(height)
     for i, tc in enumerate(new.findall(qn("w:tc"))):
         _set_tc_number_text(tc, str(i + 1))
     return new
@@ -4998,7 +5146,7 @@ def _split_cross_page_table_with_marker(
     if not tail_rows:
         return False
 
-    if numeric_row_idx is not None and 0 < numeric_row_idx <= split_after:
+    if numeric_row_idx is not None and 0 <= numeric_row_idx <= split_after:
         numeric_for_continuation = deepcopy(rows[numeric_row_idx])
         numeric_for_first = None  # already present in the first fragment
     else:
@@ -5024,10 +5172,848 @@ def _split_cross_page_table_with_marker(
         first_rows = tbl_xml.findall(qn("w:tr"))
         first_rows[0].addnext(numeric_for_first)
 
-    marker = _build_continuation_para(f"Продолжение таблицы {table_num}")
+    marker = (_build_appendix_continuation_paragraph(
+        f"ПРОДОЛЖЕНИЕ ПРИЛОЖЕНИЯ {table_num.split(':', 1)[1]}")
+        if table_num.startswith("appendix:") else
+        _build_continuation_para(f"Продолжение таблицы {table_num}"))
     tbl_xml.addnext(marker)
     marker.addnext(tbl2)
     return True
+
+
+def _table_payload_rows(doc: Document) -> list[tuple[str, ...]]:
+    """Ordered data/header snapshot; only generated column-number rows excluded."""
+    return [tuple(_row_cell_texts(row)) for table in doc.tables
+            for row in table._tbl.findall(qn("w:tr"))
+            if not _is_docx_numeric_row(_row_cell_texts(row))]
+
+
+def keep_short_uncaptioned_tables_whole_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+) -> int:
+    """Keep proven short, uncaptioned body tables together without inventing IDs.
+
+    Lead-text mapping is only a cheap shortlist; diagnostic row markers confirm
+    both the existing spill and the one-page trial. Leave merged/title tables
+    and long tables alone. The trial never changes table text or grid geometry.
+    """
+    from .rendered_table_validation import build_rendered_table_identities
+    path = Path(docx_path)
+    repaired = 0
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
+    doc = Document(str(path))
+    identities = build_rendered_table_identities(doc)
+    candidates = [i for i, ident in enumerate(identities)
+                  if not ident.caption_num and not ident.appendix_anchor
+                  and len(doc.tables[i].rows) >= 3
+                  and not _table_has_merged_cells_docx(doc.tables[i])]
+    if not candidates:
+        return 0
+    baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+    for idx in candidates:
+        if time.monotonic() > deadline:
+            break
+        doc = Document(str(path))
+        table = doc.tables[idx]
+        widths = _table_grid_proportions(table._tbl)
+        width = _body_width_pt(doc)
+        col_widths = [w * width for w in widths] if widths else None
+        if sum(_estimate_row_height(r, width, col_widths) for r in table.rows) > _body_height_pt(doc):
+            continue
+        pages = _match_data_row_pages_by_lead(table, lines, set())
+        if pages and len(set(pages.values())) < 2:
+            continue
+        pages = _instrumented_data_row_pages(path, idx)
+        if not pages or len(set(pages.values())) < 2:
+            continue
+        backup = path.read_bytes()
+        payload = _table_payload_rows(doc)
+        try:
+            for ri, row in enumerate(table.rows):
+                pr = row._tr.get_or_add_trPr()
+                if pr.find(qn('w:cantSplit')) is None:
+                    pr.append(OxmlElement('w:cantSplit'))
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        paragraph.paragraph_format.page_break_before = False
+                        paragraph.paragraph_format.keep_with_next = ri < len(table.rows) - 1
+            doc.save(str(path))
+            trial_pages = _instrumented_data_row_pages(path, idx)
+            after, _, trial_lines = _cross_page_without_marker_probe(path, source_docx_path)
+            if (not trial_pages or len(set(trial_pages.values())) != 1
+                    or after - baseline or _table_payload_rows(Document(str(path))) != payload):
+                path.write_bytes(backup)
+                continue
+            repaired += 1
+            baseline, lines = after, trial_lines
+            logger.info('uncaptioned_short_table_kept_whole table_idx=%s', idx)
+        except Exception:
+            path.write_bytes(backup)
+            logger.exception('uncaptioned_short_table_rollback table_idx=%s', idx)
+    return repaired
+
+
+def keep_short_tables_whole_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+    _only_table_nums: set[str] | None = None, _deadline: float | None = None,
+) -> int:
+    """Prefer a complete table on a fresh page to an unnecessary continuation.
+
+    Estimates only shortlist trials. Acceptance requires all rows on one rendered
+    page, an unchanged ordered payload and no new layout failures. A failed trial
+    restores the exact bytes, leaving long tables to the continuation repair.
+    """
+    from .rendered_table_validation import (
+        build_rendered_table_identities, _physical_table_pdf_window,
+        _cross_page_without_marker_blockers,
+    )
+
+    path = Path(docx_path)
+    accepted = 0
+    seen: set[str] = set()
+    deadline = _deadline if _deadline is not None else time.monotonic() + _cross_page_cleanup_budget_seconds()
+    for _ in range(12):
+        if time.monotonic() > deadline:
+            break
+        baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+        doc = Document(str(path))
+        crosses = {b.table_num for b in _cross_page_without_marker_blockers(
+            lines, build_rendered_table_identities(doc))}
+        chains = list(_iter_continuation_chains(doc))
+        nums = crosses | {num for _, _, _, num in chains}
+        identities = build_rendered_table_identities(doc)
+        # Some renderers clip overflowing rows instead of putting them on a
+        # second page. Such a table has no cross-page blocker. Shortlist a
+        # missing tail only when its first data row is visible, then confirm
+        # the incomplete row map with temporary markers. The fresh-page trial
+        # below must locate EVERY row before it can replace the input.
+        for i, identity in enumerate(identities):
+            if time.monotonic() > deadline:
+                break
+            num = identity.caption_num
+            if (not num or num in nums or num in seen or identity.appendix_anchor
+                    or (_only_table_nums is not None and num not in _only_table_nums)):
+                continue
+            table = doc.tables[i]
+            if len(table.rows) < 3 or _table_has_merged_cells_docx(table):
+                continue
+            window = _physical_table_pdf_window(lines, identity)
+            compact = lambda text: re.sub(r"[\W_]+", "", text.lower())
+            rendered = compact(" ".join(line.text for line in window))
+            first = compact(table.rows[1].cells[0].text)
+            tail = compact(table.rows[-1].cells[0].text)
+            if (len(first) >= 6 and first in rendered and len(tail) >= 6
+                    and tail not in rendered and _instrumented_data_row_pages(path, i) is None):
+                nums.add(num)
+        candidates = [(i, identity.caption_num)
+                      for i, identity in enumerate(identities)
+                      if identity.caption_num in nums and identity.caption_num not in seen
+                      and not identity.appendix_anchor
+                      and (_only_table_nums is None or identity.caption_num in _only_table_nums)]
+        if not candidates:
+            break
+        idx, num = candidates[0]
+        seen.add(num)
+        backup = path.read_bytes()
+        payload = _table_payload_rows(doc)
+        try:
+            # Only numeric-led chains are unambiguous. Never guess that an
+            # original semantic-header-like row is disposable student content.
+            parts = [(fi, marker, si) for fi, marker, si, n in chains if n == num]
+            if any(not _is_docx_numeric_row(_docx_row_cell_texts(doc.tables[si].rows[0]))
+                   or _fragment_grid_drifts(doc.tables[fi], doc.tables[si])
+                   or _table_has_merged_cells_docx(doc.tables[si])
+                   for fi, _, si in parts):
+                continue
+            if parts:
+                # Drop only the leading continuation column-number row. Numeric
+                # rows inside the data are legitimate content and stay verbatim.
+                tables = doc.tables
+                for fi, marker, si in reversed(parts):
+                    first, second = tables[fi], tables[si]
+                    for row in list(second._tbl.findall(qn("w:tr")))[1:]:
+                        first._tbl.append(row)
+                    _remove_xml_node(marker)
+                    _remove_xml_node(second._tbl)
+            table = doc.tables[idx]
+            if _table_payload_rows(doc) != payload:
+                continue
+            if _table_has_merged_cells_docx(table):
+                continue
+            widths = _table_grid_proportions(table._tbl)
+            body_width = _body_width_pt(doc)
+            col_widths = [w * body_width for w in widths] if widths else None
+            estimate = sum(_estimate_row_height(r, body_width, col_widths) for r in table.rows)
+            # A generous shortlist, never evidence that the table fits.
+            if estimate > _body_height_pt(doc):
+                continue
+            if not _pagebreak_before_table_caption(doc, num):
+                continue
+            # Word must be free to lay out the complete table, with no inherited
+            # per-cell breaks. Keep adjacent rows together, release after its tail.
+            for ri, row in enumerate(table.rows):
+                pr = row._tr.get_or_add_trPr()
+                if pr.find(qn("w:cantSplit")) is None:
+                    pr.append(OxmlElement("w:cantSplit"))
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        paragraph.paragraph_format.page_break_before = False
+                        paragraph.paragraph_format.keep_with_next = ri < len(table.rows) - 1
+            doc.save(str(path))
+            after, _, trial_lines = _cross_page_without_marker_probe(path, source_docx_path)
+            identity = build_rendered_table_identities(doc)[idx]
+            window = _physical_table_pdf_window(trial_lines, identity)
+            numeric = {i for i, row in enumerate(table.rows)
+                       if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+            pages = _match_data_row_pages_by_lead(table, window, numeric)
+            if pages is None:
+                pages = _instrumented_data_row_pages(path, idx)
+            captions = [line for line in window if re.match(
+                rf"^\s*Таблица\s+{re.escape(num)}\s*$", line.text, re.IGNORECASE)]
+            fits = (pages and len(set(pages.values())) == 1 and captions
+                    and captions[0].page_num == next(iter(pages.values()))
+                    and ("single_table_crosses_pages_without_marker", num) not in after)
+            moved: set[str] = set()
+            # Removing a continuation changes later page boundaries. Move a
+            # newly orphaned/spilled later table as a whole, then verify again.
+            for _cascade in range(6):
+                downstream = {n for kind, n in after - baseline
+                              if kind in _AVOIDABLE_CASCADE_FAILS and n and n != num}
+                downstream -= moved
+                if not fits or not downstream or time.monotonic() > deadline:
+                    break
+                doc = Document(str(path))
+                manual_chains = list(_iter_continuation_chains(doc))
+                chain_nums = {n for _fi, _marker, _si, n in manual_chains}
+                # First restore natural continuation boundaries. Moving a
+                # one-row first fragment to a fresh page creates avoidable
+                # whitespace even if the marker gate would accept it.
+                changed = [n for n in downstream - chain_nums
+                           if _pagebreak_before_table_caption(doc, n)]
+                for _fi, marker, _si, chain_num in manual_chains:
+                    if chain_num in downstream:
+                        marker.get_or_add_pPr().get_or_add_pageBreakBefore().val = True
+                        marker.get_or_add_pPr().get_or_add_keepNext().val = True
+                        changed.append(chain_num)
+                if not changed:
+                    break
+                moved.update(changed)
+                doc.save(str(path))
+                after, _, _ = _cross_page_without_marker_probe(path, source_docx_path)
+            if not fits or after - baseline:
+                logger.info("short_table_whole_rejected table_num=%s fits=%s row_pages=%s captions=%s new_fail=%s",
+                            num, bool(fits), pages, len(captions), sorted(after - baseline))
+                path.write_bytes(backup)
+                continue
+            if _table_payload_rows(Document(str(path))) != payload:
+                path.write_bytes(backup)
+                continue
+            accepted += 1
+            # A later successful merge can remove the blocker that made an
+            # earlier candidate roll back. Retry that earlier candidate once
+            # the document has actually changed, bounded by the outer loop.
+            seen.clear()
+            logger.info("short_table_kept_whole table_num=%s merged_fragments=%s", num, len(parts))
+        except Exception:
+            path.write_bytes(backup)
+            logger.exception("short_table_whole_rollback table_num=%s", num)
+    return accepted
+
+
+def repair_same_page_appendix_continuations_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+) -> int:
+    """Remove mid-page appendix continuation labels without losing source rows."""
+    from .rendered_table_validation import _appendix_label_blockers
+    path = Path(docx_path)
+    repaired = 0
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
+    for _ in range(8):
+        if time.monotonic() > deadline:
+            break
+        baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+        defects = [b for b in _appendix_label_blockers(lines)
+                   if b.blocker_type == "appendix_continuation_not_on_new_page"]
+        if not defects:
+            break
+        target = defects[0]
+        backup = path.read_bytes()
+        accepted = False
+        for merge in (True, False):
+            try:
+                doc = Document(str(path))
+                payload = _table_payload_rows(doc)
+                markers = [p for p in doc.paragraphs
+                           if " ".join(p.text.split()).upper() == target.evidence['label'].upper()]
+                marker = markers[target.evidence['marker_occurrence']]._p
+                if merge:
+                    previous, following = marker.getprevious(), marker.getnext()
+                    while previous is not None and previous.tag == qn('w:p') and not _paragraph_text_from_xml(previous):
+                        previous = previous.getprevious()
+                    while following is not None and following.tag == qn('w:p') and not _paragraph_text_from_xml(following):
+                        following = following.getnext()
+                    tables = {t._tbl: t for t in doc.tables}
+                    first, second = tables.get(previous), tables.get(following)
+                    if (first is None or second is None or _fragment_grid_drifts(first, second)
+                            or _table_has_merged_cells_docx(first) or _table_has_merged_cells_docx(second)
+                            or not _is_docx_numeric_row(_docx_row_cell_texts(second.rows[0]))):
+                        continue
+                    merged_index = next(i for i, t in enumerate(doc.tables) if t._tbl is first._tbl)
+                    for row in list(second._tbl.findall(qn('w:tr')))[1:]:
+                        first._tbl.append(row)
+                    _remove_xml_node(second._tbl)
+                    _remove_xml_node(marker)
+                else:
+                    _force_marker_page_break(marker)
+                if _table_payload_rows(doc) != payload:
+                    continue
+                doc.save(str(path))
+                after, _, after_lines = _cross_page_without_marker_probe(path, source_docx_path)
+                if merge:
+                    # A short, header-like data row can be invisible to the
+                    # text gate. Independently prove that the merged rows stay
+                    # on one page before removing their continuation label.
+                    pages = _instrumented_data_row_pages(path, merged_index)
+                    if not pages or len(set(pages.values())) != 1:
+                        continue
+                remaining = [b for b in _appendix_label_blockers(after_lines)
+                             if b.blocker_type == "appendix_continuation_not_on_new_page"]
+                if not (after - baseline) and len(remaining) < len(defects):
+                    accepted = True
+                    repaired += 1
+                    logger.info("appendix_same_page_repaired strategy=%s", 'merge' if merge else 'new_page')
+                    break
+            except Exception:
+                logger.exception("appendix_same_page_rollback")
+            finally:
+                if not accepted:
+                    path.write_bytes(backup)
+        if not accepted:
+            break
+    return repaired
+
+
+def repair_table_adjacency_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+) -> int:
+    """Keep final rows with notes and remove empty spacers before forced captions.
+
+    Late reflow can strand a spacer on an otherwise empty page or detach a
+    source from a table that previously fitted. Re-render the structural trial
+    and repair any resulting row spill; restore exact bytes on new failures.
+    """
+    path = Path(docx_path)
+    doc = Document(str(path))
+    payload = _table_payload_rows(doc)
+    backup = path.read_bytes()
+    baseline, _, _ = _cross_page_without_marker_probe(path, source_docx_path)
+    changes = 0
+    for table in doc.tables:
+        cap = _find_caption_paragraph_before_table(doc, table._tbl)
+        if cap is not None:
+            caption = cap[0]
+            pr = caption.find(qn('w:pPr'))
+            pb = pr.find(qn('w:pageBreakBefore')) if pr is not None else None
+            if pb is not None and pb.get(qn('w:val'), '1') not in ('0', 'false', 'off'):
+                spacer = caption.getprevious()
+                while spacer is not None and spacer.tag == qn('w:p'):
+                    # Only remove truly empty layout paragraphs, never fields,
+                    # bookmarks, drawings, section breaks or authored breaks.
+                    if spacer.xpath('.//w:t|.//w:br|.//w:drawing|.//w:object|.//w:fldChar|.//w:sectPr|.//w:bookmarkStart|.//w:bookmarkEnd'):
+                        break
+                    previous = spacer.getprevious()
+                    spacer.getparent().remove(spacer)
+                    spacer = previous
+                    changes += 1
+        notes = _detect_table_following_source_note_paragraphs(
+            table._tbl, {p._p: p for p in doc.paragraphs}, list(doc.element.body))
+        if not notes or not table.rows:
+            continue
+        for cell in table.rows[-1].cells:
+            for para in cell.paragraphs:
+                if para.paragraph_format.keep_with_next is not True:
+                    para.paragraph_format.keep_with_next = True
+                    changes += 1
+        node = table._tbl.getnext()
+        while node is not None:
+            if node.tag == qn('w:p'):
+                pr = node.get_or_add_pPr()
+                keep = pr.get_or_add_keepNext()
+                desired = node is not notes[-1]
+                if keep.val != desired:
+                    keep.val = desired
+                    changes += 1
+                if node in notes:
+                    together = pr.find(qn('w:keepLines'))
+                    if together is None or together.val is not True:
+                        pr.get_or_add_keepLines().val = True
+                        changes += 1
+            if node is notes[-1]:
+                break
+            node = node.getnext()
+    if not changes:
+        return 0
+    try:
+        doc.save(str(path))
+        repair_remaining_table_spills_inplace(path, source_docx_path=source_docx_path)
+        after, _, _ = _cross_page_without_marker_probe(path, source_docx_path)
+        if after - baseline or _table_payload_rows(Document(str(path))) != payload:
+            path.write_bytes(backup)
+            logger.info('table_adjacency_rollback new_fail=%s', sorted(after - baseline))
+            return 0
+    except Exception:
+        path.write_bytes(backup)
+        logger.exception('table_adjacency_rollback')
+        return 0
+    logger.info('table_adjacency_repaired properties=%s', changes)
+    return changes
+
+
+def refill_table_page_gaps_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+) -> int:
+    """Use substantial preceding-page space instead of moving every table whole.
+
+    Only isolated ordinary tables following a large measured gap are tried.
+    Keep the whole-table choice when less than half the data fits before the
+    break. Otherwise split at the actual row boundary, keeping source/notes
+    after the last row. All trials preserve payload and roll back on new fails.
+    """
+    from .rendered_table_validation import (
+        build_rendered_table_identities, _physical_table_pdf_window,
+        _cross_page_without_marker_blockers,
+    )
+    path = Path(docx_path)
+    repaired = 0
+    seen: set[str] = set()
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
+    for _attempt in range(12):
+        if time.monotonic() > deadline:
+            break
+        baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+        doc = Document(str(path))
+        ids = build_rendered_table_identities(doc)
+        chained = {n for _, _, _, n in _iter_continuation_chains(doc)}
+        section = doc.sections[0]
+        body_bottom = _emu_pt(section.page_height - section.bottom_margin)
+        candidate = None
+        for idx, identity in enumerate(ids):
+            num = identity.caption_num
+            if not num or num in seen or num in chained or identity.appendix_anchor:
+                continue
+            table = doc.tables[idx]
+            if len(table.rows) < 3 or _table_has_merged_cells_docx(table):
+                continue
+            captions = [line for line in lines if re.fullmatch(
+                rf'\s*Таблица\s+{re.escape(num)}\s*', line.text, re.I)]
+            if len(captions) != 1:
+                continue
+            caption_line = captions[0]
+            if caption_line.page_num < 2 or caption_line.top > _emu_pt(section.top_margin) + 80:
+                continue
+            preceding = [line for line in lines
+                         if line.page_num == caption_line.page_num - 1
+                         and line.bottom <= body_bottom + 2
+                         and line.text.strip() and not re.fullmatch(r'\s*\d+\s*', line.text)]
+            if not preceding or body_bottom - max(line.bottom for line in preceding) < 180:
+                continue
+            candidate = idx, num, caption_line.page_num
+            break
+        if candidate is None:
+            break
+        idx, num, old_page = candidate
+        seen.add(num)
+        backup = path.read_bytes()
+        payload = _table_payload_rows(doc)
+        try:
+            table = doc.tables[idx]
+            cap = _find_caption_paragraph_before_table(doc, table._tbl)
+            if cap is None:
+                continue
+            node = cap[0]
+            while node is not None and node is not table._tbl:
+                if node.tag == qn('w:p'):
+                    node.get_or_add_pPr().get_or_add_pageBreakBefore().val = False
+                node = node.getnext()
+            notes = _detect_table_following_source_note_paragraphs(
+                table._tbl, {p._p: p for p in doc.paragraphs}, list(doc.element.body))
+            for ri, row in enumerate(table.rows):
+                pr = row._tr.get_or_add_trPr()
+                if pr.find(qn('w:cantSplit')) is None:
+                    pr.append(OxmlElement('w:cantSplit'))
+                header = ri == 0 or (ri == 1 and _is_docx_numeric_row(_docx_row_cell_texts(row)))
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        p.paragraph_format.page_break_before = False
+                        p.paragraph_format.keep_with_next = header or (bool(notes) and ri == len(table.rows) - 1)
+            for ni, note in enumerate(notes):
+                note.get_or_add_pPr().get_or_add_keepNext().val = ni < len(notes) - 1
+            doc.save(str(path))
+            _, _, natural_lines = _cross_page_without_marker_probe(path, source_docx_path)
+            window = _physical_table_pdf_window(natural_lines, ids[idx])
+            numeric = {i for i, row in enumerate(table.rows)
+                       if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+            pages = _match_data_row_pages_by_lead(table, window, numeric)
+            if pages is None:
+                pages = _instrumented_data_row_pages(path, idx)
+            first_rows = [ri for ri, pg in (pages or {}).items() if pg == old_page - 1]
+            if not pages or len(first_rows) < 2 or len(first_rows) * 2 < len(pages):
+                path.write_bytes(backup)
+                continue
+            # Reuse the measured splitter, including the numeric-header height
+            # rebalance and preservation checks. It leaves a one-page fit intact.
+            if len(set(pages.values())) > 1:
+                repair_remaining_table_spills_inplace(path, source_docx_path=source_docx_path)
+            final_doc = Document(str(path))
+            after, _, final_lines = _cross_page_without_marker_probe(path, source_docx_path)
+            final_ids = build_rendered_table_identities(final_doc)
+            target_crosses = [b for b in _cross_page_without_marker_blockers(final_lines, final_ids)
+                              if b.table_num == num]
+            head = final_doc.tables[idx]
+            head_window = _physical_table_pdf_window(final_lines, final_ids[idx])
+            head_numeric = {i for i, row in enumerate(head.rows)
+                            if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+            head_pages = _match_data_row_pages_by_lead(head, head_window, head_numeric)
+            if head_pages is None:
+                head_pages = _instrumented_data_row_pages(path, idx)
+            head_count = len(head_pages or {})
+            if (after - baseline or target_crosses or not head_pages
+                    or set(head_pages.values()) != {old_page - 1}
+                    or head_count < 2 or head_count * 2 < len(pages)
+                    or _table_payload_rows(final_doc) != payload):
+                path.write_bytes(backup)
+                logger.info('table_gap_refill_rollback table_num=%s', num)
+                continue
+            repaired += 1
+            logger.info('table_gap_refilled table_num=%s data_rows_before_break=%s total_data_rows=%s',
+                        num, head_count, len(pages))
+        except Exception:
+            path.write_bytes(backup)
+            logger.exception('table_gap_refill_rollback table_num=%s', num)
+    return repaired
+
+
+def remove_single_page_column_numbers_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+) -> int:
+    """Remove index headers only from proven, independent single-page tables."""
+    from .rendered_table_validation import build_rendered_table_identities, _physical_table_pdf_window
+    path = Path(docx_path)
+    doc = Document(str(path))
+    ids = build_rendered_table_identities(doc)
+    protected = set()
+    for first, _, second, _ in _iter_continuation_chains(doc):
+        protected.update((first, second))
+    for i, ident in enumerate(ids):
+        if ident.preceding_marker or ident.following_marker:
+            protected.add(i)
+        if (ident.appendix_anchor or '').upper().startswith('ПРОДОЛЖЕНИЕ'):
+            protected.update((i - 1, i))
+        if (i and not ident.caption_num and not ident.appendix_anchor
+                and not ident.preceding_inter_table_texts):
+            protected.update((i - 1, i))
+    candidates = [i for i, ident in enumerate(ids)
+                  if i not in protected and (ident.caption_num or ident.appendix_anchor)
+                  and len(doc.tables[i].rows) >= 3
+                  and not _is_docx_numeric_row(_docx_row_cell_texts(doc.tables[i].rows[0]))
+                  and _row_is_exact_numeric_row(doc.tables[i].rows[1]._tr, len(doc.tables[i].columns))]
+    if not candidates:
+        return 0
+    backup = path.read_bytes()
+    payload = _table_payload_rows(doc)
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
+    baseline, crosses, lines = _cross_page_without_marker_probe(path, source_docx_path)
+    remove = []
+    for i in candidates:
+        if time.monotonic() > deadline:
+            break
+        ident = ids[i]
+        if ident.caption_num in crosses:
+            continue
+        table = doc.tables[i]
+        pages = _match_data_row_pages_by_lead(table, _physical_table_pdf_window(lines, ident), {1})
+        if pages is None:
+            pages = _instrumented_data_row_pages(path, i, minimum_rows=1)
+        if pages and len(set(pages.values())) == 1:
+            remove.append(table.rows[1]._tr)
+    if not remove:
+        return 0
+    try:
+        for row in remove:
+            _remove_xml_node(row)
+        doc.save(str(path))
+        repair_remaining_table_spills_inplace(path, source_docx_path=source_docx_path, _deadline=deadline)
+        after, _, _ = _cross_page_without_marker_probe(path, source_docx_path)
+        if after - baseline or _table_payload_rows(Document(str(path))) != payload:
+            path.write_bytes(backup)
+            return 0
+        return len(remove)
+    except Exception:
+        path.write_bytes(backup)
+        raise
+
+
+def refill_early_continuations_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+) -> int:
+    """Re-measure an old hard split when it leaves a large unused page tail."""
+    from .rendered_table_validation import build_rendered_table_identities, _physical_table_pdf_window
+    path = Path(docx_path)
+    deadline = time.monotonic() + _cross_page_cleanup_budget_seconds()
+    seen = set()
+    repaired = 0
+    for _ in range(12):
+        if time.monotonic() > deadline:
+            break
+        doc = Document(str(path))
+        ids = build_rendered_table_identities(doc)
+        chains = list(_iter_continuation_chains(doc))
+        if not chains:
+            break
+        baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+        bottom = _emu_pt(doc.sections[0].page_height - doc.sections[0].bottom_margin)
+        candidate = None
+        for fi, _, si, num in chains:
+            if num in seen or ids[fi].appendix_anchor or not ids[fi].caption_num:
+                continue
+            parts = {fi, si} | {b for a, _, b, n in chains if n == num}
+            if any(_table_has_merged_cells_docx(doc.tables[j]) for j in parts):
+                continue
+            if any(_fragment_grid_drifts(doc.tables[fi], doc.tables[j]) for j in parts):
+                continue
+            window = _physical_table_pdf_window(lines, ids[fi])
+            pages = _match_data_row_pages_by_lead(doc.tables[fi], window, {1})
+            if pages is None:
+                pages = _instrumented_data_row_pages(path, fi)
+            if not pages or len(set(pages.values())) != 1:
+                continue
+            page = next(iter(pages.values()))
+            content = [l for l in window if l.page_num == page]
+            if not content or bottom - max(l.bottom for l in content) < 180:
+                continue
+            candidate = fi, num, page, len(pages)
+            break
+        if candidate is None:
+            break
+        idx, num, page, old_count = candidate
+        seen.add(num)
+        backup = path.read_bytes()
+        payload = _table_payload_rows(doc)
+        try:
+            if not _merge_continuation_chain_for_num(doc, num):
+                continue
+            table = doc.tables[idx]
+            for ri, row in enumerate(table.rows):
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        para.paragraph_format.page_break_before = False
+                        para.paragraph_format.keep_with_next = ri < 2 or ri == len(table.rows) - 1
+            doc.save(str(path))
+            repair_remaining_table_spills_inplace(path, source_docx_path=source_docx_path, _deadline=deadline)
+            after, _, final_lines = _cross_page_without_marker_probe(path, source_docx_path)
+            final = Document(str(path))
+            final_ids = build_rendered_table_identities(final)
+            pages = _match_data_row_pages_by_lead(final.tables[idx],
+                _physical_table_pdf_window(final_lines, final_ids[idx]), {1})
+            if pages is None:
+                pages = _instrumented_data_row_pages(path, idx)
+            if (after - baseline or not pages or set(pages.values()) != {page}
+                    or len(pages) <= old_count or _table_payload_rows(final) != payload):
+                path.write_bytes(backup)
+                continue
+            repaired += 1
+        except Exception:
+            path.write_bytes(backup)
+            logger.exception('early_continuation_refill_rollback table_num=%s', num)
+    return repaired
+
+
+def _merge_adjacent_numeric_tail(doc: Document, table_index: int) -> int:
+    """Join a proven blank-separated numeric tail before measuring a spill.
+
+    Never cross authored text, a caption, a marker or a different grid. The
+    caller retains the full rendered trial/ordered-payload rollback contract.
+    """
+    if table_index + 1 >= len(doc.tables):
+        return 0
+    first, second = doc.tables[table_index:table_index + 2]
+    node = first._tbl.getnext()
+    while node is not None and node.tag == qn('w:p'):
+        # Keep fields, drawings, section breaks and authored page breaks intact.
+        if (_paragraph_text_from_xml(node)
+                or _is_active_page_break_before(node.find('./' + qn('w:pPr') + '/' + qn('w:pageBreakBefore')))
+                or node.xpath(
+                './/w:drawing|.//w:fldChar|.//w:instrText|.//w:sectPr|.//w:br|.//w:bookmarkStart')):
+            return 0
+        node = node.getnext()
+    if node is not second._tbl:
+        return 0
+    if (len(second.rows) < 2 or _table_has_merged_cells_docx(first)
+            or _table_has_merged_cells_docx(second)
+            or [c.width for c in first.columns] != [c.width for c in second.columns]
+            or not _row_is_exact_numeric_row(second.rows[0]._tr, len(first.columns))):
+        return 0
+    for row in list(second._tbl.tr_lst)[1:]:
+        first._tbl.append(row)
+    _remove_xml_node(second._tbl)
+    return 1
+
+
+def repair_remaining_table_spills_inplace(
+    docx_path: Path, *, source_docx_path: Path | None = None,
+    report: FormattingReport | None = None,
+    _deadline: float | None = None, _cascade_depth: int = 0,
+) -> int:
+    """Finish real page spills, including repeated source rows and 3+ pages.
+
+    Never deduplicate student data. Every trial uses rendered row positions,
+    checks the ordered payload, re-renders all fragments, and rolls back on
+    unresolved spills or new layout failures. No row-count split search.
+    """
+    from .rendered_table_validation import (
+        build_rendered_table_identities, _cross_page_without_marker_blockers,
+        _physical_table_pdf_window, TableLayoutBlocker,
+    )
+    path = Path(docx_path)
+    repaired = 0
+    seen = set()
+    deadline = _deadline if _deadline is not None else time.monotonic() + _cross_page_cleanup_budget_seconds()
+    for _ in range(12):
+        if time.monotonic() > deadline:
+            break
+        baseline, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+        doc = Document(str(path))
+        crosses = _cross_page_without_marker_blockers(lines, build_rendered_table_identities(doc))
+        todo = [b for b in crosses if b.table_num not in seen]
+        if not todo:
+            break
+        num = todo[0].table_num
+        seen.add(num)
+        backup = path.read_bytes()
+        payload = _table_payload_rows(doc)
+        changed = 0
+        last_split_idx = None
+        accepted = False
+        try:
+            # Some inputs keep the final row in a separate unlabelled table.
+            # Split the complete logical table, not just its overflowing head.
+            idx = todo[0].evidence["table_index"]
+            while _merge_adjacent_numeric_tail(doc, idx):
+                changed += 1
+            if changed:
+                if _table_payload_rows(doc) != payload:
+                    raise ValueError('numeric-tail merge changed ordered content')
+                doc.save(str(path))
+                _, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+            for _part in range(16):
+                if time.monotonic() > deadline:
+                    break
+                doc = Document(str(path))
+                ids = build_rendered_table_identities(doc)
+                pending = [b for b in _cross_page_without_marker_blockers(lines, ids)
+                           if b.table_num == num]
+                # The gate deliberately ignores repeated semantic headers. A
+                # source row equal to a header must nevertheless not spill alone
+                # past our split. Verify the entire generated head's row map.
+                if last_split_idx is not None:
+                    head = doc.tables[last_split_idx]
+                    head_id = ids[last_split_idx]
+                    window = _physical_table_pdf_window(lines, head_id)
+                    numeric_rows = {i for i, row in enumerate(head.rows)
+                                    if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+                    head_pages = _match_data_row_pages_by_lead(head, window, numeric_rows)
+                    if head_pages is None:
+                        head_pages = _instrumented_data_row_pages(path, last_split_idx)
+                    if head_pages is None:
+                        break
+                    if len(set(head_pages.values())) > 1:
+                        pending = [TableLayoutBlocker(
+                            "single_table_crosses_pages_without_marker", "fail", num, None,
+                            {"table_index": last_split_idx})]
+                if not pending:
+                    final_fail, _, _ = _cross_page_without_marker_probe(path, source_docx_path)
+                    downstream = final_fail - baseline
+                    # A valid split can push a later table over its page edge.
+                    # Repair that measured spill before judging the whole trial;
+                    # all recursion shares this pass's deadline and rollback.
+                    if (downstream and _cascade_depth < 6 and time.monotonic() < deadline
+                            and all(kind == "single_table_crosses_pages_without_marker" and n != num
+                                    for kind, n in downstream)):
+                        keep_short_tables_whole_inplace(
+                            path, source_docx_path=source_docx_path,
+                            _only_table_nums={n for _, n in downstream}, _deadline=deadline)
+                        repair_remaining_table_spills_inplace(
+                            path, source_docx_path=source_docx_path,
+                            _deadline=deadline, _cascade_depth=_cascade_depth + 1)
+                        doc = Document(str(path))
+                        final_fail, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+                    accepted = (not (final_fail - baseline)
+                                and _table_payload_rows(doc) == payload)
+                    break
+                idx = pending[0].evidence["table_index"]
+                table = doc.tables[idx]
+                rows = table._tbl.findall(qn("w:tr"))
+                # Adding a numeric row can push the last head row onto the next
+                # page. Rebalance our last split rather than creating a one-row
+                # middle fragment followed by an unnecessary hard page break.
+                if idx == last_split_idx and idx + 1 < len(doc.tables):
+                    numeric = next((i for i in (0, 1) if i < len(rows)
+                                    and _is_docx_numeric_row(_row_cell_texts(rows[i]))), None)
+                    minimum = 2 if numeric == 1 else 1
+                    boundary = _find_safe_split_after(rows, len(rows) - 2)
+                    if boundary is None or boundary < minimum:
+                        break
+                    tail = doc.tables[idx + 1]._tbl
+                    anchor = tail.findall(qn("w:tr"))[0]
+                    for row in rows[boundary + 1:]:
+                        anchor.addnext(row)
+                        anchor = row
+                    if _table_payload_rows(doc) != payload:
+                        break
+                    doc.save(str(path))
+                    _, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+                    continue
+                # Instrument only an already-proven spill, not every table.
+                # Its tiny markers never enter the delivered document.
+                numeric_rows = {i for i, row in enumerate(table.rows)
+                                if _is_docx_numeric_row(_docx_row_cell_texts(row))}
+                window = _physical_table_pdf_window(lines, ids[idx])
+                pages = _match_data_row_pages_by_lead(table, window, numeric_rows)
+                if pages is None:
+                    pages = _instrumented_data_row_pages(path, idx)
+                if not pages or len(set(pages.values())) < 2:
+                    break
+                first_page = min(pages.values())
+                after = _find_safe_split_after(rows, max(r for r, pg in pages.items()
+                                                        if pg == first_page))
+                numeric = next((i for i in (0, 1) if i < len(rows)
+                                and _is_docx_numeric_row(_row_cell_texts(rows[i]))), None)
+                minimum = 2 if numeric == 1 else 1
+                if (after is None or after < minimum or after >= len(rows) - 1
+                        or not _split_geometry_is_safe(
+                            table._tbl, table_index=idx, split_before_row=after + 1,
+                            log_prefix="remaining_spill")):
+                    break
+                if not _split_cross_page_table_with_marker(
+                        doc, idx, after, num, numeric_row_idx=numeric):
+                    break
+                if _table_payload_rows(doc) != payload:
+                    break
+                doc.save(str(path))
+                changed += 1
+                last_split_idx = idx
+                _, _, lines = _cross_page_without_marker_probe(path, source_docx_path)
+            if accepted:
+                repaired += changed
+                logger.info("remaining_spill_repaired table_num=%s splits=%s", num, changed)
+            else:
+                path.write_bytes(backup)
+                logger.info("remaining_spill_rollback table_num=%s", num)
+        except Exception:
+            path.write_bytes(backup)
+            logger.exception("remaining_spill_rollback table_num=%s", num)
+    return repaired
 
 
 def _cross_page_without_marker_probe(docx_path: Path, source_docx_path: Path | None):
@@ -5675,6 +6661,8 @@ def _merge_continuation_chain_for_num(doc: Document, num: str) -> int:
                 first = doc.tables[fi]
                 second = doc.tables[si]
             except IndexError:
+                continue
+            if not _reconcile_fragment_grids(first._tbl, second._tbl):
                 continue
             _append_second_fragment_data_rows(first, second, normalize_to_first_grid=True)
             _remove_xml_node(marker)

@@ -151,3 +151,20 @@ def apply_page_breaks(document, body_start):
             paragraph.paragraph_format.page_break_before = True
         else:
             paragraph.paragraph_format.page_break_before = False
+
+        # The section heading already starts the appendix page. A second break
+        # before its first label creates a page containing only ПРИЛОЖЕНИЯ.
+        # Inspect body siblings (not just paragraphs): intervening tables/images
+        # mean this is a later appendix, which must still start a new page.
+        if _is_appendix_start_label(text):
+            previous = paragraph._p.getprevious()
+            while previous is not None and previous.tag == qn("w:p"):
+                if previous.findall(".//" + qn("w:drawing")):
+                    break
+                previous_text = clean_spaces("".join(
+                    node.text or "" for node in previous.findall(".//" + qn("w:t"))))
+                if previous_text:
+                    if previous_text.lower() in APPENDIX_HEADINGS:
+                        paragraph.paragraph_format.page_break_before = False
+                    break
+                previous = previous.getprevious()

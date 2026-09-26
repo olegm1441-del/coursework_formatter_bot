@@ -10,6 +10,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.shared import Pt
+from docx.oxml.ns import qn
 
 from .classifier import TABLE_CAPTION_RE, clean_spaces
 from .layout_render import render_docx_to_pdf
@@ -79,7 +80,16 @@ def _pick_marker_paragraph(row) -> object:
     best_paragraph = None
     best_len = None
 
-    for cell in row.cells:
+    # A year/index cell may be shorter than the diagnostic token even at 1 pt.
+    # Prefer a cell with room for the token; otherwise the token wraps and the
+    # complete row vanishes from the map. This only affects diagnostic copies.
+    roomy_cells = []
+    columns = row.table.columns
+    for index, cell in enumerate(row.cells):
+        width = cell.width or (columns[index].width if index < len(columns) else None)
+        if width and width >= Pt(30):
+            roomy_cells.append(cell)
+    for cell in roomy_cells or row.cells:
         for paragraph in cell.paragraphs:
             text_len = len((paragraph.text or "").strip())
             if text_len == 0:
@@ -152,6 +162,13 @@ def instrument_table_rows_copy(
         marker = _build_marker(marker_salt, table_index, row_index)
         paragraph = _pick_marker_paragraph(row)
         run = paragraph.add_run(marker)
+        # Append-at-end can wrap the marker itself in a narrow cell, making its
+        # row disappear from the PDF map. Put the short diagnostic token first;
+        # never alter the original document (this is an instrumented copy).
+        first_content = next((node for node in paragraph._p
+                              if node.tag != qn("w:pPr")), None)
+        if first_content is not None and first_content is not run._r:
+            first_content.addprevious(run._r)
         run.bold = False
         run.italic = False
         run.font.size = Pt(marker_font_size_pt)
@@ -305,6 +322,7 @@ def map_table_rows_to_pages(
     table_index: int,
     *,
     keep_temp: bool = False,
+    allow_repeated_header: bool = False,
 ) -> TableMarkerResult:
     source_path = _resolve_existing_docx_path(docx_path)
     last_result: TableMarkerResult | None = None
@@ -338,7 +356,9 @@ def map_table_rows_to_pages(
             marker_font_size_pt=marker_font_size_pt,
         )
 
-        is_reliable = not result.missing_rows and not result.duplicate_rows
+        ignored = {0} if allow_repeated_header else set()
+        is_reliable = (not (set(result.missing_rows) - ignored)
+                       and not (set(result.duplicate_rows) - ignored))
         if is_reliable:
             if not preserve:
                 _cleanup_attempt(workdir_path, pdf_path)
