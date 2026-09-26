@@ -120,6 +120,12 @@ def main():
         d.tables[0]._tbl.addnext(para)
         assert _merge_adjacent_numeric_tail(d, 0) == 0
         print('PASS no merge across authored text')
+        text.text = ''
+        para.get_or_add_pPr().get_or_add_pageBreakBefore().val = True
+        assert _merge_adjacent_numeric_tail(d, 0) == 0
+        para.get_or_add_pPr().get_or_add_pageBreakBefore().val = False
+        assert _merge_adjacent_numeric_tail(d, 0) == 1
+        print('PASS authored page breaks protected; inactive breaks permit repair')
         d = fixture(20, 100, appendix=True)
         payload = _table_payload_rows(d)
         d.save(p)

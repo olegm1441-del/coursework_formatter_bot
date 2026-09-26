@@ -5841,7 +5841,9 @@ def _merge_adjacent_numeric_tail(doc: Document, table_index: int) -> int:
     node = first._tbl.getnext()
     while node is not None and node.tag == qn('w:p'):
         # Keep fields, drawings, section breaks and authored page breaks intact.
-        if (_paragraph_text_from_xml(node) or node.xpath(
+        if (_paragraph_text_from_xml(node)
+                or _is_active_page_break_before(node.find('./' + qn('w:pPr') + '/' + qn('w:pageBreakBefore')))
+                or node.xpath(
                 './/w:drawing|.//w:fldChar|.//w:instrText|.//w:sectPr|.//w:br|.//w:bookmarkStart')):
             return 0
         node = node.getnext()

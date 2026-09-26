@@ -247,3 +247,109 @@ exception in `before_курсова 17…`; it must not be described as entirely
 Final checks: phase-3 460 passed / 0 failed; whole-table pagination, rendered
 spill/appendix, cross-page marker insertion, acceptance, preservation and the
 new eight-group page-gap/note/visibility/narrow-marker regressions passed.
+
+## 2026-09-26: final number rows and malformed fragment grids
+
+- Remove the 1..N row only from a captioned ordinary/appendix table whose data
+  rows are all proven to render on one page. Protect marked and unlabelled
+  continuation chains. Keep numeric data outside the header position intact.
+  Re-render after removal; repair downstream spills within the same deadline
+  and restore exact bytes on new failures or changed ordered content.
+- Refill an early hard continuation when the first fragment leaves over 180 pt
+  of unused page space. Merge the compatible ordinary chain, release its keep
+  flags, and reuse measured splitting. Accept only if more original data rows
+  fit on the original page, with an unchanged payload and no new failure.
+- A caption directly after an appendix heading belongs to that appendix's
+  evidence window. It must not terminate the window before any table rows.
+- Reconcile redundant grid subdivisions before merging physical fragments.
+  The real repository example had seven physical cells mapped to eight grid
+  columns; a 45-twip extra boundary differed between its header and body rows.
+  Copying those rows into a seven-column grid made the right edge overflow.
+  Compatibility is proved on clones; actual cells/text are never discarded.
+  Genuinely incompatible grids retain their authored fragments.
+- Count each physical OOXML cell once in preservation checks. python-docx can
+  return one grid-spanning cell multiple times; removing a redundant grid
+  boundary must not appear to delete duplicated text. Distinct cells with the
+  same text still count separately. The layout gate now detects row extents
+  exceeding their table grid.
+- Before repairing a proven spill, combine an immediately adjacent unlabelled
+  numeric-led tail with an identical grid. This handles repository-example
+  table 2.2.3, where the overflowing head and separate final row previously
+  caused reciprocal rollback. Authored text, captions, page/section breaks,
+  fields, drawings and merged/different grids stop this merge.
+
+Focused checks: phase-3 460 passed / 0 failed; acceptance 20; preservation 7;
+page-boundary 11; grid reconciliation 4 groups; rendered final cleanup 8 groups;
+existing page-gap/source-note/narrow-marker checks passed. New render tests
+cover one-page ordinary and appendix number removal, retained continuation
+numbers, early-split refill, exact rollback/retry, an overflowing head with a
+numeric tail, and a captioned multi-page appendix.
+
+No database schema, connection, payment, authentication, Telegram routing,
+Railway configuration, dependency or environment-variable change is included.
+The branch checkpoint was pushed before corpus verification; main/release is
+subject to the final rendered results below.
+
+
+### Final full-pipeline corpus, 26 September
+
+All 17 byte-distinct original coursework/report inputs available in the
+repository and supplied files completed. Good/Perfect examples were excluded
+from processing; methodology/reference documents were used as references.
+Rows below count physical OOXML data rows rather than aliases of spanned cells;
+this explains the difference from older Bondarev inventory counts above.
+These results supersede earlier pagination/count snapshots.
+
+| Input | Pages | Data rows source / output | Layout blockers | Content audit | Seconds |
+| --- | ---: | ---: | ---: | --- | ---: |
+| example_otchet_2025_3_kurs.docx (uploaded) | 43 | 37 / 37 | 0 | pass | 45 |
+| Пример_че_может_бот.docx (uploaded) | 12 | 18 / 18 | 0 | pass | 9 |
+| 1_example_unformatted_coursework_kpfu_2025.docx (uploaded) | 41 | 65 / 65 | 0 | pass | 232 |
+| coursework_bad_kpfu_2025.docx (uploaded) | 65 | 31 / 31 | 0 | pass | 94 |
+| курсовая_Бондарев_Никита_2_курс.docx (uploaded) | 64 | 81 / 81 | 0 | pass | 347 |
+| before_курсова 17. Критерии и показатели конкурентоспособности организации.docx (uploaded) | 40 | 22 / 22 | 0 | known normalization exception | 24 |
+| побитая_курсовая_Роман.docx (uploaded) | 35 | 25 / 25 | 0 | pass | 22 |
+| example_coursework_bad2_kpfu_2025.docx (uploaded) | 41 | 65 / 65 | 0 | pass | 142 |
+| example_notbad_coursework_kpfu_2025.docx (uploaded) | 40 | 65 / 65 | 0 | pass | 97 |
+| coursework_bad_kpfu_2025.docx (repository) | 65 | 31 / 31 | 0 | pass | 92 |
+| курсовая_Бондарев_Никита_2_курс.docx (repository) | 61 | 78 / 78 | 0 | pass | 282 |
+| example_unformatted_coursework_kpfu_2025.docx (repository) | 42 | 65 / 65 | 0 | pass | 282 |
+| 01-coursework_unformatted2_kpfu_2025.docx (uploaded) | 65 | 31 / 31 | 0 | pass | 91 |
+| курсовая пример 1.docx (repository) | 69 | 112 / 112 | 0 | pass | 599 |
+| Гаянов_Амир_Ленарович_Разработка проектного решения по автоматизации документооборота в организации.docx (uploaded) | 44 | 59 / 59 | 0 | pass | 325 |
+| нейромаркетинг_Рыбаков.docx (uploaded) | 73 | 84 / 84 | 0 | pass | 383 |
+| 06-_-_-_-_3_-.docx (uploaded) | 60 | 70 / 70 | 0 | pass | 176 |
+
+Table-page contact sheets were inspected across all 17 outputs. All pages of
+the three delivered cases (repository example 1, uploaded bad-width coursework,
+neuromarketing) and Rybakov third-year coursework were also inspected. The three
+deliverables were independently rendered using the document rendering tool.
+Full-size checks covered example 1 table 2.2.3 and both halves of 2.3.1.
+
+- Repository example 1: 112 original data rows and all 24 source/note paragraphs
+  retained; table 2.2.3 is whole on page 46 without column numbers. Table 2.3.1
+  has seven aligned columns on pages 50-51 and a complete source after its tail.
+- Uploaded Bondarev: table 1.2.1 stays whole on page 17 without a numeric row;
+  1.3.2 fills page 25 with three rows and continues on page 26 with two rows and
+  its source. Appendix A shares page 62 with the section heading and continues
+  on page 63. The explicitly accepted source geometry of 2.3.3 remains.
+- Neuromarketing: all 84 data rows retained. Appendix 1 continues on page 68;
+  appendix 2 fits page 71 without numbers; appendix 3 continues on page 73.
+- Bad-width coursework: all 31 data rows retained; all six tables remain within
+  the printable page width and have no unnecessary number row.
+- A separate final numeric-header inventory found no independent ordinary
+  single-page tables retaining the index header. Remaining appendix headers
+  belong to visually verified multi-page continuations.
+
+All rendered gates are clean. The existing Criteria-17 quote/source-note
+normalization discrepancy remains the sole content-audit exception (16/17
+content audits pass). Zero gate failures is not a claim of universal visual
+perfection: authored very narrow year/number columns still wrap, and unsafe or
+poorly mapped tables can retain whitespace because trials are conservative.
+No native Microsoft Word or Railway-container render was available. Runtime
+was 9-599 seconds per input in this environment, partly under three concurrent
+jobs; this is not a production latency benchmark or a speedup claim.
+
+Release scope is formatter/validation/tests/documentation only. There is no
+schema migration and no change to DATABASE_URL, Postgres, persistent volumes,
+billing, authentication, Telegram handlers, or Railway service configuration.
