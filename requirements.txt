@@ -3,6 +3,7 @@ python-dotenv
 python-docx
 sqlalchemy
 psycopg2-binary
+psycopg[binary]==3.3.6
 fastapi
 uvicorn
 httpx
